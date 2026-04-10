@@ -1,7 +1,8 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9.1 (GOLD FULL ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9.2 (GOLD FULL ENGINE)
 # Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
 # Inventario, Scraper Dólar Real & Borrado Quirúrgico.
+# Mejoras: Motor Anti-Ceros y Sesión de Navegación Real.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -13,7 +14,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9.1 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9.2 Gold")
 
 # --- 🔑 CREDENCIALES (Configuración Maestra) ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -55,7 +56,7 @@ class InventarioItem(BaseModel):
 # ==========================================
 def obtener_dolar_hoy():
     """Consulta el valor real del dólar en México vía Google Finance."""
-    print("💹 [MONEDA] Consultando tipo de cambio real...")
+    print("\n--- 💹 [MONEDA] ACTUALIZANDO TIPO DE CAMBIO ---")
     try:
         url = "https://www.google.com/search?q=precio+dolar+mexico+hoy"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
@@ -63,56 +64,68 @@ def obtener_dolar_hoy():
         soup = BeautifulSoup(res.text, "html.parser")
         valor_raw = soup.find("div", class_="BNeawe iBp4i AP7Wnd").text
         valor = float(valor_raw.split()[0].replace(",", ""))
-        print(f"✔️ [MONEDA] Dólar actualizado: ${valor} MXN")
+        print(f"✔️ [MONEDA] Precio detectado: ${valor} MXN")
         return valor
     except Exception as e:
-        print(f"⚠️ [MONEDA] Falló scraping ({e}). Usando respaldo: 18.00")
+        print(f"⚠️ [MONEDA] Error: {e}. Usando respaldo: 18.00")
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MULTI-SELECTOR)
+# 📈 MOTOR DE PRECIOS PRO (SISTEMA DE RESPALDO)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
     
-    # Normalización de nombres para consolas
+    # Normalización para búsqueda exacta
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # User-Agent moderno para evitar bloqueos
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    # Headers de navegación real
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
     
-    print(f"🔍 [SCRAPER] Buscando valor para: {nombre} ({consola_web})")
+    print(f"\n--- 🔍 [SCRAPER] INICIANDO CONSULTA: {nombre} ({consola_web}) ---")
     
     try:
-        res = requests.get(url_search, headers=headers, timeout=10)
+        session = requests.Session()
+        res = session.get(url_search, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. Si caemos en una lista de resultados, entramos al primer link
+        # 1. ¿Es una lista de resultados? Entrar al primero
         tabla = soup.select_one("#products_table")
         if tabla:
             link = tabla.select_one("td.title a")
             if link:
-                print(f"🔗 [SCRAPER] Lista detectada, entrando a: {link.text}")
-                res = requests.get("https://www.pricecharting.com" + link['href'], headers=headers)
+                print(f"🔗 [SCRAPER] Entrando al link: {link.text}")
+                res = session.get("https://www.pricecharting.com" + link['href'], headers=headers)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 2. MOTOR DE BÚSQUEDA DINÁMICO (Evita ceros)
-        def extraer_valor(clases_o_ids):
-            for selector in clases_o_ids:
+        # 2. MOTOR DE EXTRACCIÓN CON FALLBACK (Anti-Ceros)
+        def extraer_precio(ids_y_clases):
+            for selector in ids_y_clases:
                 nodo = soup.select_one(selector)
                 if nodo and "$" in nodo.text:
                     try:
-                        return float(nodo.text.strip().replace("$", "").replace(",", ""))
+                        valor = float(nodo.text.strip().replace("$", "").replace(",", ""))
+                        if valor > 0: return valor
                     except: continue
             return 0.0
 
-        # Buscamos en los 3 selectores más probables de la web
-        p_loose = extraer_valor(["#used_price", ".price.js-price", "#console-prices .used_price"])
-        p_cib   = extraer_valor(["#cib_price", ".cib_price", "#console-prices .cib_price"])
-        p_new   = extraer_valor(["#new_price", ".new_price", "#console-prices .new_price"])
+        # Selectores jerarquizados (de más probable a menos probable)
+        p_loose = extraer_precio(["#used_price", ".price.js-price", "table.price_details .price"])
+        p_cib   = extraer_precio(["#cib_price", ".cib_price", "table.price_details tr:nth-child(2) .price"])
+        p_new   = extraer_precio(["#new_price", ".new_price", "table.price_details tr:nth-child(3) .price"])
+        
+        # Si fallan los selectores por ID, barremos por clase span genérica
+        if p_loose == 0:
+            spans = soup.find_all("span", class_="price")
+            if len(spans) >= 1: p_loose = float(spans[0].text.strip().replace("$", "").replace(",", ""))
+
+        print(f"💰 [SCRAPER] Resultados USD: Loose: {p_loose}, CIB: {p_cib}, New: {p_new}")
         
         return {
             "mxn": {
@@ -128,13 +141,12 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         return {"error": str(e)}
 
 # ==========================================
-# 📥 MOTOR DE EXTRACCIÓN MULTIMEDIA & WHATSAPP
+# 📥 MOTOR MULTIMEDIA & WHATSAPP (COMPLETO)
 # ==========================================
 def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_default: str):
-    print(f"[Descarga] Solicitando archivo a Meta... ID: {media_id}")
+    print(f"\n--- 📥 [MULTIMEDIA] DESCARGANDO ID: {media_id} ---")
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
-    
     res_info = requests.get(url_info, headers=headers)
     if res_info.status_code == 200:
         media_url = res_info.json().get("url")
@@ -144,27 +156,25 @@ def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_defaul
             timestamp = int(datetime.now().timestamp())
             ext = mimetypes.guess_extension(mime_type) or extension_default
             file_path = f"archivo_{timestamp}{ext}"
-            
             try:
                 supabase.storage.from_("multimedia").upload(file_path, file_bytes, {"content-type": mime_type})
                 public_url = supabase.storage.from_("multimedia").get_public_url(file_path)
-                print(f"[NUBE] ✔️ Multimedia guardada: {public_url}")
+                print(f"✔️ [MULTIMEDIA] Guardado en: {public_url}")
                 return public_url
-            except Exception as e:
-                print(f"[ERROR NUBE] Falló subida: {e}")
+            except Exception as e: print(f"❌ Error Supabase: {e}")
     return None
 
 def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
+    print(f"🚀 [WHATSAPP] Enviando a {telefono_destino}...")
     url = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
     try:
         requests.post(url, headers=headers, json=payload)
-    except Exception as e:
-        print(f"[API META] ❌ Error de red: {e}")
+    except Exception as e: print(f"❌ Error Meta API: {e}")
 
 # ==========================================
-# 🤖 CEREBRO VIRTUAL (BOT)
+# 🤖 BOT & WHATSAPP ENDPOINTS
 # ==========================================
 def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
     texto = texto_entrante.lower().strip()
@@ -180,8 +190,16 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
         supabase.table('prospectos').insert(datos_guardar).execute()
         disparar_whatsapp_real(telefono, respuesta)
 
+@app.post("/api/enviar_mensaje")
+def enviar_mensaje_whatsapp(datos: MensajeSaliente):
+    res = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).order('id', desc=True).limit(1).execute()
+    tel = res.data[0]['telefono'] if res.data else None
+    supabase.table('prospectos').insert({"nombre": datos.cliente, "telefono": tel, "origen": "WHATSAPP", "mensaje": f"TÚ: {datos.texto}", "columna": "Respondió"}).execute()
+    if tel: disparar_whatsapp_real(tel, datos.texto)
+    return {"status": "enviado"}
+
 # ==========================================
-# 🌐 RUTAS DE API (GODOT -> PYTHON)
+# 📦 INVENTARIO & DB
 # ==========================================
 @app.get("/api/cargar_todo")
 def cargar_todo():
@@ -192,45 +210,24 @@ def cargar_todo():
     for fila in res_prospectos.data: ultimos[fila['nombre']] = fila
     return {"columnas": columnas, "prospectos": list(ultimos.values())}
 
-@app.post("/api/historial_chat")
-def historial_chat(datos: dict):
-    res = supabase.table('prospectos').select('mensaje').eq('nombre', datos["nombre"]).order('id', desc=False).execute()
-    historial = []
-    for fila in res.data:
-        texto = fila['mensaje']
-        es_mio = texto.startswith("TÚ: ")
-        if es_mio: texto = texto.replace("TÚ: ", "", 1)
-        historial.append({"texto": texto, "es_mio": es_mio})
-    return {"historial": historial}
-
-@app.post("/api/enviar_mensaje")
-def enviar_mensaje_whatsapp(datos: MensajeSaliente):
-    res = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).order('id', desc=True).limit(1).execute()
-    tel = res.data[0]['telefono'] if res.data else None
-    supabase.table('prospectos').insert({"nombre": datos.cliente, "telefono": tel, "origen": "WHATSAPP", "mensaje": f"TÚ: {datos.texto}", "columna": "Respondió"}).execute()
-    if tel: disparar_whatsapp_real(tel, datos.texto)
-    return {"status": "enviado"}
-
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
     try:
         supabase.table('inventario').insert(datos.dict()).execute()
-        print(f"📦 [INVENTARIO] ✔️ Guardado: {datos.nombre}")
+        print(f"✔️ [DB] Inventario Guardado: {datos.nombre}")
         return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "detalle": str(e)}
+    except Exception as e: return {"status": "error", "detalle": str(e)}
 
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict):
     try:
         supabase.table('inventario').delete().eq('nombre', datos["nombre"]).eq('consola', datos["consola"]).execute()
-        print(f"🗑️ [DB] Item borrado exitosamente.")
+        print(f"🗑️ [DB] Item borrado: {datos['nombre']}")
         return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "detalle": str(e)}
+    except Exception as e: return {"status": "error", "detalle": str(e)}
 
 # ==========================================
-# 🔗 WEBHOOK DE META (CON INGESTA MULTIMEDIA)
+# 🔗 WEBHOOK (RECEPCIÓN)
 # ==========================================
 @app.get("/webhook")
 def verificar_webhook(request: Request):
@@ -245,16 +242,12 @@ async def recibir_mensaje_meta(request: Request):
         if "entry" in datos and "changes" in datos["entry"][0]:
             valor = datos["entry"][0]["changes"][0]["value"]
             if "messages" in valor:
-                msg = valor["messages"][0]
-                contact = valor["contacts"][0]
-                nombre = contact["profile"]["name"]
-                tel = msg["from"]
+                msg, contact = valor["messages"][0], valor["contacts"][0]
+                nombre, tel = contact["profile"]["name"], msg["from"]
                 if tel.startswith("521"): tel = "52" + tel[3:]
                 
-                tipo = msg.get("type", "text")
-                texto = ""
-                if tipo == "text":
-                    texto = msg["text"]["body"]
+                tipo, texto = msg.get("type", "text"), ""
+                if tipo == "text": texto = msg["text"]["body"]
                 elif tipo in ["image", "video", "document", "audio"]:
                     enlace = descargar_y_subir_multimedia(msg[tipo]["id"], msg[tipo].get("mime_type", ""), ".bin")
                     texto = f"[{tipo.upper()}] recibida: {enlace}"
@@ -266,7 +259,7 @@ async def recibir_mensaje_meta(request: Request):
                     procesar_respuesta_bot(nombre, tel, texto)
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
     except Exception as e:
-        print(f"[ERROR WEBHOOK] {e}")
+        print(f"❌ [WEBHOOK] Error: {e}")
         return PlainTextResponse(content="ERROR", status_code=500)
 
 if __name__ == "__main__":
