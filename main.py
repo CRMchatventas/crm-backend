@@ -1,20 +1,21 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.3 (GOLD CLOUD + PRICECHARTING)
-# Funciones: WhatsApp, Multimedia, Bot, Inventario y Scraper de Precios
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9 (GOLD FULL ENGINE)
+# Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
+# Inventario, Scraper Dólar Real & Borrado Quirúrgico.
 # ==========================================
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import uvicorn
 import requests
 import mimetypes
-from bs4 import BeautifulSoup # <-- El robot lector
+from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.3 Cloud")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9 Gold")
 
-# --- 🔑 TUS LLAVES SECRETAS (Mantenidas de tu V5.2) ---
+# --- 🔑 CREDENCIALES (Configuración Maestra) ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
 META_PHONE_ID = "975963255609853"
 SUPABASE_URL = "https://hugvthovfcuuexaiuiqc.supabase.co"
@@ -36,10 +37,6 @@ class MensajeSaliente(BaseModel):
     cliente: str
     texto: str
 
-class CampanaMasiva(BaseModel):
-    mensaje: str
-    columna_filtro: str
-
 class InventarioItem(BaseModel):
     nombre: str
     consola: str
@@ -54,39 +51,70 @@ class InventarioItem(BaseModel):
     descripcion_detallada: str
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS DE MERCADO (SCRAPER)
+# 💵 MOTOR DE DIVISAS (TIPO DE CAMBIO REAL)
 # ==========================================
-@app.get("/api/consultar_precio")
-def api_consultar_precio(nombre: str):
-    print(f"🔍 [SCRAPER] Buscando valor actual para: {nombre}")
-    query = nombre.replace(" ", "+")
-    url = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
-    
-    # User-Agent para evitar que PriceCharting nos bloquee como bots
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-    
+def obtener_dolar_hoy():
+    """Consulta el valor real del dólar en México."""
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            # Buscamos los IDs que PriceCharting usa para sus tablas de precios
-            loose = soup.select_one("#used_price")
-            cib = soup.select_one("#cib_price")
-            new = soup.select_one("#new_price")
-            
-            return {
-                "loose": loose.text.strip() if loose else "N/A",
-                "cib": cib.text.strip() if cib else "N/A",
-                "new": new.text.strip() if new else "N/A"
-            }
-    except Exception as e:
-        print(f"❌ [SCRAPER] Falló la consulta: {e}")
-    
-    return {"loose": "Error", "cib": "Error", "new": "Error"}
+        url = "https://www.google.com/search?q=precio+dolar+mexico+hoy"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+        valor_raw = soup.find("div", class_="BNeawe iBp4i AP7Wnd").text
+        valor = float(valor_raw.split()[0].replace(",", ""))
+        print(f"💹 [MONEDA] Dólar actualizado: ${valor} MXN")
+        return valor
+    except:
+        print("⚠️ [MONEDA] Falló scraping. Usando respaldo: 18.00")
+        return 18.00
 
 # ==========================================
-# 📥 MOTOR DE EXTRACCIÓN MULTIMEDIA
+# 📈 MOTOR DE PRECIOS PRO (PRICECHARTING)
+# ==========================================
+@app.get("/api/consultar_precio")
+def api_consultar_precio(nombre: str, consola: str = ""):
+    tipo_cambio = obtener_dolar_hoy()
+    consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
+    query = f"{nombre} {consola_web}".replace(" ", "+")
+    url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    print(f"🔍 [SCRAPER] Consultando: {nombre} ({consola_web})")
+    
+    try:
+        res = requests.get(url_search, headers=headers, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Si hay lista de resultados, entramos al primero
+        tabla = soup.select_one("#products_table")
+        if tabla:
+            link = tabla.select_one("td.title a")
+            if link:
+                res = requests.get("https://www.pricecharting.com" + link['href'], headers=headers)
+                soup = BeautifulSoup(res.text, 'html.parser')
+
+        def extraer(selector):
+            nodo = soup.select_one(selector)
+            return float(nodo.text.strip().replace("$", "").replace(",", "")) if nodo else 0.0
+
+        p_loose = extraer("#used_price")
+        p_cib = extraer("#cib_price")
+        p_new = extraer("#new_price")
+        
+        return {
+            "mxn": {
+                "loose": round(p_loose * tipo_cambio, 2),
+                "cib": round(p_cib * tipo_cambio, 2),
+                "new": round(p_new * tipo_cambio, 2)
+            },
+            "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
+            "tipo_cambio": tipo_cambio
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ==========================================
+# 📥 MOTOR DE EXTRACCIÓN MULTIMEDIA & WHATSAPP
 # ==========================================
 def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_default: str):
     print(f"[Descarga] Solicitando archivo a Meta... ID: {media_id}")
@@ -104,18 +132,14 @@ def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_defaul
             file_path = f"archivo_{timestamp}{ext}"
             
             try:
-                supabase.storage.from_("multimedia").upload(
-                    file_path, file_bytes, {"content-type": mime_type}
-                )
+                supabase.storage.from_("multimedia").upload(file_path, file_bytes, {"content-type": mime_type})
                 public_url = supabase.storage.from_("multimedia").get_public_url(file_path)
+                print(f"[NUBE] ✔️ Multimedia guardada: {public_url}")
                 return public_url
             except Exception as e:
-                print(f"[ERROR NUBE] Falló la subida: {e}")
+                print(f"[ERROR NUBE] Falló subida: {e}")
     return None
 
-# ==========================================
-# 📡 CAÑÓN DE DISPARO A META
-# ==========================================
 def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
     url = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
@@ -123,7 +147,7 @@ def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
     try:
         requests.post(url, headers=headers, json=payload)
     except Exception as e:
-        print(f"[API META] ❌ Error de envío: {e}")
+        print(f"[API META] ❌ Error de red: {e}")
 
 # ==========================================
 # 🤖 CEREBRO VIRTUAL (BOT)
@@ -134,8 +158,8 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
     if "hola" in texto or "info" in texto or "precio" in texto:
         respuesta = "¡Hola! 🎮 Bienvenido a Fantasy Games.\n\nElige una opción:\n*1.* 👾 Ver Catálogo\n*2.* 📍 Ubicación\n*3.* 🙋‍♂️ Hablar con un asesor"
     elif texto == "1": respuesta = "🕹️ *Zelda TotK:* $850\n*Mario Kart 8:* $700"
-    elif texto == "2": respuesta = "📍 Estamos en el Centro. Hacemos entregas diarias."
-    elif texto == "3": respuesta = "¡Claro! 👨‍💻 Un compañero te atenderá pronto."
+    elif texto == "2": respuesta = "📍 Estamos en el Centro de Aguascalientes."
+    elif texto == "3": respuesta = "¡Claro! 👨‍💻 Enseguida te atiende un humano."
 
     if respuesta:
         datos_guardar = {"nombre": cliente, "telefono": telefono, "origen": "WHATSAPP", "mensaje": f"TÚ: [BOT] {respuesta}", "columna": "Bandeja Nueva"}
@@ -165,34 +189,28 @@ def historial_chat(datos: dict):
         historial.append({"texto": texto, "es_mio": es_mio})
     return {"historial": historial}
 
-@app.post("/api/actualizar_estado")
-def actualizar_estado(datos: ProspectoUpdate):
-    supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('nombre', datos.nombre).execute()
-    return {"status": "ok"}
-
-@app.post("/api/actualizar_notas")
-def actualizar_notas(datos: NotaUpdate):
-    supabase.table('prospectos').update({'notas': datos.notas, 'etiquetas': datos.etiquetas}).eq('nombre', datos.nombre).execute()
-    return {"status": "ok"}
-
-@app.post("/api/borrar_prospecto")
-def borrar_prospecto(datos: dict):
-    supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos["nombre"]).execute()
-    return {"status": "ok"}
-
 @app.post("/api/enviar_mensaje")
 def enviar_mensaje_whatsapp(datos: MensajeSaliente):
     res = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).order('id', desc=True).limit(1).execute()
-    telefono_cliente = res.data[0]['telefono'] if res.data else None
-    datos_guardar = {"nombre": datos.cliente, "telefono": telefono_cliente, "origen": "WHATSAPP", "mensaje": f"TÚ: {datos.texto}", "columna": "Respondió"}
-    supabase.table('prospectos').insert(datos_guardar).execute()
-    if telefono_cliente: disparar_whatsapp_real(telefono_cliente, datos.texto)
+    tel = res.data[0]['telefono'] if res.data else None
+    supabase.table('prospectos').insert({"nombre": datos.cliente, "telefono": tel, "origen": "WHATSAPP", "mensaje": f"TÚ: {datos.texto}", "columna": "Respondió"}).execute()
+    if tel: disparar_whatsapp_real(tel, datos.texto)
     return {"status": "enviado"}
 
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
     try:
         supabase.table('inventario').insert(datos.dict()).execute()
+        print(f"📦 [INVENTARIO] ✔️ Guardado: {datos.nombre}")
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+@app.post("/api/borrar_item")
+def borrar_item(datos: dict):
+    try:
+        supabase.table('inventario').delete().eq('nombre', datos["nombre"]).eq('consola', datos["consola"]).execute()
+        print(f"🗑️ [DB] Item borrado exitosamente.")
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "detalle": str(e)}
@@ -202,8 +220,7 @@ def guardar_inventario(datos: InventarioItem):
 # ==========================================
 @app.get("/webhook")
 def verificar_webhook(request: Request):
-    VERIFY_TOKEN = "mi_contrasena_secreta_fantasy"
-    if request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
+    if request.query_params.get("hub.verify_token") == "mi_contrasena_secreta_fantasy":
         return PlainTextResponse(content=request.query_params.get("hub.challenge"), status_code=200)
     return PlainTextResponse(content="CRM Fantasy Activo.", status_code=200)
 
@@ -217,31 +234,22 @@ async def recibir_mensaje_meta(request: Request):
                 msg = valor["messages"][0]
                 contact = valor["contacts"][0]
                 nombre = contact["profile"]["name"]
-                telefono = msg["from"]
-                
-                # Normalización de teléfono México
-                if telefono.startswith("521"): telefono = "52" + telefono[3:]
+                tel = msg["from"]
+                if tel.startswith("521"): tel = "52" + tel[3:]
                 
                 tipo = msg.get("type", "text")
                 texto = ""
                 if tipo == "text":
                     texto = msg["text"]["body"]
                 elif tipo in ["image", "video", "document", "audio"]:
-                    media_id = msg[tipo]["id"]
-                    mime = msg[tipo].get("mime_type", "")
-                    exts = {"image": ".jpg", "video": ".mp4", "document": ".pdf", "audio": ".ogg"}
-                    enlace = descargar_y_subir_multimedia(media_id, mime, exts.get(tipo, ".bin"))
-                    texto = f"[{tipo.upper()}] recibida: {enlace}" if enlace else f"[{tipo.upper()}] Error en descarga."
+                    enlace = descargar_y_subir_multimedia(msg[tipo]["id"], msg[tipo].get("mime_type", ""), ".bin")
+                    texto = f"[{tipo.upper()}] recibida: {enlace}"
                 
-                # Guardar en base de datos
                 res = supabase.table('prospectos').select('columna').eq('nombre', nombre).order('id', desc=True).limit(1).execute()
-                columna = res.data[0]['columna'] if res.data else "Bandeja Nueva"
-                supabase.table('prospectos').insert({"nombre": nombre, "telefono": telefono, "origen": "WHATSAPP", "mensaje": texto, "columna": columna}).execute()
-                
-                # Bot auto-respuesta
-                if columna in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text":
-                    procesar_respuesta_bot(nombre, telefono, texto)
-                    
+                col = res.data[0]['columna'] if res.data else "Bandeja Nueva"
+                supabase.table('prospectos').insert({"nombre": nombre, "telefono": tel, "origen": "WHATSAPP", "mensaje": texto, "columna": col}).execute()
+                if col in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text":
+                    procesar_respuesta_bot(nombre, tel, texto)
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
     except Exception as e:
         print(f"[ERROR WEBHOOK] {e}")
