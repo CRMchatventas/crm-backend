@@ -1,5 +1,5 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9 (GOLD FULL ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9.1 (GOLD FULL ENGINE)
 # Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
 # Inventario, Scraper Dólar Real & Borrado Quirúrgico.
 # ==========================================
@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9.1 Gold")
 
 # --- 🔑 CREDENCIALES (Configuración Maestra) ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -54,52 +54,65 @@ class InventarioItem(BaseModel):
 # 💵 MOTOR DE DIVISAS (TIPO DE CAMBIO REAL)
 # ==========================================
 def obtener_dolar_hoy():
-    """Consulta el valor real del dólar en México."""
+    """Consulta el valor real del dólar en México vía Google Finance."""
+    print("💹 [MONEDA] Consultando tipo de cambio real...")
     try:
         url = "https://www.google.com/search?q=precio+dolar+mexico+hoy"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         valor_raw = soup.find("div", class_="BNeawe iBp4i AP7Wnd").text
         valor = float(valor_raw.split()[0].replace(",", ""))
-        print(f"💹 [MONEDA] Dólar actualizado: ${valor} MXN")
+        print(f"✔️ [MONEDA] Dólar actualizado: ${valor} MXN")
         return valor
-    except:
-        print("⚠️ [MONEDA] Falló scraping. Usando respaldo: 18.00")
+    except Exception as e:
+        print(f"⚠️ [MONEDA] Falló scraping ({e}). Usando respaldo: 18.00")
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (PRICECHARTING)
+# 📈 MOTOR DE PRECIOS PRO (MULTI-SELECTOR)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
+    
+    # Normalización de nombres para consolas
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
-    headers = {"User-Agent": "Mozilla/5.0"}
     
-    print(f"🔍 [SCRAPER] Consultando: {nombre} ({consola_web})")
+    # User-Agent moderno para evitar bloqueos
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
+    print(f"🔍 [SCRAPER] Buscando valor para: {nombre} ({consola_web})")
     
     try:
         res = requests.get(url_search, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Si hay lista de resultados, entramos al primero
+        # 1. Si caemos en una lista de resultados, entramos al primer link
         tabla = soup.select_one("#products_table")
         if tabla:
             link = tabla.select_one("td.title a")
             if link:
+                print(f"🔗 [SCRAPER] Lista detectada, entrando a: {link.text}")
                 res = requests.get("https://www.pricecharting.com" + link['href'], headers=headers)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
-        def extraer(selector):
-            nodo = soup.select_one(selector)
-            return float(nodo.text.strip().replace("$", "").replace(",", "")) if nodo else 0.0
+        # 2. MOTOR DE BÚSQUEDA DINÁMICO (Evita ceros)
+        def extraer_valor(clases_o_ids):
+            for selector in clases_o_ids:
+                nodo = soup.select_one(selector)
+                if nodo and "$" in nodo.text:
+                    try:
+                        return float(nodo.text.strip().replace("$", "").replace(",", ""))
+                    except: continue
+            return 0.0
 
-        p_loose = extraer("#used_price")
-        p_cib = extraer("#cib_price")
-        p_new = extraer("#new_price")
+        # Buscamos en los 3 selectores más probables de la web
+        p_loose = extraer_valor(["#used_price", ".price.js-price", "#console-prices .used_price"])
+        p_cib   = extraer_valor(["#cib_price", ".cib_price", "#console-prices .cib_price"])
+        p_new   = extraer_valor(["#new_price", ".new_price", "#console-prices .new_price"])
         
         return {
             "mxn": {
@@ -111,6 +124,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             "tipo_cambio": tipo_cambio
         }
     except Exception as e:
+        print(f"❌ [SCRAPER] Error crítico: {e}")
         return {"error": str(e)}
 
 # ==========================================
