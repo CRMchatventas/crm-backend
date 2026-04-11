@@ -54,6 +54,9 @@ def obtener_dolar_hoy():
 # ==========================================
 # 📈 MOTOR DE PRECIOS PRO (NIVEL RESIDENCIAL)
 # ==========================================
+# ==========================================
+# 📈 MOTOR DE PRECIOS PRO (MODO PREMIUM RESIDENCIAL)
+# ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
@@ -62,16 +65,20 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # 🛡️ LA LLAVE MAESTRA: Usamos ScraperAPI para simular ser un humano en una casa normal
-    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}"
+    # 🔥 ACTIVAMOS MODO PREMIUM Y RENDER JS EN SCRAPERAPI 🔥
+    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true&render=true"
     
-    print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
+    print(f"\n--- 🔍 [SCRAPER PREMIUM] CONSULTANDO: {nombre} ({consola_web}) ---")
     
     try:
-        res = requests.get(url_proxy, timeout=30) # Damos 30 seg porque a veces los proxies son un poco lentos
+        res = requests.get(url_proxy, timeout=45) # Le damos más tiempo porque renderizar JS toma unos segundos
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. ¿Es una lista? Buscamos el link correcto
+        # 🕵️‍♂️ RADAR: ¿Qué página estamos viendo realmente?
+        titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
+        print(f"📄 [RADAR] La página detectada es: {titulo}")
+        
+        # 1. ¿Es una lista de resultados? Buscamos el link correcto
         tabla = soup.select_one("#products_table")
         if tabla:
             enlaces = tabla.select("td.title a")
@@ -83,10 +90,10 @@ def api_consultar_precio(nombre: str, consola: str = ""):
                         break
                 
                 link_juego = "https://www.pricecharting.com" + link_final['href']
-                print(f"🔗 [SCRAPER PRO] Entrando a ficha: {link_juego}")
+                print(f"🔗 [SCRAPER PREMIUM] Entrando a ficha oficial: {link_juego}")
                 
-                # Segunda llamada con ScraperAPI
-                res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}", timeout=30)
+                # Segunda llamada activando el Premium
+                res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true&render=true", timeout=45)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
         # 2. EXTRACCIÓN ROBUSTA
@@ -118,7 +125,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             "tipo_cambio": tipo_cambio
         }
     except Exception as e:
-        print(f"❌ [SCRAPER] Error de ScraperAPI: {e}")
+        print(f"❌ [SCRAPER] Error crítico de API: {e}")
         return {"error": str(e)}
 
 # ==========================================
