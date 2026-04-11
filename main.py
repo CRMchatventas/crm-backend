@@ -57,6 +57,9 @@ def obtener_dolar_hoy():
 # ==========================================
 # 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.10)
 # ==========================================
+# ==========================================
+# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.11)
+# ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
@@ -65,7 +68,6 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # 🛡️ Premium activado, Render desactivado (más rápido y HTML más limpio)
     url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true"
     
     print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
@@ -77,28 +79,30 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
         print(f"📄 [RADAR] Página detectada: {titulo}")
         
-        # 1. MÉTODO FRANCOTIRADOR: Buscar el link del juego directo sin importar la tabla
+        # 1. MÉTODO FRANCOTIRADOR CORREGIDO (Evitar dominio duplicado)
         link_juego = None
         for a in soup.find_all('a', href=True):
-            if '/game/' in a['href']:
-                # Priorizamos que el link tenga el nombre de la consola para ser exactos
-                if consola_web.lower().replace(' ', '-') in a['href'].lower():
-                    link_juego = "https://www.pricecharting.com" + a['href']
+            href = a['href']
+            if '/game/' in href:
+                # Prioridad 1: Que tenga la consola en el link
+                if consola_web.lower().replace(' ', '-') in href.lower():
+                    link_juego = href if href.startswith("http") else "https://www.pricecharting.com" + href
                     break
         
-        # Si no lo encontró con la consola exacta, agarra el primer juego de la lista
+        # Prioridad 2: Si no coincidió la consola, agarra el primer juego de la lista
         if not link_juego:
             for a in soup.find_all('a', href=True):
-                if '/game/' in a['href']:
-                    link_juego = "https://www.pricecharting.com" + a['href']
+                href = a['href']
+                if '/game/' in href:
+                    link_juego = href if href.startswith("http") else "https://www.pricecharting.com" + href
                     break
 
         if link_juego:
-            print(f"🔗 [FRANCOTIRADOR] Link oficial encontrado: {link_juego}")
+            print(f"🔗 [FRANCOTIRADOR] Link oficial limpio: {link_juego}")
             res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true", timeout=45)
             soup = BeautifulSoup(res.text, 'html.parser')
         else:
-            print("⚠️ [FRANCOTIRADOR] No se encontraron links. Buscando precio en la página actual.")
+            print("⚠️ [FRANCOTIRADOR] No se encontraron links. Buscando en la página principal.")
 
         # 2. EXTRACCIÓN SÚPER AGRESIVA
         def extraer_numero_puro(id_css):
@@ -114,7 +118,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_numero_puro("cib_price")
         p_new   = extraer_numero_puro("new_price")
         
-        # Respaldo final si cambiaron los IDs
+        # Respaldo final si no encuentra por ID
         if p_loose == 0.0:
             spans = soup.find_all("span", class_="price")
             numeros = []
