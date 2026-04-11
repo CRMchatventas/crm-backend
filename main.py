@@ -1,7 +1,7 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9.7 (GOLD FULL ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9.8 (GOLD FULL ENGINE)
 # Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
-# Inventario, Scraper Proxy Fantasma & Borrado Quirúrgico.
+# Inventario, Scraper Profesional (ScraperAPI) & Borrado.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -9,53 +9,37 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 import mimetypes
-import urllib.parse  # <-- LIBRERÍA VITAL PARA EL PROXY FANTASMA
+import urllib.parse
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9.7 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9.8 Gold")
 
-# --- 🔑 CREDENCIALES (Configuración Maestra) ---
+# --- 🔑 CREDENCIALES ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
 META_PHONE_ID = "975963255609853"
 SUPABASE_URL = "https://hugvthovfcuuexaiuiqc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1Z3Z0aG92ZmN1dWV4YWl1aXFjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc2Mjk1MCwiZXhwIjoyMDkxMzM4OTUwfQ.Fzi0v4ZAV0jiXnk18unmFfY8nkub6nwNnsQ3pbe-zz4"
 
+# 🔴 PON AQUÍ TU LLAVE GRATUITA DE SCRAPERAPI 🔴
+SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 📦 MODELOS DE DATOS ---
-class ProspectoUpdate(BaseModel):
-    nombre: str
-    nueva_columna: str
-
-class NotaUpdate(BaseModel):
-    nombre: str
-    notas: str
-    etiquetas: str
-
-class MensajeSaliente(BaseModel):
-    cliente: str
-    texto: str
-
+class ProspectoUpdate(BaseModel): nombre: str; nueva_columna: str
+class NotaUpdate(BaseModel): nombre: str; notas: str; etiquetas: str
+class MensajeSaliente(BaseModel): cliente: str; texto: str
 class InventarioItem(BaseModel):
-    nombre: str
-    consola: str
-    precio: float
-    stock: int
-    codigo_barras: str
-    url_portada: str
-    estado_general: str
-    tiene_caja: bool
-    tiene_manual: bool
-    es_portada_original: bool
-    descripcion_detallada: str
+    nombre: str; consola: str; precio: float; stock: int
+    codigo_barras: str; url_portada: str; estado_general: str
+    tiene_caja: bool; tiene_manual: bool; es_portada_original: bool; descripcion_detallada: str
 
 # ==========================================
-# 💵 MOTOR DE DIVISAS (API OFICIAL)
+# 💵 MOTOR DE DIVISAS
 # ==========================================
 def obtener_dolar_hoy():
-    """Consulta el valor real del dólar en México usando una API estable."""
     print("\n--- 💹 [MONEDA] CONSULTANDO TIPO DE CAMBIO ---")
     try:
         res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
@@ -68,29 +52,26 @@ def obtener_dolar_hoy():
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (PROXY ALLORIGINS)
+# 📈 MOTOR DE PRECIOS PRO (NIVEL RESIDENCIAL)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
     
-    # Normalización para búsqueda web
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # ENCRIPTACIÓN PROXY: Saltamos Cloudflare usando AllOrigins en modo RAW
-    url_codificada = urllib.parse.quote(url_search, safe='')
-    url_proxy = f"https://api.allorigins.win/raw?url={url_codificada}"
+    # 🛡️ LA LLAVE MAESTRA: Usamos ScraperAPI para simular ser un humano en una casa normal
+    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}"
     
-    print(f"\n--- 🔍 [PROXY SCRAPER] CONSULTANDO: {nombre} ({consola_web}) ---")
+    print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
     
     try:
-        # Petición a través del proxy
-        res = requests.get(url_proxy, timeout=15)
+        res = requests.get(url_proxy, timeout=30) # Damos 30 seg porque a veces los proxies son un poco lentos
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. ¿Es una lista de resultados? Entrar al enlace exacto
+        # 1. ¿Es una lista? Buscamos el link correcto
         tabla = soup.select_one("#products_table")
         if tabla:
             enlaces = tabla.select("td.title a")
@@ -102,14 +83,13 @@ def api_consultar_precio(nombre: str, consola: str = ""):
                         break
                 
                 link_juego = "https://www.pricecharting.com" + link_final['href']
-                print(f"🔗 [PROXY] Redirigiendo a ficha: {link_juego}")
+                print(f"🔗 [SCRAPER PRO] Entrando a ficha: {link_juego}")
                 
-                # Segunda petición por proxy a la página final del juego
-                link_codificado = urllib.parse.quote(link_juego, safe='')
-                res = requests.get(f"https://api.allorigins.win/raw?url={link_codificado}", timeout=15)
+                # Segunda llamada con ScraperAPI
+                res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}", timeout=30)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 2. EXTRACCIÓN ROBUSTA DE DATOS
+        # 2. EXTRACCIÓN ROBUSTA
         def extraer_precio(selectores):
             for sel in selectores:
                 nodo = soup.select_one(sel)
@@ -124,7 +104,6 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_precio(["#cib_price", ".cib_price", "table.price_details tr:nth-child(2) .price"])
         p_new   = extraer_precio(["#new_price", ".new_price", "table.price_details tr:nth-child(3) .price"])
         
-        # Fallback de emergencia por si el diseño de la página cambia
         if p_loose == 0:
             spans = soup.find_all("span", class_="price")
             if len(spans) >= 1: 
@@ -139,7 +118,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             "tipo_cambio": tipo_cambio
         }
     except Exception as e:
-        print(f"❌ [SCRAPER] Error de Proxy/Red: {e}")
+        print(f"❌ [SCRAPER] Error de ScraperAPI: {e}")
         return {"error": str(e)}
 
 # ==========================================
@@ -171,8 +150,7 @@ def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
     url = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
-    try:
-        requests.post(url, headers=headers, json=payload)
+    try: requests.post(url, headers=headers, json=payload)
     except Exception as e: print(f"❌ Error Meta API: {e}")
 
 # ==========================================
