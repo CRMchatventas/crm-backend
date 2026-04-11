@@ -235,17 +235,22 @@ def borrar_prospecto(datos: dict):
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
     try:
-        # 1. Verificamos si el juego ya existe en esa consola
-        res = supabase.table('inventario').select('*').eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+        # Limpiamos espacios basura de las orillas
+        nombre_limpio = datos.nombre.strip()
+        consola_limpia = datos.consola.strip()
+        
+        # 'ilike' busca coincidencias ignorando mayúsculas y minúsculas
+        res = supabase.table('inventario').select('*').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).execute()
         
         if len(res.data) > 0:
-            # 2. Si ya existe, lo ACTUALIZAMOS (Modificar)
-            supabase.table('inventario').update(datos.dict()).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
-            print(f"🔄 [DB] Registro Modificado: {datos.nombre}")
+            # Si ya existe (aunque tenga mayúsculas diferentes), lo ACTUALIZAMOS
+            id_real = res.data[0]['id'] # Tomamos su ID exacto
+            supabase.table('inventario').update(datos.dict()).eq('id', id_real).execute()
+            print(f"🔄 [DB] Registro Modificado: {nombre_limpio}")
         else:
-            # 3. Si no existe, lo INSERTAMOS (Guardar Nuevo)
+            # Si de verdad no existe, lo INSERTAMOS
             supabase.table('inventario').insert(datos.dict()).execute()
-            print(f"✔️ [DB] Nuevo Guardado: {datos.nombre}")
+            print(f"✔️ [DB] Nuevo Guardado: {nombre_limpio}")
             
         return {"status": "ok"}
     except Exception as e: 
