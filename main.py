@@ -1,7 +1,7 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9.5 (GOLD FULL ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9.7 (GOLD FULL ENGINE)
 # Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
-# Inventario, Scraper Anti-Bloqueos & Borrado Quirúrgico.
+# Inventario, Scraper Proxy Fantasma & Borrado Quirúrgico.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -9,11 +9,12 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 import mimetypes
+import urllib.parse  # <-- LIBRERÍA VITAL PARA EL PROXY FANTASMA
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9.5 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9.7 Gold")
 
 # --- 🔑 CREDENCIALES (Configuración Maestra) ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -57,7 +58,6 @@ def obtener_dolar_hoy():
     """Consulta el valor real del dólar en México usando una API estable."""
     print("\n--- 💹 [MONEDA] CONSULTANDO TIPO DE CAMBIO ---")
     try:
-        # Usamos una API financiera gratuita para evitar bloqueos de Google
         res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
         datos = res.json()
         valor = float(datos["rates"]["MXN"])
@@ -68,7 +68,7 @@ def obtener_dolar_hoy():
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (ANTI-CLOUDFLARE)
+# 📈 MOTOR DE PRECIOS PRO (PROXY ALLORIGINS)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
@@ -79,47 +79,37 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # Cabeceras camufladas AAA para simular un navegador real humano
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Upgrade-Insecure-Requests": "1"
-    }
+    # ENCRIPTACIÓN PROXY: Saltamos Cloudflare usando AllOrigins en modo RAW
+    url_codificada = urllib.parse.quote(url_search, safe='')
+    url_proxy = f"https://api.allorigins.win/raw?url={url_codificada}"
     
-    print(f"\n--- 🔍 [SCRAPER] CONSULTANDO: {nombre} ({consola_web}) ---")
+    print(f"\n--- 🔍 [PROXY SCRAPER] CONSULTANDO: {nombre} ({consola_web}) ---")
     
     try:
-        session = requests.Session()
-        res = session.get(url_search, headers=headers, timeout=15)
+        # Petición a través del proxy
+        res = requests.get(url_proxy, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Validar si fuimos bloqueados
-        titulo_pagina = soup.title.text.lower() if soup.title else ""
-        print(f"📄 [PÁGINA] Detectada: {titulo_pagina.strip()}")
-        if "just a moment" in titulo_pagina or "cloudflare" in titulo_pagina:
-            print("❌ [ALERTA] PriceCharting ha bloqueado la petición (Cloudflare).")
-            return {"error": "Bloqueo de seguridad"}
-        
-        # 1. ¿Es una lista de resultados? Entrar al enlace más relevante
+        # 1. ¿Es una lista de resultados? Entrar al enlace exacto
         tabla = soup.select_one("#products_table")
         if tabla:
             enlaces = tabla.select("td.title a")
             if enlaces:
                 link_final = enlaces[0]
-                # Buscar coincidencia exacta de consola en la lista
                 for a in enlaces:
                     if consola_web.lower() in a.text.lower():
                         link_final = a
                         break
-                print(f"🔗 [SCRAPER] Redirigiendo a: {link_final.text.strip()}")
-                res = session.get("https://www.pricecharting.com" + link_final['href'], headers=headers)
+                
+                link_juego = "https://www.pricecharting.com" + link_final['href']
+                print(f"🔗 [PROXY] Redirigiendo a ficha: {link_juego}")
+                
+                # Segunda petición por proxy a la página final del juego
+                link_codificado = urllib.parse.quote(link_juego, safe='')
+                res = requests.get(f"https://api.allorigins.win/raw?url={link_codificado}", timeout=15)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 2. EXTRACCIÓN ROBUSTA
+        # 2. EXTRACCIÓN ROBUSTA DE DATOS
         def extraer_precio(selectores):
             for sel in selectores:
                 nodo = soup.select_one(sel)
@@ -134,7 +124,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_precio(["#cib_price", ".cib_price", "table.price_details tr:nth-child(2) .price"])
         p_new   = extraer_precio(["#new_price", ".new_price", "table.price_details tr:nth-child(3) .price"])
         
-        # Fallback si falla la extracción por IDs
+        # Fallback de emergencia por si el diseño de la página cambia
         if p_loose == 0:
             spans = soup.find_all("span", class_="price")
             if len(spans) >= 1: 
@@ -149,7 +139,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             "tipo_cambio": tipo_cambio
         }
     except Exception as e:
-        print(f"❌ [SCRAPER] Error de Red: {e}")
+        print(f"❌ [SCRAPER] Error de Proxy/Red: {e}")
         return {"error": str(e)}
 
 # ==========================================
