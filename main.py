@@ -51,12 +51,7 @@ def obtener_dolar_hoy():
         print(f"⚠️ [MONEDA] Error API: {e}. Usando respaldo: 18.00")
         return 18.00
 
-# ==========================================
-# 📈 MOTOR DE PRECIOS PRO (EXTRACCIÓN AGRESIVA)
-# ==========================================
-# ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.10)
-# ==========================================
+
 # ==========================================
 # 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.11)
 # ==========================================
@@ -252,6 +247,17 @@ def borrar_item(datos: dict):
         print(f"🗑️ [DB] Item borrado: {datos['nombre']}")
         return {"status": "ok"}
     except Exception as e: return {"status": "error", "detalle": str(e)}
+
+@app.get("/api/cargar_inventario")
+def cargar_inventario():
+    try:
+        # Trae toda la tabla de inventario, ordenada por nombre alfabéticamente
+        res = supabase.table('inventario').select('*').order('nombre', desc=False).execute()
+        print(f"📦 [DB] Cargando {len(res.data)} juegos del inventario.")
+        return {"status": "ok", "inventario": res.data}
+    except Exception as e:
+        print(f"❌ [DB] Error al cargar inventario: {e}")
+        return {"status": "error", "detalle": str(e)}
 
 # ==========================================
 # 🔗 WEBHOOK (RECEPCIÓN META)
