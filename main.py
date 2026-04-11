@@ -54,6 +54,9 @@ def obtener_dolar_hoy():
 # ==========================================
 # 📈 MOTOR DE PRECIOS PRO (EXTRACCIÓN AGRESIVA)
 # ==========================================
+# ==========================================
+# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.10)
+# ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
@@ -62,7 +65,8 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true&render=true"
+    # 🛡️ Premium activado, Render desactivado (más rápido y HTML más limpio)
+    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true"
     
     print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
     
@@ -73,26 +77,33 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
         print(f"📄 [RADAR] Página detectada: {titulo}")
         
-        # 1. Si caemos en una lista de resultados, entramos al link correcto
-        tabla = soup.select_one("#products_table")
-        if tabla:
-            enlaces = tabla.select("td.title a")
-            if enlaces:
-                link_final = enlaces[0]
-                for a in enlaces:
-                    if consola_web.lower() in a.text.lower():
-                        link_final = a
-                        break
-                link_juego = "https://www.pricecharting.com" + link_final['href']
-                print(f"🔗 [SCRAPER PRO] Entrando a ficha oficial: {link_juego}")
-                res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true&render=true", timeout=45)
-                soup = BeautifulSoup(res.text, 'html.parser')
+        # 1. MÉTODO FRANCOTIRADOR: Buscar el link del juego directo sin importar la tabla
+        link_juego = None
+        for a in soup.find_all('a', href=True):
+            if '/game/' in a['href']:
+                # Priorizamos que el link tenga el nombre de la consola para ser exactos
+                if consola_web.lower().replace(' ', '-') in a['href'].lower():
+                    link_juego = "https://www.pricecharting.com" + a['href']
+                    break
+        
+        # Si no lo encontró con la consola exacta, agarra el primer juego de la lista
+        if not link_juego:
+            for a in soup.find_all('a', href=True):
+                if '/game/' in a['href']:
+                    link_juego = "https://www.pricecharting.com" + a['href']
+                    break
 
-        # 2. EXTRACCIÓN SÚPER AGRESIVA (Filtramos solo números)
+        if link_juego:
+            print(f"🔗 [FRANCOTIRADOR] Link oficial encontrado: {link_juego}")
+            res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true", timeout=45)
+            soup = BeautifulSoup(res.text, 'html.parser')
+        else:
+            print("⚠️ [FRANCOTIRADOR] No se encontraron links. Buscando precio en la página actual.")
+
+        # 2. EXTRACCIÓN SÚPER AGRESIVA
         def extraer_numero_puro(id_css):
-            nodo = soup.select_one(f"#{id_css}")
+            nodo = soup.find(id=id_css)
             if nodo:
-                # Exprimimos todo lo que no sea número o punto decimal
                 texto_limpio = ''.join(c for c in nodo.text if c.isdigit() or c == '.')
                 try:
                     if texto_limpio: return float(texto_limpio)
@@ -103,18 +114,13 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_numero_puro("cib_price")
         p_new   = extraer_numero_puro("new_price")
         
-        # 🐛 RADAR DE DEPURACIÓN: Si sigue fallando, imprimimos el HTML para ver qué nos ocultan
+        # Respaldo final si cambiaron los IDs
         if p_loose == 0.0:
-            seccion_precios = soup.select_one("#console-prices") or soup.select_one("table.price_details")
-            print(f"🐛 [DEBUG HTML]: {seccion_precios.text.strip()[:150] if seccion_precios else 'NO SE ENCONTRÓ LA TABLA'}")
-            
-            # Fallback final: buscar todas las etiquetas de precio
             spans = soup.find_all("span", class_="price")
             numeros = []
             for s in spans:
                 limpio = ''.join(c for c in s.text if c.isdigit() or c == '.')
                 if limpio: numeros.append(float(limpio))
-            
             if len(numeros) >= 3:
                 p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
 
