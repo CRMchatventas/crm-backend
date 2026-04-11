@@ -1,7 +1,7 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9.8 (GOLD FULL ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V5.9.9 (GOLD FULL ENGINE)
 # Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
-# Inventario, Scraper Profesional (ScraperAPI) & Borrado.
+# Inventario, ScraperAPI (Bypass Exitoso) y Extractor Agresivo.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9.8 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V5.9.9 Gold")
 
 # --- 🔑 CREDENCIALES ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -52,10 +52,7 @@ def obtener_dolar_hoy():
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (NIVEL RESIDENCIAL)
-# ==========================================
-# ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MODO PREMIUM RESIDENCIAL)
+# 📈 MOTOR DE PRECIOS PRO (EXTRACCIÓN AGRESIVA)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
@@ -65,20 +62,18 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    # 🔥 ACTIVAMOS MODO PREMIUM Y RENDER JS EN SCRAPERAPI 🔥
     url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true&render=true"
     
-    print(f"\n--- 🔍 [SCRAPER PREMIUM] CONSULTANDO: {nombre} ({consola_web}) ---")
+    print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
     
     try:
-        res = requests.get(url_proxy, timeout=45) # Le damos más tiempo porque renderizar JS toma unos segundos
+        res = requests.get(url_proxy, timeout=45)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 🕵️‍♂️ RADAR: ¿Qué página estamos viendo realmente?
         titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
-        print(f"📄 [RADAR] La página detectada es: {titulo}")
+        print(f"📄 [RADAR] Página detectada: {titulo}")
         
-        # 1. ¿Es una lista de resultados? Buscamos el link correcto
+        # 1. Si caemos en una lista de resultados, entramos al link correcto
         tabla = soup.select_one("#products_table")
         if tabla:
             enlaces = tabla.select("td.title a")
@@ -88,34 +83,40 @@ def api_consultar_precio(nombre: str, consola: str = ""):
                     if consola_web.lower() in a.text.lower():
                         link_final = a
                         break
-                
                 link_juego = "https://www.pricecharting.com" + link_final['href']
-                print(f"🔗 [SCRAPER PREMIUM] Entrando a ficha oficial: {link_juego}")
-                
-                # Segunda llamada activando el Premium
+                print(f"🔗 [SCRAPER PRO] Entrando a ficha oficial: {link_juego}")
                 res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true&render=true", timeout=45)
                 soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 2. EXTRACCIÓN ROBUSTA
-        def extraer_precio(selectores):
-            for sel in selectores:
-                nodo = soup.select_one(sel)
-                if nodo and "$" in nodo.text:
-                    try:
-                        val = float(nodo.text.strip().replace("$", "").replace(",", ""))
-                        if val > 0: return val
-                    except: continue
+        # 2. EXTRACCIÓN SÚPER AGRESIVA (Filtramos solo números)
+        def extraer_numero_puro(id_css):
+            nodo = soup.select_one(f"#{id_css}")
+            if nodo:
+                # Exprimimos todo lo que no sea número o punto decimal
+                texto_limpio = ''.join(c for c in nodo.text if c.isdigit() or c == '.')
+                try:
+                    if texto_limpio: return float(texto_limpio)
+                except: pass
             return 0.0
 
-        p_loose = extraer_precio(["#used_price", ".price.js-price", "table.price_details .price"])
-        p_cib   = extraer_precio(["#cib_price", ".cib_price", "table.price_details tr:nth-child(2) .price"])
-        p_new   = extraer_precio(["#new_price", ".new_price", "table.price_details tr:nth-child(3) .price"])
+        p_loose = extraer_numero_puro("used_price")
+        p_cib   = extraer_numero_puro("cib_price")
+        p_new   = extraer_numero_puro("new_price")
         
-        if p_loose == 0:
+        # 🐛 RADAR DE DEPURACIÓN: Si sigue fallando, imprimimos el HTML para ver qué nos ocultan
+        if p_loose == 0.0:
+            seccion_precios = soup.select_one("#console-prices") or soup.select_one("table.price_details")
+            print(f"🐛 [DEBUG HTML]: {seccion_precios.text.strip()[:150] if seccion_precios else 'NO SE ENCONTRÓ LA TABLA'}")
+            
+            # Fallback final: buscar todas las etiquetas de precio
             spans = soup.find_all("span", class_="price")
-            if len(spans) >= 1: 
-                try: p_loose = float(spans[0].text.strip().replace("$", "").replace(",", ""))
-                except: pass
+            numeros = []
+            for s in spans:
+                limpio = ''.join(c for c in s.text if c.isdigit() or c == '.')
+                if limpio: numeros.append(float(limpio))
+            
+            if len(numeros) >= 3:
+                p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
 
         print(f"💰 [SCRAPER] USD -> Loose: {p_loose}, CIB: {p_cib}, New: {p_new}")
         
