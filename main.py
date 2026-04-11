@@ -235,10 +235,21 @@ def borrar_prospecto(datos: dict):
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
     try:
-        supabase.table('inventario').insert(datos.dict()).execute()
-        print(f"✔️ [DB] Guardado: {datos.nombre}")
+        # 1. Verificamos si el juego ya existe en esa consola
+        res = supabase.table('inventario').select('*').eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+        
+        if len(res.data) > 0:
+            # 2. Si ya existe, lo ACTUALIZAMOS (Modificar)
+            supabase.table('inventario').update(datos.dict()).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+            print(f"🔄 [DB] Registro Modificado: {datos.nombre}")
+        else:
+            # 3. Si no existe, lo INSERTAMOS (Guardar Nuevo)
+            supabase.table('inventario').insert(datos.dict()).execute()
+            print(f"✔️ [DB] Nuevo Guardado: {datos.nombre}")
+            
         return {"status": "ok"}
-    except Exception as e: return {"status": "error", "detalle": str(e)}
+    except Exception as e: 
+        return {"status": "error", "detalle": str(e)}
 
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict):
