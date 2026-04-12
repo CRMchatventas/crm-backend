@@ -350,6 +350,17 @@ def actualizar_stock(datos: VentaItem):
         print(f"❌ [VENTA] Error: {e}")
         return {"status": "error", "detalle": str(e)}
 
+# 🔍 NUEVO ENDPOINT: BUSCAR JUEGO POR CÓDIGO DE BARRAS
+@app.get("/api/buscar_por_codigo")
+def buscar_por_codigo(codigo: str):
+    try:
+        res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).execute()
+        if len(res.data) > 0:
+            return {"status": "ok", "juego": res.data[0]}
+        return {"status": "error", "detalle": "Código no registrado"}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
 # 📊 ENDPOINT: MÉTRICAS FINANCIERAS (DASHBOARD CEO)
 @app.get("/api/metricas")
 def obtener_metricas():
