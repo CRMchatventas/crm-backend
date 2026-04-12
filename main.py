@@ -292,6 +292,19 @@ def actualizar_stock(datos: VentaItem):
     except Exception as e: 
         print(f"❌ [VENTA] Error: {e}")
         return {"status": "error", "detalle": str(e)}
+# 📊 NUEVO ENDPOINT: MÉTRICAS FINANCIERAS
+@app.get("/api/metricas")
+def obtener_metricas():
+    try:
+        res = supabase.table('inventario').select('precio, stock').execute()
+        # Sumamos todas las piezas que sean mayores a 0
+        total_piezas = sum(item['stock'] for item in res.data if item['stock'] > 0)
+        # Multiplicamos el stock por el precio para saber cuánto dinero tienes en mercancía
+        valor_inventario = sum((item['stock'] * item['precio']) for item in res.data if item['stock'] > 0)
+        
+        return {"status": "ok", "piezas": total_piezas, "valor": valor_inventario}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
 
 # ==========================================
 # 🔗 WEBHOOK (RECEPCIÓN META)
