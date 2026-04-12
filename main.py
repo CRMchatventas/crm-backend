@@ -1,7 +1,7 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V5.9.9 (GOLD FULL ENGINE)
-# Funciones: WhatsApp Full, Multimedia Supabase, Bot, 
-# Inventario, ScraperAPI (Bypass Exitoso) y Extractor Agresivo.
+# 🚀 SISTEMA BACKEND: CRM PRO V6.0 (GOLD FULL ENGINE)
+# Funciones: WhatsApp Full, Bot, Inventario, ScraperAPI (Anti-Europa), 
+# Finanzas Completas (Costos y Ganancias), Web Bridge y Extractor Agresivo.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime
 
-app = FastAPI(title="CRM Fantasy Games - Engine V5.9.9 Gold")
+app = FastAPI(title="CRM Fantasy Games - Engine V6.0 Gold")
 
 # --- 🔑 CREDENCIALES ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -28,15 +28,22 @@ SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 📦 MODELOS DE DATOS ---
-class ProspectoUpdate(BaseModel): nombre: str; nueva_columna: str
-class NotaUpdate(BaseModel): nombre: str; notas: str; etiquetas: str
-class MensajeSaliente(BaseModel): cliente: str; texto: str
+class ProspectoUpdate(BaseModel): 
+    nombre: str; nueva_columna: str
+    
+class NotaUpdate(BaseModel): 
+    nombre: str; notas: str; etiquetas: str
+    
+class MensajeSaliente(BaseModel): 
+    cliente: str; texto: str
+
+# 🛒 MODELO DE INVENTARIO (Incluye COSTO)
 class InventarioItem(BaseModel):
-    nombre: str; consola: str; precio: float; stock: int
+    nombre: str; consola: str; precio: float; costo: float; stock: int
     codigo_barras: str; url_portada: str; estado_general: str
     tiene_caja: bool; tiene_manual: bool; es_portada_original: bool; descripcion_detallada: str
 
-# 🛒 NUEVO MODELO PARA RECIBIR VENTAS
+# 🛒 MODELO PARA RECIBIR VENTAS
 class VentaItem(BaseModel):
     nombre: str
     consola: str
@@ -50,7 +57,7 @@ def obtener_dolar_hoy():
     try:
         res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
         datos = res.json()
-        valor = float(datos["rates"]["MXN"])
+        valor = float(datos.get("rates", {}).get("MXN", 18.00))
         print(f"✔️ [MONEDA] Precio detectado: ${valor} MXN")
         return valor
     except Exception as e:
@@ -59,7 +66,7 @@ def obtener_dolar_hoy():
 
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V5.9.11)
+# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V6.0)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
@@ -80,17 +87,15 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
         print(f"📄 [RADAR] Página detectada: {titulo}")
         
-        # 1. MÉTODO FRANCOTIRADOR CORREGIDO (Evitar dominio duplicado)
+        # 1. MÉTODO FRANCOTIRADOR (Evitar dominio duplicado)
         link_juego = None
         for a in soup.find_all('a', href=True):
             href = a['href']
             if '/game/' in href:
-                # Prioridad 1: Que tenga la consola en el link
                 if consola_web.lower().replace(' ', '-') in href.lower():
                     link_juego = href if href.startswith("http") else "https://www.pricecharting.com" + href
                     break
         
-        # Prioridad 2: Si no coincidió la consola, agarra el primer juego de la lista
         if not link_juego:
             for a in soup.find_all('a', href=True):
                 href = a['href']
@@ -105,11 +110,13 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         else:
             print("⚠️ [FRANCOTIRADOR] No se encontraron links. Buscando en la página principal.")
 
-        # 2. EXTRACCIÓN SÚPER AGRESIVA
+        # 2. EXTRACCIÓN SÚPER AGRESIVA (A prueba de formatos Europeos)
         def extraer_numero_puro(id_css):
             nodo = soup.find(id=id_css)
             if nodo:
-                texto_limpio = ''.join(c for c in nodo.text if c.isdigit() or c == '.')
+                # 🛠️ BLINDAJE: Convertimos comas europeas a puntos americanos
+                texto = nodo.text.replace(',', '.')
+                texto_limpio = ''.join(c for c in texto if c.isdigit() or c == '.')
                 try:
                     if texto_limpio: return float(texto_limpio)
                 except: pass
@@ -119,26 +126,28 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_numero_puro("cib_price")
         p_new   = extraer_numero_puro("new_price")
         
-        # Respaldo final si no encuentra por ID
         if p_loose == 0.0:
             spans = soup.find_all("span", class_="price")
             numeros = []
             for s in spans:
-                limpio = ''.join(c for c in s.text if c.isdigit() or c == '.')
+                limpio = ''.join(c for c in s.text.replace(',', '.') if c.isdigit() or c == '.')
                 if limpio: numeros.append(float(limpio))
             if len(numeros) >= 3:
                 p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
 
         print(f"💰 [SCRAPER] USD -> Loose: {p_loose}, CIB: {p_cib}, New: {p_new}")
         
+        # 🔗 BLINDAJE: Retorna la URL dinámica para el Web Bridge
         return {
+            "status": "ok",
             "mxn": {"loose": round(p_loose * tipo_cambio, 2), "cib": round(p_cib * tipo_cambio, 2), "new": round(p_new * tipo_cambio, 2)},
             "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
-            "tipo_cambio": tipo_cambio
+            "tipo_cambio": tipo_cambio,
+            "url_pc": link_juego if link_juego else url_search
         }
     except Exception as e:
         print(f"❌ [SCRAPER] Error crítico de API: {e}")
-        return {"error": str(e)}
+        return {"status": "error", "detalle": str(e), "url_pc": "https://www.pricecharting.com"}
 
 # ==========================================
 # 📥 MOTOR MULTIMEDIA & WHATSAPP
@@ -236,25 +245,21 @@ def borrar_prospecto(datos: dict):
     return {"status": "ok"}
 
 # ==========================================
-# 📦 INVENTARIO & DB
+# 📦 INVENTARIO & DB (Incluye Costos y Ganancias)
 # ==========================================
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
     try:
-        # Limpiamos espacios basura de las orillas
         nombre_limpio = datos.nombre.strip()
         consola_limpia = datos.consola.strip()
         
-        # 'ilike' busca coincidencias ignorando mayúsculas y minúsculas
         res = supabase.table('inventario').select('*').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).execute()
         
         if len(res.data) > 0:
-            # Si ya existe (aunque tenga mayúsculas diferentes), lo ACTUALIZAMOS
-            id_real = res.data[0]['id'] # Tomamos su ID exacto
+            id_real = res.data[0]['id']
             supabase.table('inventario').update(datos.dict()).eq('id', id_real).execute()
             print(f"🔄 [DB] Registro Modificado: {nombre_limpio}")
         else:
-            # Si de verdad no existe, lo INSERTAMOS
             supabase.table('inventario').insert(datos.dict()).execute()
             print(f"✔️ [DB] Nuevo Guardado: {nombre_limpio}")
             
@@ -265,15 +270,14 @@ def guardar_inventario(datos: InventarioItem):
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict):
     try:
-        supabase.table('inventario').delete().eq('nombre', datos["nombre"]).eq('consola', datos["consola"]).execute()
-        print(f"🗑️ [DB] Item borrado: {datos['nombre']}")
+        supabase.table('inventario').delete().eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).execute()
+        print(f"🗑️ [DB] Item borrado: {datos.get('nombre', '')}")
         return {"status": "ok"}
     except Exception as e: return {"status": "error", "detalle": str(e)}
 
 @app.get("/api/cargar_inventario")
 def cargar_inventario():
     try:
-        # Trae toda la tabla de inventario, ordenada por nombre alfabéticamente
         res = supabase.table('inventario').select('*').order('nombre', desc=False).execute()
         print(f"📦 [DB] Cargando {len(res.data)} juegos del inventario.")
         return {"status": "ok", "inventario": res.data}
@@ -281,28 +285,64 @@ def cargar_inventario():
         print(f"❌ [DB] Error al cargar inventario: {e}")
         return {"status": "error", "detalle": str(e)}
 
-# 💰 NUEVO ENDPOINT PARA RESTAR STOCK
+# 💰 ENDPOINT DE VENTAS: DESCUENTA STOCK Y REGISTRA GANANCIA
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem):
     try:
-        # Busca el juego y le asigna el nuevo stock
-        supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
-        print(f"💰 [VENTA] Stock actualizado en la nube: {datos.nombre} -> {datos.nuevo_stock} uds.")
-        return {"status": "ok"}
+        # 1. Buscamos precio y costo actual del juego
+        res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+        
+        if len(res.data) > 0:
+            precio_venta = res.data[0].get('precio', 0.0)
+            costo_compra = res.data[0].get('costo', 0.0)
+            ganancia = precio_venta - costo_compra
+            
+            # 2. Actualizamos el stock
+            supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+            
+            # 3. Guardamos el ticket en registro_ventas
+            registro = {
+                "nombre_juego": datos.nombre,
+                "precio_venta": precio_venta,
+                "costo": costo_compra,
+                "ganancia": ganancia
+            }
+            supabase.table('registro_ventas').insert(registro).execute()
+            
+            print(f"💰 [VENTA] {datos.nombre} -> Stock restante: {datos.nuevo_stock} | Ganancia: ${ganancia}")
+            return {"status": "ok"}
+        else:
+            return {"status": "error", "detalle": "Juego no encontrado en BD para venta"}
+            
     except Exception as e: 
         print(f"❌ [VENTA] Error: {e}")
         return {"status": "error", "detalle": str(e)}
-# 📊 NUEVO ENDPOINT: MÉTRICAS FINANCIERAS
+
+# 📊 ENDPOINT: MÉTRICAS FINANCIERAS (DASHBOARD CEO)
 @app.get("/api/metricas")
 def obtener_metricas():
     try:
-        res = supabase.table('inventario').select('precio, stock').execute()
-        # Sumamos todas las piezas que sean mayores a 0
-        total_piezas = sum(item['stock'] for item in res.data if item['stock'] > 0)
-        # Multiplicamos el stock por el precio para saber cuánto dinero tienes en mercancía
-        valor_inventario = sum((item['stock'] * item['precio']) for item in res.data if item['stock'] > 0)
+        # 1. Finanzas del Inventario Actual
+        res_inv = supabase.table('inventario').select('precio, costo, stock').execute()
+        total_piezas = sum(item.get('stock', 0) for item in res_inv.data if item.get('stock', 0) > 0)
+        valor_inventario = sum((item.get('stock', 0) * item.get('precio', 0.0)) for item in res_inv.data if item.get('stock', 0) > 0)
+        costo_inventario = sum((item.get('stock', 0) * item.get('costo', 0.0)) for item in res_inv.data if item.get('stock', 0) > 0)
+        ganancia_potencial = valor_inventario - costo_inventario
         
-        return {"status": "ok", "piezas": total_piezas, "valor": valor_inventario}
+        # 2. Histórico de Ventas Reales
+        res_ventas = supabase.table('registro_ventas').select('ganancia, precio_venta').execute()
+        ventas_totales = sum(v.get('precio_venta', 0.0) for v in res_ventas.data)
+        ganancia_real = sum(v.get('ganancia', 0.0) for v in res_ventas.data)
+        
+        return {
+            "status": "ok", 
+            "piezas": total_piezas, 
+            "valor": valor_inventario,
+            "costo_inv": costo_inventario,
+            "ganancia_potencial": ganancia_potencial,
+            "ventas_totales": ventas_totales,
+            "ganancia_real": ganancia_real
+        }
     except Exception as e:
         return {"status": "error", "detalle": str(e)}
 
