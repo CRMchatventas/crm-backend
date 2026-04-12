@@ -66,19 +66,32 @@ def obtener_dolar_hoy():
 
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V6.0)
+# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V6.2 BLINDADO)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
     
+    # 1. 🛡️ TRADUCTOR ESTRICTO: Evita que "PS2" coincida con "ps2-secret-codes"
+    slugs_pc = {
+        "PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3",
+        "PS2": "playstation-2", "PS1": "playstation",
+        "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox",
+        "Nintendo Switch": "nintendo-switch", "Nintendo 3DS": "nintendo-3ds", 
+        "Nintendo DS": "nintendo-ds", "Nintendo 64": "nintendo-64",
+        "GameCube": "gamecube", "GameBoy Advance": "gameboy-advance", 
+        "GameBoy Color": "gameboy-color", "Wii": "wii", "Wii U": "wii-u", 
+        "SNES": "super-nintendo", "NES": "nes", "Genesis": "sega-genesis"
+    }
+    
+    # Consola limpia para la búsqueda en la barra de URL
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
     url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true"
     
-    print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola_web}) ---")
+    print(f"\n--- 🔍 [SCRAPER PRO] CONSULTANDO: {nombre} ({consola}) ---")
     
     try:
         res = requests.get(url_proxy, timeout=45)
@@ -87,20 +100,36 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         titulo = soup.title.text.strip() if soup.title else "SIN TÍTULO"
         print(f"📄 [RADAR] Página detectada: {titulo}")
         
-        # 1. MÉTODO FRANCOTIRADOR (Evitar dominio duplicado)
         link_juego = None
+        
+        # Identificamos la etiqueta exacta que PriceCharting usa para esa consola
+        slug_esperado = slugs_pc.get(consola, consola_web.lower().replace(' ', '-'))
+        etiqueta_busqueda = f"/game/{slug_esperado}/"
+        
+        # 2. 🛡️ BLINDAJE ANTI-BASURA: Palabras que el francotirador debe ignorar siempre
+        palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
+        
+        # MÉTODO FRANCOTIRADOR (Ataque Quirúrgico)
         for a in soup.find_all('a', href=True):
-            href = a['href']
+            href = a['href'].lower()
             if '/game/' in href:
-                if consola_web.lower().replace(' ', '-') in href.lower():
-                    link_juego = href if href.startswith("http") else "https://www.pricecharting.com" + href
+                # Si el link contiene basura, lo ignoramos y pasamos al siguiente
+                if any(basura in href for basura in palabras_prohibidas):
+                    continue
+                
+                # Buscamos coincidencia PERFECTA con el pasillo de la consola
+                if etiqueta_busqueda in href:
+                    link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
                     break
         
+        # 3. RESPALDO (Por si el juego es raro y no cuadró la etiqueta exacta, pero sigue filtrando basura)
         if not link_juego:
             for a in soup.find_all('a', href=True):
-                href = a['href']
+                href = a['href'].lower()
                 if '/game/' in href:
-                    link_juego = href if href.startswith("http") else "https://www.pricecharting.com" + href
+                    if any(basura in href for basura in palabras_prohibidas):
+                        continue
+                    link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
                     break
 
         if link_juego:
@@ -108,13 +137,13 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true", timeout=45)
             soup = BeautifulSoup(res.text, 'html.parser')
         else:
-            print("⚠️ [FRANCOTIRADOR] No se encontraron links. Buscando en la página principal.")
+            print("⚠️ [FRANCOTIRADOR] No se encontraron links exactos. Extrayendo de la lista general.")
 
-        # 2. EXTRACCIÓN SÚPER AGRESIVA (A prueba de formatos Europeos)
+        # 4. EXTRACCIÓN SÚPER AGRESIVA (Con filtro Anti-Europa)
         def extraer_numero_puro(id_css):
             nodo = soup.find(id=id_css)
             if nodo:
-                # 🛠️ BLINDAJE: Convertimos comas europeas a puntos americanos
+                # 🛠️ BLINDAJE: Convertimos comas europeas a puntos americanos para evitar crasheos
                 texto = nodo.text.replace(',', '.')
                 texto_limpio = ''.join(c for c in texto if c.isdigit() or c == '.')
                 try:
@@ -126,7 +155,8 @@ def api_consultar_precio(nombre: str, consola: str = ""):
         p_cib   = extraer_numero_puro("cib_price")
         p_new   = extraer_numero_puro("new_price")
         
-        if p_loose == 0.0:
+        # 🛡️ BLINDAJE: Si los IDs fallan, buscamos números de respaldo a la fuerza
+        if p_loose == 0.0 and p_cib == 0.0 and p_new == 0.0:
             spans = soup.find_all("span", class_="price")
             numeros = []
             for s in spans:
@@ -134,10 +164,12 @@ def api_consultar_precio(nombre: str, consola: str = ""):
                 if limpio: numeros.append(float(limpio))
             if len(numeros) >= 3:
                 p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
+            elif len(numeros) > 0:
+                p_loose = numeros[0] # Recuperamos al menos el Loose si la página está rota
 
         print(f"💰 [SCRAPER] USD -> Loose: {p_loose}, CIB: {p_cib}, New: {p_new}")
         
-        # 🔗 BLINDAJE: Retorna la URL dinámica para el Web Bridge
+        # 🔗 BLINDAJE: Retorna la URL dinámica para que el botón de Godot siempre te lleve al sitio correcto
         return {
             "status": "ok",
             "mxn": {"loose": round(p_loose * tipo_cambio, 2), "cib": round(p_cib * tipo_cambio, 2), "new": round(p_new * tipo_cambio, 2)},
