@@ -36,6 +36,12 @@ class InventarioItem(BaseModel):
     codigo_barras: str; url_portada: str; estado_general: str
     tiene_caja: bool; tiene_manual: bool; es_portada_original: bool; descripcion_detallada: str
 
+# 🛒 NUEVO MODELO PARA RECIBIR VENTAS
+class VentaItem(BaseModel):
+    nombre: str
+    consola: str
+    nuevo_stock: int
+
 # ==========================================
 # 💵 MOTOR DE DIVISAS
 # ==========================================
@@ -275,6 +281,18 @@ def cargar_inventario():
         print(f"❌ [DB] Error al cargar inventario: {e}")
         return {"status": "error", "detalle": str(e)}
 
+# 💰 NUEVO ENDPOINT PARA RESTAR STOCK
+@app.post("/api/actualizar_stock")
+def actualizar_stock(datos: VentaItem):
+    try:
+        # Busca el juego y le asigna el nuevo stock
+        supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+        print(f"💰 [VENTA] Stock actualizado en la nube: {datos.nombre} -> {datos.nuevo_stock} uds.")
+        return {"status": "ok"}
+    except Exception as e: 
+        print(f"❌ [VENTA] Error: {e}")
+        return {"status": "error", "detalle": str(e)}
+
 # ==========================================
 # 🔗 WEBHOOK (RECEPCIÓN META)
 # ==========================================
@@ -312,4 +330,4 @@ async def recibir_mensaje_meta(request: Request):
         return PlainTextResponse(content="ERROR", status_code=500)
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)
