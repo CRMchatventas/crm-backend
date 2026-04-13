@@ -64,7 +64,6 @@ def obtener_dolar_hoy():
         print(f"⚠️ [MONEDA] Error API: {e}. Usando respaldo: 18.00")
         return 18.00
 
-
 # ==========================================
 # 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V6.2 BLINDADO)
 # ==========================================
@@ -425,25 +424,16 @@ async def recibir_mensaje_meta(request: Request):
         print(f"❌ [WEBHOOK] Error: {e}")
         return PlainTextResponse(content="ERROR", status_code=500)
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=10000)
-
 # ==========================================
-# 📦 MÓDULO B2B: IMPORTADOR MASIVO CSV
+# 🚀 MÓDULOS B2B (IMPORTADOR, RADAR, REPUTACIÓN, MASIVO)
 # ==========================================
 @app.post("/api/importar_inventario")
 def api_importar_inventario(datos: dict):
-    # Godot nos enviará una lista de diccionarios ya procesada
     lote_juegos = datos.get("inventario", [])
-    
     if not lote_juegos or len(lote_juegos) == 0:
         return {"status": "error", "detalle": "El archivo CSV estaba vacío o mal formateado."}
-    
     try:
-        # MAGIA DE SUPABASE: Bulk Insert. Le pasamos la lista entera y él hace el resto.
-        # Asegúrate de que tu tabla se llame "inventario" (o ajusta el nombre aquí)
         res = supabase.table('inventario').insert(lote_juegos).execute()
-        
         return {
             "status": "ok", 
             "insertados": len(lote_juegos),
@@ -453,20 +443,14 @@ def api_importar_inventario(datos: dict):
         print(f"❌ [IMPORTADOR] Error al subir el CSV: {e}")
         return {"status": "error", "detalle": str(e)}
 
-# ==========================================
-# 🎯 MÓDULO B2B: RADAR FRANCOTIRADOR (ALERTAS)
-# ==========================================
 @app.post("/api/crear_alerta")
 def api_crear_alerta(datos: dict):
-    usuario = datos.get("usuario_id", "Miguel") # Quién pide la alerta
+    usuario = datos.get("usuario_id", "Miguel")
     juego_buscado = datos.get("nombre_juego", "").lower()
     precio_maximo = datos.get("precio_max", 0.0)
-    
     if not juego_buscado:
         return {"status": "error", "detalle": "Debes especificar un juego."}
-        
     try:
-        # Guardamos la alerta en una tabla de Supabase (debes crear la tabla 'alertas_mercado')
         nueva_alerta = {
             "usuario": usuario,
             "juego": juego_buscado,
@@ -474,23 +458,17 @@ def api_crear_alerta(datos: dict):
             "activa": True
         }
         supabase.table('alertas_mercado').insert(nueva_alerta).execute()
-        
         return {"status": "ok", "mensaje": f"Radar activado para {juego_buscado} a máximo ${precio_maximo}."}
     except Exception as e:
         print(f"❌ [RADAR] Error: {e}")
         return {"status": "error", "detalle": str(e)}
 
-# ==========================================
-# ⭐ MÓDULO B2B: SISTEMA DE REPUTACIÓN
-# ==========================================
 @app.post("/api/calificar_vendedor")
 def api_calificar(datos: dict):
     vendedor = datos.get("vendedor")
-    estrellas = datos.get("estrellas", 5) # 1 a 5
+    estrellas = datos.get("estrellas", 5)
     comentario = datos.get("comentario", "")
-    
     try:
-        # Guardamos la reseña en la tabla 'reputacion'
         reseña = {
             "vendedor": vendedor,
             "estrellas": estrellas,
@@ -504,19 +482,13 @@ def api_calificar(datos: dict):
 @app.post("/api/ver_reputacion")
 def api_ver_reputacion(datos: dict):
     vendedor = datos.get("vendedor")
-    
     try:
-        # Buscamos todas las reseñas de este vendedor
         res = supabase.table('reputacion').select('estrellas').eq('vendedor', vendedor).execute()
         calificaciones = res.data
-        
         if not calificaciones:
             return {"status": "ok", "promedio": 0, "total_ventas": 0, "mensaje": "Vendedor nuevo, sin calificaciones."}
-            
-        # Calculamos el promedio matemático
         total_estrellas = sum([c['estrellas'] for c in calificaciones])
         promedio = total_estrellas / len(calificaciones)
-        
         return {
             "status": "ok", 
             "promedio": round(promedio, 1), 
@@ -524,3 +496,27 @@ def api_ver_reputacion(datos: dict):
         }
     except Exception as e:
         return {"status": "error", "detalle": str(e)}
+
+@app.post("/api/mensaje_masivo")
+def api_mensaje_masivo(datos: dict):
+    columna_target = datos.get("columna")
+    texto_mensaje = datos.get("texto")
+    try:
+        res = supabase.table('prospectos').select('telefono').eq('columna', columna_target).neq('telefono', None).execute()
+        clientes = res.data
+        if not clientes:
+            return {"status": "error", "detalle": "No hay clientes con teléfono registrado en esta columna."}
+        enviados = 0
+        for cliente in clientes:
+            if cliente.get("telefono"):
+                disparar_whatsapp_real(cliente["telefono"], texto_mensaje)
+                enviados += 1
+        return {"status": "ok", "enviados": enviados}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+# ==========================================
+# 🛑 BOTÓN DE ENCENDIDO (SIEMPRE AL FINAL)
+# ==========================================
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)
