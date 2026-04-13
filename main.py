@@ -427,3 +427,28 @@ async def recibir_mensaje_meta(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
+# ==========================================
+# 📦 MÓDULO B2B: IMPORTADOR MASIVO CSV
+# ==========================================
+@app.post("/api/importar_inventario")
+def api_importar_inventario(datos: dict):
+    # Godot nos enviará una lista de diccionarios ya procesada
+    lote_juegos = datos.get("inventario", [])
+    
+    if not lote_juegos or len(lote_juegos) == 0:
+        return {"status": "error", "detalle": "El archivo CSV estaba vacío o mal formateado."}
+    
+    try:
+        # MAGIA DE SUPABASE: Bulk Insert. Le pasamos la lista entera y él hace el resto.
+        # Asegúrate de que tu tabla se llame "inventario" (o ajusta el nombre aquí)
+        res = supabase.table('inventario').insert(lote_juegos).execute()
+        
+        return {
+            "status": "ok", 
+            "insertados": len(lote_juegos),
+            "mensaje": f"Se subieron {len(lote_juegos)} artículos al inventario."
+        }
+    except Exception as e:
+        print(f"❌ [IMPORTADOR] Error al subir el CSV: {e}")
+        return {"status": "error", "detalle": str(e)}
