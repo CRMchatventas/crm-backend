@@ -452,3 +452,30 @@ def api_importar_inventario(datos: dict):
     except Exception as e:
         print(f"❌ [IMPORTADOR] Error al subir el CSV: {e}")
         return {"status": "error", "detalle": str(e)}
+
+# ==========================================
+# 🎯 MÓDULO B2B: RADAR FRANCOTIRADOR (ALERTAS)
+# ==========================================
+@app.post("/api/crear_alerta")
+def api_crear_alerta(datos: dict):
+    usuario = datos.get("usuario_id", "Miguel") # Quién pide la alerta
+    juego_buscado = datos.get("nombre_juego", "").lower()
+    precio_maximo = datos.get("precio_max", 0.0)
+    
+    if not juego_buscado:
+        return {"status": "error", "detalle": "Debes especificar un juego."}
+        
+    try:
+        # Guardamos la alerta en una tabla de Supabase (debes crear la tabla 'alertas_mercado')
+        nueva_alerta = {
+            "usuario": usuario,
+            "juego": juego_buscado,
+            "precio_maximo": precio_maximo,
+            "activa": True
+        }
+        supabase.table('alertas_mercado').insert(nueva_alerta).execute()
+        
+        return {"status": "ok", "mensaje": f"Radar activado para {juego_buscado} a máximo ${precio_maximo}."}
+    except Exception as e:
+        print(f"❌ [RADAR] Error: {e}")
+        return {"status": "error", "detalle": str(e)}
