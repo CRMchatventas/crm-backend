@@ -43,10 +43,11 @@ class InventarioItem(BaseModel):
     codigo_barras: str; url_portada: str; estado_general: str
     tiene_caja: bool; tiene_manual: bool; es_portada_original: bool; descripcion_detallada: str
 
-# 🛒 MODELO PARA RECIBIR VENTAS
+# 🛒 MODELO PARA RECIBIR VENTAS (🛡️ BLINDADO CON ESTADO_GENERAL)
 class VentaItem(BaseModel):
     nombre: str
     consola: str
+    estado_general: str = "" # 🛡️ EL PARCHE PARA VARIANTES
     nuevo_stock: int
 
 # ==========================================
@@ -321,8 +322,8 @@ def cargar_inventario():
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem):
     try:
-        # 1. Buscamos precio y costo actual del juego
-        res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+        # 1. Buscamos precio y costo actual del juego (AHORA FILTRA POR ESTADO TAMBIÉN 🛡️)
+        res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).execute()
         
         if len(res.data) > 0:
             precio_venta = res.data[0].get('precio', 0.0)
@@ -330,7 +331,7 @@ def actualizar_stock(datos: VentaItem):
             ganancia = precio_venta - costo_compra
             
             # 2. Actualizamos el stock
-            supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).execute()
+            supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).execute()
             
             # 3. Guardamos el ticket en registro_ventas
             registro = {
@@ -341,10 +342,10 @@ def actualizar_stock(datos: VentaItem):
             }
             supabase.table('registro_ventas').insert(registro).execute()
             
-            print(f"💰 [VENTA] {datos.nombre} -> Stock restante: {datos.nuevo_stock} | Ganancia: ${ganancia}")
+            print(f"💰 [VENTA] {datos.nombre} ({datos.estado_general}) -> Stock restante: {datos.nuevo_stock} | Ganancia: ${ganancia}")
             return {"status": "ok"}
         else:
-            return {"status": "error", "detalle": "Juego no encontrado en BD para venta"}
+            return {"status": "error", "detalle": "Variante de juego no encontrada en BD para venta"}
             
     except Exception as e: 
         print(f"❌ [VENTA] Error: {e}")
