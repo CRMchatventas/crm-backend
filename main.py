@@ -283,8 +283,9 @@ def guardar_inventario(datos: InventarioItem):
     try:
         nombre_limpio = datos.nombre.strip()
         consola_limpia = datos.consola.strip()
+        estado = datos.estado_general.strip() # 🛡️ PARCHE: Verifica el estado para permitir Sueltos y Completos del mismo juego
         
-        res = supabase.table('inventario').select('*').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).execute()
+        res = supabase.table('inventario').select('*').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).execute()
         
         if len(res.data) > 0:
             id_real = res.data[0]['id']
@@ -447,6 +448,7 @@ def api_importar_inventario(datos: dict):
 def api_crear_alerta(datos: dict):
     usuario = datos.get("usuario_id", "Miguel")
     juego_buscado = datos.get("nombre_juego", "").lower()
+    consola_buscada = datos.get("consola", "") # 🛡️ PARCHE: Consola para el Radar
     precio_maximo = datos.get("precio_max", 0.0)
     if not juego_buscado:
         return {"status": "error", "detalle": "Debes especificar un juego."}
@@ -454,6 +456,7 @@ def api_crear_alerta(datos: dict):
         nueva_alerta = {
             "usuario": usuario,
             "juego": juego_buscado,
+            "consola": consola_buscada,
             "precio_maximo": precio_maximo,
             "activa": True
         }
@@ -506,11 +509,18 @@ def api_mensaje_masivo(datos: dict):
         clientes = res.data
         if not clientes:
             return {"status": "error", "detalle": "No hay clientes con teléfono registrado en esta columna."}
-        enviados = 0
+        
+        # 🛡️ PARCHE ANTI-SPAM: Set de teléfonos únicos para no repetir
+        telefonos_unicos = set()
         for cliente in clientes:
             if cliente.get("telefono"):
-                disparar_whatsapp_real(cliente["telefono"], texto_mensaje)
-                enviados += 1
+                telefonos_unicos.add(cliente["telefono"])
+                
+        enviados = 0
+        for tel in telefonos_unicos:
+            disparar_whatsapp_real(tel, texto_mensaje)
+            enviados += 1
+            
         return {"status": "ok", "enviados": enviados}
     except Exception as e:
         return {"status": "error", "detalle": str(e)}
