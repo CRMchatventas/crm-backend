@@ -479,3 +479,48 @@ def api_crear_alerta(datos: dict):
     except Exception as e:
         print(f"❌ [RADAR] Error: {e}")
         return {"status": "error", "detalle": str(e)}
+
+# ==========================================
+# ⭐ MÓDULO B2B: SISTEMA DE REPUTACIÓN
+# ==========================================
+@app.post("/api/calificar_vendedor")
+def api_calificar(datos: dict):
+    vendedor = datos.get("vendedor")
+    estrellas = datos.get("estrellas", 5) # 1 a 5
+    comentario = datos.get("comentario", "")
+    
+    try:
+        # Guardamos la reseña en la tabla 'reputacion'
+        reseña = {
+            "vendedor": vendedor,
+            "estrellas": estrellas,
+            "comentario": comentario
+        }
+        supabase.table('reputacion').insert(reseña).execute()
+        return {"status": "ok", "mensaje": f"Calificaste a {vendedor} con {estrellas} estrellas."}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+@app.post("/api/ver_reputacion")
+def api_ver_reputacion(datos: dict):
+    vendedor = datos.get("vendedor")
+    
+    try:
+        # Buscamos todas las reseñas de este vendedor
+        res = supabase.table('reputacion').select('estrellas').eq('vendedor', vendedor).execute()
+        calificaciones = res.data
+        
+        if not calificaciones:
+            return {"status": "ok", "promedio": 0, "total_ventas": 0, "mensaje": "Vendedor nuevo, sin calificaciones."}
+            
+        # Calculamos el promedio matemático
+        total_estrellas = sum([c['estrellas'] for c in calificaciones])
+        promedio = total_estrellas / len(calificaciones)
+        
+        return {
+            "status": "ok", 
+            "promedio": round(promedio, 1), 
+            "total_ventas": len(calificaciones)
+        }
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
