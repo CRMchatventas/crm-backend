@@ -473,7 +473,9 @@ async def recibir_mensaje_meta(request: Request):
                     "columna": col
                 }).execute()
                 
-                if col in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text":
+                # 🛡️ BOT SIEMPRE ACTIVO PARA COMANDOS CLAVE
+                es_comando = tipo == "text" and any(cmd in texto.lower() for cmd in ["hola", "buenas", "menu", "menú", "info"])
+                if (col in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text") or es_comando:
                     procesar_respuesta_bot(nombre, tel, texto)
                     
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
