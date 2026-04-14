@@ -527,6 +527,40 @@ def api_mensaje_masivo(datos: dict):
         return {"status": "error", "detalle": str(e)}
 
 # ==========================================
+# 🚨 MÓDULOS DE VISTA (ALARMAS Y REPUTACIONES)
+# ==========================================
+@app.get("/api/mis_alertas")
+def api_mis_alertas():
+    try:
+        res = supabase.table('alertas_mercado').select('*').execute()
+        return {"status": "ok", "alertas": res.data}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+@app.post("/api/borrar_alerta")
+def api_borrar_alerta(datos: dict):
+    try:
+        supabase.table('alertas_mercado').delete().eq('id', datos.get('id')).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+@app.get("/api/todas_reputaciones")
+def api_todas_reputaciones():
+    try:
+        res = supabase.table('reputacion').select('*').execute()
+        agrupado = {}
+        for r in res.data:
+            v = r['vendedor']
+            if v not in agrupado: agrupado[v] = []
+            agrupado[v].append(r['estrellas'])
+        
+        resultado = [{"vendedor": k, "promedio": round(sum(v)/len(v), 1), "ventas": len(v)} for k, v in agrupado.items()]
+        return {"status": "ok", "reputaciones": resultado}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
+
+# ==========================================
 # 🛑 BOTÓN DE ENCENDIDO (SIEMPRE AL FINAL)
 # ==========================================
 if __name__ == "__main__":
