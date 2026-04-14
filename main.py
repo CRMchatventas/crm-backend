@@ -209,42 +209,60 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
 
     # 1. SALUDO Y MENÚ PRINCIPAL
     if any(word in texto for word in ["hola", "buenas", "menu", "menú", "info"]):
-        respuesta = f"¡{saludo}! 🎮 Soy el asistente virtual de Fantasy Games.\n\n¿En qué te ayudo?\n*1.* 👾 Ver Catálogo completo\n*2.* 🚚 Métodos de entrega y pago\n*3.* 🙋‍♂️ Hablar con Miguel\n\n_O dime el nombre del juego que buscas y reviso si hay disponibilidad._"
-    
-    # 2. CATÁLOGO (DINÁMICO DESDE SUPABASE)
+        respuesta = f"¡{saludo}! 🎮 Soy el asistente virtual de Fantasy Games.\n\n¿En qué te ayudo?\n*1.* 👾 Ver Catálogo disponible\n*2.* 🚚 Entregas personales (Local)\n*3.* 🙋‍♂️ Hablar con Miguel\n*4.* 📦 Envíos fuera de Aguascalientes\n\n_O dime el nombre del juego que buscas y reviso si hay disponibilidad._"
+
+    # 2. CATÁLOGO DINÁMICO (Consulta directo a Supabase)
     elif texto == "1" or "catalogo" in texto or "catálogo" in texto:
         try:
-            # Traemos los juegos que sí tengan stock (máximo 15 para no saturar WhatsApp)
             res = supabase.table('inventario').select('nombre, consola, precio').gt('stock', 0).order('nombre').limit(15).execute()
             if res.data:
                 lista_juegos = "\n".join([f"🔸 {j['nombre']} ({j['consola']}) - ${j['precio']}" for j in res.data])
-                respuesta = f"🕹️ *Catálogo Fantasy Games (Disponibles hoy):*\n\n{lista_juegos}\n\n_¡Y muchos más! Dime cuál buscas y te lo reviso._"
+                respuesta = f"🕹️ *Catálogo Fantasy Games:*\n\n{lista_juegos}\n\n_¡Y muchos más! Dime cuál buscas y te reviso._"
             else:
                 respuesta = "Ahorita estamos acomodando el inventario físico 📦. ¡Pero dime qué juego buscas y te lo reviso de inmediato!"
         except Exception as e:
             respuesta = "Ahorita estamos actualizando el inventario 📦. ¡Dime qué juego buscas y te reviso si lo tenemos!"
-    
-    # 3. ENTREGAS Y PAGOS (REGLAS DE MIGUEL)
-    elif texto == "2" or "pago" in texto or "entrega" in texto or "donde entregas" in texto or "ubicacion" in texto:
+
+    # 3. ENTREGAS LOCALES
+    elif texto == "2" or "entrega local" in texto or "donde entregas" in texto or "ubicacion" in texto:
         respuesta = (
-            "🚚 *Entregas y Métodos de Pago:*\n\n"
-            "• Si vas a pagar en *efectivo*, te lo entrego en Paseos de Aguascalientes el día y a la hora que tú quieras.\n"
-            "• Entregas en *Altaria*, solamente los días miércoles y viernes por las tardes (previo depósito bancario).\n"
-            "• 📦 *¿Compra mayor a $1,000?* Te lo entrego a domicilio cualquier día (previo depósito bancario).\n\n"
-            "💳 *Para APARTAR un juego seguro:*\nSi me pagas por adelantado, te lo aparto y ya no se lo ofrezco a nadie más. Puedes pagar con tarjeta o transferencia aquí:\n"
-            f"{LINK_MERCADOPAGO}\n\n¿Qué juego vas a querer?"
+            "🚚 *Entregas en Aguascalientes:*\n\n"
+            "• *Efectivo:* Te lo entrego en Paseos de Aguascalientes (cerca de mi casa) a la hora que gustes.\n"
+            "• *Altaria o Domicilio:* Solamente miércoles y viernes por las tardes.\n"
+            "• 📦 *¿Compra mayor a $1,000?* Te lo entrego a domicilio cualquier día (previo depósito).\n\n"
+            "💳 *APARTADOS:*\nPaga por adelantado aquí y te lo aparto:\n"
+            f"{LINK_MERCADOPAGO}\n\n¿Qué juego buscas?"
         )
-    
+
     # 4. HABLAR CON HUMANO
     elif texto == "3" or "humano" in texto or "miguel" in texto or "asesor" in texto:
         respuesta = "¡Claro! 👨‍💻 Le estoy mandando una notificación a Miguel. En cuanto se desocupe te contesta por aquí mismo."
-        # Notificación Push al Patrón
         disparar_whatsapp_real(ADMIN_PHONE, f"🚨 *ALERTA CRM:* El prospecto {cliente} ({telefono}) está pidiendo atención humana.")
 
-    # 5. EL AUTO-VENDEDOR (Busca en base de datos si el texto parece el nombre de un juego)
+    # 5. ENVÍOS FORÁNEOS (NUEVA OPCIÓN)
+    elif texto == "4" or "fuera" in texto or "envios" in texto or "envíos" in texto or "foraneo" in texto:
+        respuesta = (
+            "📦 *Envíos Nacionales:*\n"
+            "Si eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
+            "Es mucho más seguro y te cuesta aproximadamente $250 pesos extras.\n\n"
+            "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
+        )
+
+    # 6. FLUJO DE MERCADO ENVÍOS (LA EXPLICACIÓN)
+    elif "me interesa mercado envios" in texto.replace("í", "i").replace("é", "e"):
+        respuesta = (
+            "¡Perfecto! 📦 El proceso es el siguiente:\n\n"
+            "1️⃣ Te creo una publicación en Mercado Libre por $300 pesos. Te mando el link y lo pagas ahí (esto cubre la guía de envío y el seguro).\n"
+            "2️⃣ El restante del costo del juego me lo depositas directo a mi cuenta en este link:\n"
+            f"{LINK_MERCADOPAGO}\n\n"
+            "*(Ejemplo: Si el juego vale $500 y el envío $250, el total es $750. Pagas $300 en ML y me depositas $450).*\n\n"
+            "_(También manejo Correos de México o DHL, pero te recomiendo Mercado Envíos)._\n\n"
+            "¿Qué juego te interesa comprar?"
+        )
+
+    # 7. AUTO-VENDEDOR
     elif len(texto) > 3:
         try:
-            # Busca coincidencias en la base de datos (ilike no es sensible a mayusculas/minusculas)
             res = supabase.table('inventario').select('*').ilike('nombre', f"%{texto}%").execute()
             if res.data and len(res.data) > 0:
                 juegos_encontrados = "\n".join([f"🎮 *{j['nombre']}* ({j['consola']}) - ${j['precio']} MXN" for j in res.data[:3]])
@@ -253,41 +271,23 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
                     "🔥 *¿Lo quieres asegurar?*\nPágalo por adelantado y te lo aparto ahora mismo para entregártelo:\n"
                     f"{LINK_MERCADOPAGO}\n\n_(Mándame captura de tu pago por aquí)_"
                 )
-                # Notifica a Miguel de una posible venta
-                disparar_whatsapp_real(ADMIN_PHONE, f"💰 *INTENCIÓN DE COMPRA:*\nEl bot le acaba de ofrecer {res.data[0]['nombre']} a {cliente}. ¡Échale un ojo al chat!")
+                disparar_whatsapp_real(ADMIN_PHONE, f"💰 *INTENCIÓN DE COMPRA:*\nEl bot le acaba de ofrecer {res.data[0]['nombre']} a {cliente}.")
             else:
-                respuesta = "Hmm, parece que por ahora no tengo ese juego exacto en sistema, o tal vez se escribe diferente. 😅\n\nPuedes checar el catálogo completo mandando un *1*, o pide hablar con Miguel mandando un *3* para que te confirme."
+                respuesta = "Hmm, parece que por ahora no tengo ese juego exacto en sistema. 😅\n\nPuedes checar el catálogo mandando un *1*, o pide hablar con Miguel mandando un *3*."
         except Exception as e:
             print(f"Error en Auto-Seller: {e}")
 
-    # SI HAY RESPUESTA, GUARDAR EN HISTORIAL Y ENVIAR WHATSAPP
+    # GUARDAR Y ENVIAR
     if respuesta:
         datos_guardar = {
-            "nombre": cliente, 
-            "telefono": telefono, 
-            "origen": "WHATSAPP", 
-            "mensaje": f"TÚ: [BOT] {respuesta}", 
+            "nombre": cliente,
+            "telefono": telefono,
+            "origen": "WHATSAPP",
+            "mensaje": f"TÚ: [BOT] {respuesta}",
             "columna": "Bandeja Nueva"
         }
         supabase.table('prospectos').insert(datos_guardar).execute()
         disparar_whatsapp_real(telefono, respuesta)
-
-@app.post("/api/enviar_mensaje")
-def enviar_mensaje_whatsapp(datos: MensajeSaliente):
-    res = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).order('id', desc=True).limit(1).execute()
-    tel = res.data[0]['telefono'] if res.data else None
-    
-    supabase.table('prospectos').insert({
-        "nombre": datos.cliente, 
-        "telefono": tel, 
-        "origen": "WHATSAPP", 
-        "mensaje": f"TÚ: {datos.texto}", 
-        "columna": "Respondió"
-    }).execute()
-    
-    if tel: 
-        disparar_whatsapp_real(tel, datos.texto)
-    return {"status": "enviado"}
 
 # ==========================================
 # 🌐 RUTAS DE GESTIÓN CRM
