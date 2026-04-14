@@ -219,8 +219,8 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
     elif texto == "2" or "pago" in texto or "entrega" in texto or "donde entregas" in texto or "ubicacion" in texto:
         respuesta = (
             "🚚 *Entregas y Métodos de Pago:*\n\n"
-            "• Si vas a pagar en *efectivo*, te lo entrego en Paseos de Aguascalientes (cerca de mi casa) el día y a la hora que tú quieras.\n"
-            "• Entregas a *domicilio* o en *Altaria*, solamente los días miércoles y viernes por las tardes.\n"
+            "• Si vas a pagar en *efectivo*, te lo entrego en Paseos de Aguascalientes el día y a la hora que tú quieras.\n"
+            "• Entregas en *Altaria*, solamente los días miércoles y viernes por las tardes (previo depósito bancario).\n"
             "• 📦 *¿Compra mayor a $1,000?* Te lo entrego a domicilio cualquier día (previo depósito bancario).\n\n"
             "💳 *Para APARTAR un juego seguro:*\nSi me pagas por adelantado, te lo aparto y ya no se lo ofrezco a nadie más. Puedes pagar con tarjeta o transferencia aquí:\n"
             f"{LINK_MERCADOPAGO}\n\n¿Qué juego vas a querer?"
