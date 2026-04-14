@@ -239,16 +239,7 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
         respuesta = "¡Claro! 👨‍💻 Le estoy mandando una notificación a Miguel. En cuanto se desocupe te contesta por aquí mismo."
         disparar_whatsapp_real(ADMIN_PHONE, f"🚨 *ALERTA CRM:* El prospecto {cliente} ({telefono}) está pidiendo atención humana.")
 
-    # 5. ENVÍOS FORÁNEOS (NUEVA OPCIÓN)
-    elif texto == "4" or "fuera" in texto or "envios" in texto or "envíos" in texto or "foraneo" in texto:
-        respuesta = (
-            "📦 *Envíos Nacionales:*\n"
-            "Si eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
-            "Es mucho más seguro y te cuesta aproximadamente $250 pesos.\n\n"
-            "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
-        )
-
-    # 6. FLUJO DE MERCADO ENVÍOS (LA EXPLICACIÓN)
+    # 🛡️ FIX: 5. FLUJO DE MERCADO ENVÍOS (LA EXPLICACIÓN PRIMERO POR SER ESPECÍFICA)
     elif "me interesa mercado envios" in texto.replace("í", "i").replace("é", "e"):
         respuesta = (
             "¡Perfecto! 📦 El proceso es el siguiente:\n\n"
@@ -258,6 +249,15 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
             "*(Ejemplo: Si el juego vale $500 y el envío $250, el total es $750. Pagas $300 en ML y me depositas $450).*\n\n"
             "_(También manejo Correos de México o DHL, pero te recomiendo Mercado Envíos)._\n\n"
             "¿Qué juego te interesa comprar?"
+        )
+
+    # 6. ENVÍOS FORÁNEOS (GENERAL)
+    elif texto == "4" or "fuera" in texto or "envios" in texto or "envíos" in texto or "foraneo" in texto:
+        respuesta = (
+            "📦 *Envíos Nacionales:*\n"
+            "Si eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
+            "Es mucho más seguro y te cuesta aproximadamente $250 pesos.\n\n"
+            "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
         )
 
     # 7. AUTO-VENDEDOR
@@ -559,7 +559,9 @@ def api_mis_alertas():
 @app.post("/api/borrar_alerta")
 def api_borrar_alerta(datos: dict):
     try:
-        supabase.table('alertas_mercado').delete().eq('id', datos.get('id')).execute()
+        # 🛡️ FIX B2B: Forzamos la conversión a entero (int) para que Supabase no falle.
+        id_borrar = int(datos.get('id', 0))
+        supabase.table('alertas_mercado').delete().eq('id', id_borrar).execute()
         return {"status": "ok"}
     except Exception as e: 
         return {"status": "error", "detalle": str(e)}
