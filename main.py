@@ -227,8 +227,8 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
     elif texto == "2" or "entrega local" in texto or "donde entregas" in texto or "ubicacion" in texto:
         respuesta = (
             "🚚 *Entregas en Aguascalientes:*\n\n"
-            "• *Efectivo:* Te lo entrego en Paseos de Aguascalientes (cerca de mi casa) a la hora que gustes.\n"
-            "• *Altaria o Domicilio:* Solamente miércoles y viernes por las tardes.\n"
+            "• *Efectivo:* Te lo entrego en Paseos de Aguascalientes el dia y hora que gustes.\n"
+            "• *Altaria:* Solamente miércoles y viernes por las tardes(previo depósito ó apartado).\n"
             "• 📦 *¿Compra mayor a $1,000?* Te lo entrego a domicilio cualquier día (previo depósito).\n\n"
             "💳 *APARTADOS:*\nPaga por adelantado aquí y te lo aparto:\n"
             f"{LINK_MERCADOPAGO}\n\n¿Qué juego buscas?"
@@ -244,7 +244,7 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
         respuesta = (
             "📦 *Envíos Nacionales:*\n"
             "Si eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
-            "Es mucho más seguro y te cuesta aproximadamente $250 pesos extras.\n\n"
+            "Es mucho más seguro y te cuesta aproximadamente $250 pesos.\n\n"
             "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
         )
 
