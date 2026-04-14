@@ -26,7 +26,7 @@ SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e"
 
 # 🤖 CONFIGURACIÓN DE TU EMPLEADO DIGITAL
 ADMIN_PHONE = "524491142598" # 🔴 CAMBIA ESTO POR TU CELULAR (Para notificaciones de ventas)
-LINK_MERCADOPAGO = "https://link.mercadopago.com.mx/tu_link_aqui" # 🔴 PON TU LINK AQUÍ
+LINK_MERCADOPAGO = "https://link.mercadopago.com.mx/fantasygamesags" # 🔴 PON TU LINK AQUÍ
 LINK_CATALOGO = "https://tu-link-al-catalogo.com" # 🔴 PON TU LINK AL CATÁLOGO
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -211,9 +211,18 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
     if any(word in texto for word in ["hola", "buenas", "menu", "menú", "info"]):
         respuesta = f"¡{saludo}! 🎮 Soy el asistente virtual de Fantasy Games.\n\n¿En qué te ayudo?\n*1.* 👾 Ver Catálogo completo\n*2.* 🚚 Métodos de entrega y pago\n*3.* 🙋‍♂️ Hablar con Miguel\n\n_O dime el nombre del juego que buscas y reviso si hay disponibilidad._"
     
-    # 2. CATÁLOGO
+    # 2. CATÁLOGO (DINÁMICO DESDE SUPABASE)
     elif texto == "1" or "catalogo" in texto or "catálogo" in texto:
-        respuesta = f"🕹️ *Catálogo Fantasy Games:*\nCheca todos los títulos que tenemos disponibles aquí:\n{LINK_CATALOGO}\n\nSi te interesa alguno, solo escríbeme el nombre."
+        try:
+            # Traemos los juegos que sí tengan stock (máximo 15 para no saturar WhatsApp)
+            res = supabase.table('inventario').select('nombre, consola, precio').gt('stock', 0).order('nombre').limit(15).execute()
+            if res.data:
+                lista_juegos = "\n".join([f"🔸 {j['nombre']} ({j['consola']}) - ${j['precio']}" for j in res.data])
+                respuesta = f"🕹️ *Catálogo Fantasy Games (Disponibles hoy):*\n\n{lista_juegos}\n\n_¡Y muchos más! Dime cuál buscas y te lo reviso._"
+            else:
+                respuesta = "Ahorita estamos acomodando el inventario físico 📦. ¡Pero dime qué juego buscas y te lo reviso de inmediato!"
+        except Exception as e:
+            respuesta = "Ahorita estamos actualizando el inventario 📦. ¡Dime qué juego buscas y te reviso si lo tenemos!"
     
     # 3. ENTREGAS Y PAGOS (REGLAS DE MIGUEL)
     elif texto == "2" or "pago" in texto or "entrega" in texto or "donde entregas" in texto or "ubicacion" in texto:
