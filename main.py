@@ -25,7 +25,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
 
 # 🤖 CONFIGURACIÓN DE TU EMPLEADO DIGITAL
-ADMIN_PHONE = "524490000000" # 🔴 CAMBIA ESTO POR TU CELULAR (Para notificaciones de ventas)
+ADMIN_PHONE = "524491142598" # 🔴 CAMBIA ESTO POR TU CELULAR (Para notificaciones de ventas)
 LINK_MERCADOPAGO = "https://link.mercadopago.com.mx/tu_link_aqui" # 🔴 PON TU LINK AQUÍ
 LINK_CATALOGO = "https://tu-link-al-catalogo.com" # 🔴 PON TU LINK AL CATÁLOGO
 
