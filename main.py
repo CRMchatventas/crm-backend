@@ -1,7 +1,7 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V7.0 (GOLD FULL ENGINE)
-# Funciones: Auto-Vendedor AI, ScraperAPI + Fallback, IA Limpiadora,
-# Finanzas, Web Bridge, Vistas B2B y Notificaciones Push al Admin.
+# 🚀 SISTEMA BACKEND: CRM PRO V7.3 (GOLD SAAS ENGINE)
+# Funciones: Auto-Vendedor AI, Radar Algorítmico, IA Limpiadora,
+# Finanzas, Red B2B, Starter Pack, Catálogo Maestro y Blindaje Total.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -15,7 +15,7 @@ from supabase import create_client, Client
 from datetime import datetime
 import difflib # 🛡️ LIBRERÍA DE IA LIMPIADORA
 
-app = FastAPI(title="CRM Fantasy Games - Engine V7.0 Gold")
+app = FastAPI(title="Motor Central CRM B2B - Engine V7.3 Gold")
 
 # --- 🔑 CREDENCIALES Y CONFIGURACIÓN DEL BOT ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
@@ -25,10 +25,10 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
 
 # 🤖 CONFIGURACIÓN DE TU EMPLEADO DIGITAL
-ADMIN_PHONE = "524491142598" # 🔴 CAMBIA ESTO POR TU CELULAR (Para notificaciones de ventas)
-LINK_MERCADOPAGO = "https://link.mercadopago.com.mx/fantasygamesags" # 🔴 PON TU LINK AQUÍ
+ADMIN_PHONE = "524491142598" # 🔴 Celular Admin
+LINK_MERCADOPAGO = "https://link.mercadopago.com.mx/fantasygamesags" 
 
-
+# Conexión a Nube B2B
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 📦 MODELOS DE DATOS ---
@@ -163,7 +163,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
             "url_pc": link_juego if link_juego else url_search
         }
     except Exception as e:
-        return {"status": "error", "detalle": str(e), "url_pc": "https://www.pricecharting.com"}
+        return {"status": "error", "detalle": "Error en el Radar de Precios", "url_pc": "https://www.pricecharting.com"}
 
 # ==========================================
 # 📥 MOTOR MULTIMEDIA & WHATSAPP
@@ -186,7 +186,7 @@ def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_defaul
                 supabase.storage.from_("multimedia").upload(file_path, file_bytes, {"content-type": mime_type})
                 return supabase.storage.from_("multimedia").get_public_url(file_path)
             except Exception as e:
-                print(f"❌ Error Supabase: {e}")
+                print(f"❌ Error Nube B2B: {e}")
     return None
 
 def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
@@ -196,22 +196,33 @@ def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
     try: 
         requests.post(url, headers=headers, json=payload)
     except Exception as e: 
-        print(f"❌ Error Meta API: {e}")
+        print(f"❌ Error Gateway API: {e}")
 
 # ==========================================
 # 🤖 BOT AAA: EL EMPLEADO DIGITAL 24/7
 # ==========================================
-def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
+def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str):
     texto = texto_entrante.lower().strip()
     respuesta = ""
     hora = datetime.now().hour
     saludo = "Buenos días" if hora < 12 else "Buenas tardes" if hora < 19 else "Buenas noches"
 
-    # 1. SALUDO Y MENÚ PRINCIPAL
-    if any(word in texto for word in ["hola", "buenas", "menu", "menú", "info"]):
+    # 1. FLUJO DE MERCADO ENVÍOS
+    if "me interesa mercado envios" in texto.replace("í", "i").replace("é", "e"):
+        respuesta = (
+            "¡Perfecto! 📦 El proceso es el siguiente:\n\n"
+            "1️⃣ Te creo una publicación en Mercado Libre por $300 pesos. Te mando el link y lo pagas ahí (esto cubre la guía de envío y el seguro).\n"
+            "2️⃣ El restante del costo del juego me lo depositas directo a mi cuenta en este link:\n"
+            f"{LINK_MERCADOPAGO}\n\n"
+            "*(Ejemplo: Si el juego vale $500 y el envío $250, el total es $750. Pagas $300 en ML y me depositas $450).*\n\n"
+            "¿Qué juego te interesa comprar?"
+        )
+
+    # 2. SALUDO Y MENÚ PRINCIPAL
+    elif any(word in texto for word in ["hola", "buenas", "menu", "menú", "info"]):
         respuesta = f"¡{saludo}! 🎮 Soy el asistente virtual de Fantasy Games.\n\n¿En qué te ayudo?\n*1.* 👾 Ver Catálogo disponible\n*2.* 🚚 Entregas personales (Local)\n*3.* 🙋‍♂️ Hablar con Miguel\n*4.* 📦 Envíos fuera de Aguascalientes\n\n_O dime el nombre del juego que buscas y reviso si hay disponibilidad._"
 
-    # 2. CATÁLOGO DINÁMICO (Consulta directo a Supabase)
+    # 3. CATÁLOGO DINÁMICO
     elif texto == "1" or "catalogo" in texto or "catálogo" in texto:
         try:
             res = supabase.table('inventario').select('nombre, consola, precio').gt('stock', 0).order('nombre').limit(15).execute()
@@ -220,42 +231,28 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
                 respuesta = f"🕹️ *Catálogo Fantasy Games:*\n\n{lista_juegos}\n\n_¡Y muchos más! Dime cuál buscas y te reviso._"
             else:
                 respuesta = "Ahorita estamos acomodando el inventario físico 📦. ¡Pero dime qué juego buscas y te lo reviso de inmediato!"
-        except Exception as e:
-            respuesta = "Ahorita estamos actualizando el inventario 📦. ¡Dime qué juego buscas y te reviso si lo tenemos!"
+        except Exception:
+            respuesta = "Estamos actualizando el inventario 📦. ¡Dime qué juego buscas!"
 
-    # 3. ENTREGAS LOCALES
+    # 4. ENTREGAS LOCALES
     elif texto == "2" or "entrega local" in texto or "donde entregas" in texto or "ubicacion" in texto:
         respuesta = (
             "🚚 *Entregas en Aguascalientes:*\n\n"
             "• *Efectivo:* Te lo entrego en Paseos de Aguascalientes el dia y hora que gustes.\n"
             "• *Altaria:* Solamente miércoles y viernes por las tardes(previo depósito ó apartado).\n"
             "• 📦 *¿Compra mayor a $1,000?* Te lo entrego a domicilio cualquier día (previo depósito).\n\n"
-            "💳 *APARTADOS:*\nPaga por adelantado aquí y te lo aparto:\n"
-            f"{LINK_MERCADOPAGO}\n\n¿Qué juego buscas?"
+            f"💳 *APARTADOS:*\nPaga por adelantado aquí y te lo aparto:\n{LINK_MERCADOPAGO}\n\n¿Qué juego buscas?"
         )
 
-    # 4. HABLAR CON HUMANO
+    # 5. HABLAR CON HUMANO
     elif texto == "3" or "humano" in texto or "miguel" in texto or "asesor" in texto:
         respuesta = "¡Claro! 👨‍💻 Le estoy mandando una notificación a Miguel. En cuanto se desocupe te contesta por aquí mismo."
         disparar_whatsapp_real(ADMIN_PHONE, f"🚨 *ALERTA CRM:* El prospecto {cliente} ({telefono}) está pidiendo atención humana.")
 
-    # 🛡️ FIX: 5. FLUJO DE MERCADO ENVÍOS (LA EXPLICACIÓN PRIMERO POR SER ESPECÍFICA)
-    elif "me interesa mercado envios" in texto.replace("í", "i").replace("é", "e"):
-        respuesta = (
-            "¡Perfecto! 📦 El proceso es el siguiente:\n\n"
-            "1️⃣ Te creo una publicación en Mercado Libre por $300 pesos. Te mando el link y lo pagas ahí (esto cubre la guía de envío y el seguro).\n"
-            "2️⃣ El restante del costo del juego me lo depositas directo a mi cuenta en este link:\n"
-            f"{LINK_MERCADOPAGO}\n\n"
-            "*(Ejemplo: Si el juego vale $500 y el envío $250, el total es $750. Pagas $300 en ML y me depositas $450).*\n\n"
-            "_(También manejo Correos de México o DHL, pero te recomiendo Mercado Envíos)._\n\n"
-            "¿Qué juego te interesa comprar?"
-        )
-
-    # 6. ENVÍOS FORÁNEOS (GENERAL)
+    # 6. ENVÍOS FORÁNEOS
     elif texto == "4" or "fuera" in texto or "envios" in texto or "envíos" in texto or "foraneo" in texto:
         respuesta = (
-            "📦 *Envíos Nacionales:*\n"
-            "Si eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
+            "📦 *Envíos Nacionales:*\nSi eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
             "Es mucho más seguro y te cuesta aproximadamente $250 pesos.\n\n"
             "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
         )
@@ -268,14 +265,13 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
                 juegos_encontrados = "\n".join([f"🎮 *{j['nombre']}* ({j['consola']}) - ${j['precio']} MXN" for j in res.data[:3]])
                 respuesta = (
                     f"¡Sí lo tengo en inventario!\n\n{juegos_encontrados}\n\n"
-                    "🔥 *¿Lo quieres asegurar?*\nPágalo por adelantado y te lo aparto ahora mismo para entregártelo:\n"
-                    f"{LINK_MERCADOPAGO}\n\n_(Mándame captura de tu pago por aquí)_"
+                    f"🔥 *¿Lo quieres asegurar?*\nPágalo por adelantado y te lo aparto ahora mismo para entregártelo:\n{LINK_MERCADOPAGO}\n\n_(Mándame captura de tu pago por aquí)_"
                 )
                 disparar_whatsapp_real(ADMIN_PHONE, f"💰 *INTENCIÓN DE COMPRA:*\nEl bot le acaba de ofrecer {res.data[0]['nombre']} a {cliente}.")
             else:
-                respuesta = "Hmm, parece que por ahora no tengo ese juego exacto en sistema. 😅\n\nPuedes checar el catálogo mandando un *1*, o pide hablar con Miguel mandando un *3*."
-        except Exception as e:
-            print(f"Error en Auto-Seller: {e}")
+                respuesta = "Hmm, parece que por ahora no tengo ese juego exacto en sistema. 😅\nPuedes checar el catálogo mandando un *1*, o pide hablar con Miguel mandando un *3*."
+        except Exception:
+            pass
 
     # GUARDAR Y ENVIAR
     if respuesta:
@@ -284,25 +280,45 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str):
             "telefono": telefono,
             "origen": "WHATSAPP",
             "mensaje": f"TÚ: [BOT] {respuesta}",
-            "columna": "Bandeja Nueva"
+            "columna": columna_actual # 🛡️ BLINDAJE: Usa la columna en la que ya estaba el cliente
         }
         supabase.table('prospectos').insert(datos_guardar).execute()
         disparar_whatsapp_real(telefono, respuesta)
 
 # ==========================================
-# 🌐 RUTAS DE GESTIÓN CRM
+# 🌐 RUTAS DE GESTIÓN CRM (COLUMNAS Y CHATS)
 # ==========================================
 @app.get("/api/cargar_todo")
 def cargar_todo():
-    res_cols = supabase.table('configuracion').select('nombre_columna').execute()
-    columnas = [row['nombre_columna'] for row in res_cols.data]
-    
-    res_prospectos = supabase.table('prospectos').select('*').order('id', desc=False).execute()
-    ultimos = {}
-    for fila in res_prospectos.data: 
-        ultimos[fila['nombre']] = fila
+    try:
+        res_cols = supabase.table('configuracion').select('nombre_columna').execute()
+        columnas = [row['nombre_columna'] for row in res_cols.data]
         
-    return {"columnas": columnas, "prospectos": list(ultimos.values())}
+        res_prospectos = supabase.table('prospectos').select('*').order('id', desc=False).execute()
+        ultimos = {}
+        for fila in res_prospectos.data: 
+            ultimos[fila['nombre']] = fila
+            
+        return {"columnas": columnas, "prospectos": list(ultimos.values())}
+    except Exception as e:
+        return {"error": "Error conectando a Nube B2B"}
+
+# 🛡️ GESTIÓN DE COLUMNAS (Para que no se borren al cerrar Godot)
+@app.post("/api/crear_columna")
+def crear_columna(datos: dict):
+    try:
+        supabase.table('configuracion').insert({"nombre_columna": datos.get("nombre")}).execute()
+        return {"status": "ok"}
+    except Exception as e: 
+        return {"status": "error", "detalle": "Error en Servidor Central"}
+
+@app.post("/api/borrar_columna")
+def borrar_columna(datos: dict):
+    try:
+        supabase.table('configuracion').delete().eq("nombre_columna", datos.get("nombre")).execute()
+        return {"status": "ok"}
+    except Exception as e: 
+        return {"status": "error", "detalle": "Error en Servidor Central"}
 
 @app.post("/api/historial_chat")
 def historial_chat(datos: dict):
@@ -311,8 +327,7 @@ def historial_chat(datos: dict):
     for fila in res.data:
         texto = fila['mensaje']
         es_mio = texto.startswith("TÚ: ")
-        if es_mio: 
-            texto = texto.replace("TÚ: ", "", 1)
+        if es_mio: texto = texto.replace("TÚ: ", "", 1)
         historial.append({"texto": texto, "es_mio": es_mio})
     return {"historial": historial}
 
@@ -322,7 +337,7 @@ def actualizar_estado(datos: ProspectoUpdate):
         supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('nombre', datos.nombre).execute()
         return {"status": "ok"}
     except Exception as e:
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error", "detalle": "Error de persistencia"}
 
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotaUpdate):
@@ -330,7 +345,7 @@ def actualizar_notas(datos: NotaUpdate):
         supabase.table('prospectos').update({'notas': datos.notas, 'etiquetas': datos.etiquetas}).eq('nombre', datos.nombre).execute()
         return {"status": "ok"}
     except Exception as e:
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.post("/api/borrar_prospecto")
 def borrar_prospecto(datos: dict):
@@ -338,10 +353,49 @@ def borrar_prospecto(datos: dict):
         supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos["nombre"]).execute()
         return {"status": "ok"}
     except Exception as e:
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
+
+@app.post("/api/borrar_permanente")
+def borrar_permanente(datos: dict):
+    try:
+        supabase.table('prospectos').delete().eq('nombre', datos.get("nombre")).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detalle": "No se pudo eliminar de la Nube"}
 
 # ==========================================
-# 📦 INVENTARIO & DB
+# 🚀 SAAS: CATÁLOGO MAESTRO Y STARTER PACK
+# ==========================================
+@app.get("/api/buscar_maestro")
+def buscar_maestro(q: str):
+    # Buscador inteligente B2B para Autocompletado en Godot
+    try:
+        res = supabase.table('catalogo_maestro').select('*').ilike('nombre', f'%{q}%').limit(10).execute()
+        return {"status": "ok", "resultados": res.data}
+    except Exception as e:
+        return {"status": "error", "detalle": "Error consultando Catálogo"}
+
+@app.post("/api/inyectar_starter")
+def inyectar_starter():
+    # Inyecta los 300 juegos top al inventario
+    try:
+        maestros = supabase.table('catalogo_maestro').select('*').eq('starter_pack', True).execute()
+        lote = []
+        for m in maestros.data:
+            item = {
+                "nombre": m["nombre"], "consola": m["consola"], "precio": m["precio_sugerido"],
+                "costo": 0, "stock": 0, "estado_general": "Suelto", "codigo_barras": ""
+            }
+            lote.append(item)
+        
+        if lote:
+            supabase.table('inventario').insert(lote).execute()
+        return {"status": "ok", "inyectados": len(lote)}
+    except Exception as e:
+        return {"status": "error", "detalle": "Error inyectando Starter Pack"}
+
+# ==========================================
+# 📦 INVENTARIO & DB (CON GATILLO DE RADAR)
 # ==========================================
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem):
@@ -352,14 +406,21 @@ def guardar_inventario(datos: InventarioItem):
         
         res = supabase.table('inventario').select('*').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).execute()
         
-        if len(res.data) > 0:
+        if res.data and len(res.data) > 0:
             supabase.table('inventario').update(datos.dict()).eq('id', res.data[0]['id']).execute()
         else:
             supabase.table('inventario').insert(datos.dict()).execute()
             
+        # 🚨 EL GATILLO DEL RADAR B2B 🚨
+        res_alertas = supabase.table('alertas_mercado').select('*').ilike('juego', f"%{nombre_limpio}%").eq('activa', True).execute()
+        for alerta in res_alertas.data:
+            if alerta['precio_maximo'] >= datos.precio and datos.precio > 0:
+                # Dispara alerta de francotirador
+                disparar_whatsapp_real(ADMIN_PHONE, f"🎯 *¡RADAR B2B ACTIVADO!* 🎯\nSe acaba de dar de alta en la red:\n🎮 *{datos.nombre}* ({datos.consola})\n💰 Precio: ${datos.precio}\n👤 Alerta de: {alerta['usuario']}")
+
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error", "detalle": "Error guardando en Nube"}
 
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict):
@@ -367,7 +428,7 @@ def borrar_item(datos: dict):
         supabase.table('inventario').delete().eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).execute()
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.get("/api/cargar_inventario")
 def cargar_inventario():
@@ -375,44 +436,38 @@ def cargar_inventario():
         res = supabase.table('inventario').select('*').order('nombre', desc=False).execute()
         return {"status": "ok", "inventario": res.data}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem):
     try:
         res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).execute()
         
-        if len(res.data) > 0:
+        if res.data and len(res.data) > 0:
             precio_venta = res.data[0].get('precio', 0.0)
             costo_compra = res.data[0].get('costo', 0.0)
             ganancia = precio_venta - costo_compra
             
             supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).execute()
             
-            registro = {
-                "nombre_juego": datos.nombre,
-                "precio_venta": precio_venta,
-                "costo": costo_compra,
-                "ganancia": ganancia
-            }
+            registro = {"nombre_juego": datos.nombre, "precio_venta": precio_venta, "costo": costo_compra, "ganancia": ganancia}
             supabase.table('registro_ventas').insert(registro).execute()
             
             return {"status": "ok"}
         else:
             return {"status": "error", "detalle": "Variante no encontrada"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
-# 🔍 EL ENDPOINT DEL ESCÁNER (Restaurado y Blindado)
 @app.get("/api/buscar_por_codigo")
 def buscar_por_codigo(codigo: str):
     try:
         res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).execute()
-        if len(res.data) > 0: 
+        if res.data and len(res.data) > 0: 
             return {"status": "ok", "juego": res.data[0]}
         return {"status": "error", "detalle": "Código no registrado"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.get("/api/metricas")
 def obtener_metricas():
@@ -427,25 +482,21 @@ def obtener_metricas():
         ganancia_real = sum(v.get('ganancia', 0.0) for v in res_ventas.data)
         
         return {
-            "status": "ok", 
-            "piezas": total_piezas, 
-            "valor": valor_inventario,
-            "costo_inv": costo_inventario, 
-            "ganancia_potencial": valor_inventario - costo_inventario,
-            "ventas_totales": ventas_totales, 
-            "ganancia_real": ganancia_real
+            "status": "ok", "piezas": total_piezas, "valor": valor_inventario,
+            "costo_inv": costo_inventario, "ganancia_potencial": valor_inventario - costo_inventario,
+            "ventas_totales": ventas_totales, "ganancia_real": ganancia_real
         }
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 # ==========================================
-# 🔗 WEBHOOK (RECEPCIÓN META)
+# 🔗 WEBHOOK (RECEPCIÓN META Y PERSISTENCIA)
 # ==========================================
 @app.get("/webhook")
 def verificar_webhook(request: Request):
     if request.query_params.get("hub.verify_token") == "mi_contrasena_secreta_fantasy": 
         return PlainTextResponse(content=request.query_params.get("hub.challenge"), status_code=200)
-    return PlainTextResponse(content="CRM Fantasy Activo.", status_code=200)
+    return PlainTextResponse(content="CRM B2B Activo.", status_code=200)
 
 @app.post("/webhook")
 async def recibir_mensaje_meta(request: Request):
@@ -459,8 +510,7 @@ async def recibir_mensaje_meta(request: Request):
                 nombre = contact["profile"]["name"]
                 tel = msg["from"]
                 
-                if tel.startswith("521"): 
-                    tel = "52" + tel[3:]
+                if tel.startswith("521"): tel = "52" + tel[3:]
                 
                 tipo = msg.get("type", "text")
                 texto = ""
@@ -471,28 +521,26 @@ async def recibir_mensaje_meta(request: Request):
                     enlace = descargar_y_subir_multimedia(msg[tipo]["id"], msg[tipo].get("mime_type", ""), ".bin")
                     texto = f"[{tipo.upper()}] recibida: {enlace}"
                 
-                res = supabase.table('prospectos').select('columna').eq('nombre', nombre).order('id', desc=True).limit(1).execute()
-                col = res.data[0]['columna'] if res.data else "Bandeja Nueva"
+                # 🛡️ BLINDAJE DE PERSISTENCIA: Obligamos a respetar la columna actual del cliente
+                res_ex = supabase.table('prospectos').select('columna').eq('nombre', nombre).order('id', desc=True).limit(1).execute()
+                col_destino = res_ex.data[0]['columna'] if res_ex.data else "Bandeja Nueva"
                 
                 supabase.table('prospectos').insert({
-                    "nombre": nombre, 
-                    "telefono": tel, 
-                    "origen": "WHATSAPP", 
-                    "mensaje": texto, 
-                    "columna": col
+                    "nombre": nombre, "telefono": tel, "origen": "WHATSAPP", 
+                    "mensaje": texto, "columna": col_destino
                 }).execute()
                 
-                # 🛡️ BOT SIEMPRE ACTIVO PARA COMANDOS CLAVE
+                # 🛡️ El bot contesta comandos, o si está en Bandeja Nueva/Primer Contacto
                 es_comando = tipo == "text" and any(cmd in texto.lower() for cmd in ["hola", "buenas", "menu", "menú", "info"])
-                if (col in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text") or es_comando:
-                    procesar_respuesta_bot(nombre, tel, texto)
+                if (col_destino in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text") or es_comando:
+                    procesar_respuesta_bot(nombre, tel, texto, col_destino)
                     
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
     except Exception as e: 
         return PlainTextResponse(content="ERROR", status_code=500)
 
 # ==========================================
-# 🚀 MÓDULOS B2B E IA LIMPIADORA (FUZZY MATCH)
+# 🚀 MÓDULOS B2B E IA LIMPIADORA (CSV)
 # ==========================================
 @app.post("/api/importar_inventario")
 def api_importar_inventario(datos: dict):
@@ -513,31 +561,58 @@ def api_importar_inventario(datos: dict):
         "GB": "GameBoy Color", "GBC": "GameBoy Color", "GBA": "GameBoy Advance"
     }
 
+    # 🧠 INTELIGENCIA ARTIFICIAL: Descargar Catálogo Maestro para Auto-Precio y Corrección
+    try:
+        res_maestro = supabase.table('catalogo_maestro').select('nombre, precio_sugerido').execute()
+        nombres_maestros = [item['nombre'] for item in res_maestro.data]
+        diccionario_precios = {item['nombre'].lower(): item['precio_sugerido'] for item in res_maestro.data}
+    except Exception:
+        nombres_maestros = []
+        diccionario_precios = {}
+
     def limpiar_campo(texto_usuario, lista_oficial):
         texto_upper = str(texto_usuario).strip().upper()
-        if texto_upper in diccionario_sinonimos: 
-            return diccionario_sinonimos[texto_upper]
-        
+        if texto_upper in diccionario_sinonimos: return diccionario_sinonimos[texto_upper]
         coincidencias = difflib.get_close_matches(str(texto_usuario).strip(), lista_oficial, n=1, cutoff=0.5)
         return coincidencias[0] if coincidencias else str(texto_usuario).strip()
 
     lote_limpio = []
     for juego in lote_juegos:
+        nombre_original = str(juego.get("nombre", "")).strip()
+        nombre_corregido = nombre_original
+        precio_asignado = float(juego.get("precio", 0.0))
+        
+        # Corrección Difflib B2B
+        if nombres_maestros:
+            matches = difflib.get_close_matches(nombre_original, nombres_maestros, n=3, cutoff=0.6)
+            if len(matches) == 1:
+                nombre_corregido = matches[0]
+            elif len(matches) > 1:
+                nombre_corregido = f"[⚠️ REVISAR] {nombre_original}"
+                
+        # Inyección de Precios B2B
+        if precio_asignado <= 0.0:
+            nom_limpio = nombre_corregido.replace("[⚠️ REVISAR] ", "").lower()
+            if nom_limpio in diccionario_precios:
+                precio_asignado = diccionario_precios[nom_limpio]
+
+        juego["nombre"] = nombre_corregido
+        juego["precio"] = precio_asignado
         juego["consola"] = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
         juego["estado_general"] = limpiar_campo(juego.get("estado_general", "Suelto"), estados_oficiales)
         lote_limpio.append(juego)
 
     try:
         supabase.table('inventario').insert(lote_limpio).execute()
-        return {"status": "ok", "insertados": len(lote_limpio), "mensaje": f"Se subieron y limpiaron {len(lote_limpio)} artículos."}
+        return {"status": "ok", "insertados": len(lote_limpio), "mensaje": "Inventario subido a Nube B2B."}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error", "detalle": "Error subiendo CSV a la Nube"}
 
 @app.post("/api/crear_alerta")
 def api_crear_alerta(datos: dict):
     try:
         alerta = {
-            "usuario": datos.get("usuario_id", "Miguel"), 
+            "usuario": datos.get("usuario_id", "Admin"), 
             "juego": datos.get("nombre_juego", "").lower(), 
             "consola": datos.get("consola", ""), 
             "precio_maximo": datos.get("precio_max", 0.0), 
@@ -546,7 +621,7 @@ def api_crear_alerta(datos: dict):
         supabase.table('alertas_mercado').insert(alerta).execute()
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.get("/api/mis_alertas")
 def api_mis_alertas():
@@ -554,17 +629,16 @@ def api_mis_alertas():
         res = supabase.table('alertas_mercado').select('*').execute()
         return {"status": "ok", "alertas": res.data}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.post("/api/borrar_alerta")
 def api_borrar_alerta(datos: dict):
     try:
-        # 🛡️ FIX B2B: Forzamos la conversión a entero (int) para que Supabase no falle.
         id_borrar = int(datos.get('id', 0))
         supabase.table('alertas_mercado').delete().eq('id', id_borrar).execute()
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.post("/api/calificar_vendedor")
 def api_calificar(datos: dict):
@@ -577,7 +651,7 @@ def api_calificar(datos: dict):
         supabase.table('reputacion').insert(reseña).execute()
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.get("/api/todas_reputaciones")
 def api_todas_reputaciones():
@@ -586,21 +660,19 @@ def api_todas_reputaciones():
         agrupado = {}
         for r in res.data:
             v = r['vendedor']
-            if v not in agrupado: 
-                agrupado[v] = []
+            if v not in agrupado: agrupado[v] = []
             agrupado[v].append(r['estrellas'])
             
         resultado = [{"vendedor": k, "promedio": round(sum(v)/len(v), 1), "ventas": len(v)} for k, v in agrupado.items()]
         return {"status": "ok", "reputaciones": resultado}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 @app.post("/api/mensaje_masivo")
 def api_mensaje_masivo(datos: dict):
     try:
         clientes = supabase.table('prospectos').select('telefono').eq('columna', datos.get("columna")).neq('telefono', None).execute().data
-        if not clientes: 
-            return {"status": "error", "detalle": "Sin clientes válidos."}
+        if not clientes: return {"status": "error", "detalle": "Sin clientes válidos."}
             
         telefonos_unicos = set([c["telefono"] for c in clientes if c.get("telefono")])
         for tel in telefonos_unicos: 
@@ -608,7 +680,7 @@ def api_mensaje_masivo(datos: dict):
             
         return {"status": "ok", "enviados": len(telefonos_unicos)}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        return {"status": "error"}
 
 # ==========================================
 # 🛑 BOTÓN DE ENCENDIDO (SIEMPRE AL FINAL)
