@@ -1,7 +1,7 @@
 # ==========================================
 # 🚀 SISTEMA BACKEND: CRM PRO V7.3 (GOLD SAAS ENGINE)
 # Funciones: Auto-Vendedor AI, Radar Algorítmico, IA Limpiadora,
-# Finanzas, Red B2B, Starter Pack, Catálogo Maestro y Blindaje Total.
+# Finanzas, Red B2B, Caché Inteligente, Artillería Escalonada y Blindaje Total.
 # ==========================================
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -12,14 +12,14 @@ import mimetypes
 import urllib.parse
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
-from datetime import datetime
-import difflib # 🛡️ LIBRERÍA DE IA LIMPIADORA
+from datetime import datetime, timedelta
+import difflib
 
 app = FastAPI(title="Motor Central CRM B2B - Engine V7.3 Gold")
 
 # --- 🔑 CREDENCIALES Y CONFIGURACIÓN DEL BOT ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
-META_PHONE_ID = "975963255609853"
+META_PHONE_ID = "153723791168675" # 🟢 ID Real del Teléfono Corregido
 SUPABASE_URL = "https://hugvthovfcuuexaiuiqc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1Z3Z0aG92ZmN1dWV4YWl1aXFjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc2Mjk1MCwiZXhwIjoyMDkxMzM4OTUwfQ.Fzi0v4ZAV0jiXnk18unmFfY8nkub6nwNnsQ3pbe-zz4"
 SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
@@ -77,11 +77,72 @@ def obtener_dolar_hoy():
         return 18.00
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (MÉTODO FRANCOTIRADOR V6.2)
+# 🚀 MOTOR SCRAPER: ARTILLERÍA ESCALONADA
+# ==========================================
+def obtener_html_escalonado(url_objetivo: str) -> str:
+    estrategias = [
+        ("🟢 Artillería Ligera (1 Crédito)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"),
+        ("🟡 Artillería Media (5 Créditos)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&render=true"),
+        ("🔴 Artillería Pesada (25 Créditos)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&premium=true&render=true")
+    ]
+    
+    headers_humanos = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
+    for nombre_nivel, url_scraper in estrategias:
+        print(f"🚀 [SCRAPER] Intentando: {nombre_nivel}...")
+        try:
+            res = requests.get(url_scraper, timeout=45)
+            if res.status_code == 200 and "scraperapi" not in res.text.lower():
+                if "pricecharting" in res.text.lower() or "price" in res.text.lower():
+                    print(f"✔️ [ÉXITO] Escudo roto usando {nombre_nivel}.")
+                    return res.text
+                else:
+                    print(f"⚠️ [FALLO] Página bloqueada por Cloudflare. Subiendo nivel...")
+            else:
+                print(f"❌ [ERROR] ScraperAPI rechazó la conexión. Subiendo nivel...")
+        except Exception as e:
+            print(f"🔥 [CRASH] Error en {nombre_nivel}: {e}")
+
+    print("💀 [FATAL] Todos los niveles fallaron. Intentando acceso directo humano...")
+    try:
+        res = requests.get(url_objetivo, headers=headers_humanos, timeout=15)
+        if res.status_code == 200: return res.text
+    except: pass
+    
+    return ""
+
+# ==========================================
+# 📈 MOTOR DE PRECIOS PRO (CACHÉ + FRANCOTIRADOR)
 # ==========================================
 @app.get("/api/consultar_precio")
 def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
+    nombre_busqueda = nombre.lower().strip()
+    
+    # 🧠 PASO 1: REVISIÓN DE CACHÉ B2B (Adaptado a tus columnas de Supabase)
+    try:
+        res_cache = supabase.table('cache_precios').select('*').eq('juego', nombre_busqueda).eq('consola', consola).execute()
+        if res_cache.data and len(res_cache.data) > 0:
+            datos_cache = res_cache.data[0]
+            fecha_str = datos_cache['created_at'].split('+')[0].split('.')[0] 
+            fecha_cache = datetime.fromisoformat(fecha_str)
+            
+            if (datetime.now() - fecha_cache).days < 30:
+                print(f"🧠 [CACHÉ B2B] Precio recuperado GRATIS de la nube para: {nombre}")
+                return {
+                    "status": "ok",
+                    "mxn": {"loose": round(datos_cache['loose'] * tipo_cambio, 2), "cib": round(datos_cache['cib'] * tipo_cambio, 2), "new": round(datos_cache['new'] * tipo_cambio, 2)},
+                    "usd": {"loose": datos_cache['loose'], "cib": datos_cache['cib'], "new": datos_cache['new']},
+                    "tipo_cambio": tipo_cambio,
+                    "url_pc": datos_cache['url_pc']
+                }
+    except Exception as e:
+        print(f"⚠️ [CACHÉ] Tabla no detectada o error. Pasando a Web: {e}")
+
+    # 🌐 PASO 2: BÚSQUEDA WEB
     slugs_pc = {
         "PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3", "PS2": "playstation-2", "PS1": "playstation",
         "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox",
@@ -93,77 +154,89 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     query = f"{nombre} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
-    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_search)}&premium=true"
     
-    try:
-        headers_humanos = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-        res = requests.get(url_proxy, timeout=45)
+    html_search = obtener_html_escalonado(url_search)
+    if not html_search:
+        return {"status": "error", "detalle": "Error conectando al Radar de Precios", "url_pc": "https://www.pricecharting.com"}
         
-        if "scraperapi" in res.text.lower() or res.status_code != 200:
-            res = requests.get(url_search, headers=headers_humanos, timeout=15)
-            
-        soup = BeautifulSoup(res.text, 'html.parser')
-        link_juego = None
-        slug_esperado = slugs_pc.get(consola, consola_web.lower().replace(' ', '-'))
-        etiqueta_busqueda = f"/game/{slug_esperado}/"
-        palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
-        
+    soup = BeautifulSoup(html_search, 'html.parser')
+    link_juego = None
+    slug_esperado = slugs_pc.get(consola, consola_web.lower().replace(' ', '-'))
+    etiqueta_busqueda = f"/game/{slug_esperado}/"
+    palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
+    
+    for a in soup.find_all('a', href=True):
+        href = a['href'].lower()
+        if '/game/' in href and not any(b in href for b in palabras_prohibidas):
+            if etiqueta_busqueda in href:
+                link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
+                break
+    
+    if not link_juego:
         for a in soup.find_all('a', href=True):
             href = a['href'].lower()
             if '/game/' in href and not any(b in href for b in palabras_prohibidas):
-                if etiqueta_busqueda in href:
-                    link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
-                    break
-        
-        if not link_juego:
-            for a in soup.find_all('a', href=True):
-                href = a['href'].lower()
-                if '/game/' in href and not any(b in href for b in palabras_prohibidas):
-                    link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
-                    break
+                link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
+                break
 
-        if link_juego:
-            res = requests.get(f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(link_juego)}&premium=true", timeout=45)
-            if "scraperapi" in res.text.lower() or res.status_code != 200:
-                res = requests.get(link_juego, headers=headers_humanos, timeout=15)
-            soup = BeautifulSoup(res.text, 'html.parser')
+    if link_juego:
+        html_juego = obtener_html_escalonado(link_juego)
+        if html_juego: soup = BeautifulSoup(html_juego, 'html.parser')
 
-        def extraer_numero_puro(id_css):
-            nodo = soup.find(id=id_css)
-            if nodo:
-                texto_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
-                try:
-                    if texto_limpio: return float(texto_limpio)
-                except: pass
-            return 0.0
+    def extraer_numero_puro(id_css):
+        nodo = soup.find(id=id_css)
+        if nodo:
+            texto_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
+            try:
+                if texto_limpio: return float(texto_limpio)
+            except: pass
+        return 0.0
 
-        p_loose = extraer_numero_puro("used_price")
-        p_cib = extraer_numero_puro("cib_price")
-        p_new = extraer_numero_puro("new_price")
-        
-        if p_loose == 0.0 and p_cib == 0.0 and p_new == 0.0:
-            spans = soup.find_all("span", class_="price")
-            numeros = []
-            for s in spans:
-                limpio = ''.join(c for c in s.text.replace(',', '.') if c.isdigit() or c == '.')
-                if limpio: numeros.append(float(limpio))
-            if len(numeros) >= 3: 
-                p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
-            elif len(numeros) > 0: 
-                p_loose = numeros[0]
+    p_loose = extraer_numero_puro("used_price")
+    p_cib = extraer_numero_puro("cib_price")
+    p_new = extraer_numero_puro("new_price")
+    
+    if p_loose == 0.0 and p_cib == 0.0 and p_new == 0.0:
+        spans = soup.find_all("span", class_="price")
+        numeros = []
+        for s in spans:
+            limpio = ''.join(c for c in s.text.replace(',', '.') if c.isdigit() or c == '.')
+            if limpio: numeros.append(float(limpio))
+        if len(numeros) >= 3: 
+            p_loose, p_cib, p_new = numeros[0], numeros[1], numeros[2]
+        elif len(numeros) > 0: 
+            p_loose = numeros[0]
 
-        return {
-            "status": "ok",
-            "mxn": {"loose": round(p_loose * tipo_cambio, 2), "cib": round(p_cib * tipo_cambio, 2), "new": round(p_new * tipo_cambio, 2)},
-            "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
-            "tipo_cambio": tipo_cambio,
-            "url_pc": link_juego if link_juego else url_search
-        }
-    except Exception as e:
-        return {"status": "error", "detalle": "Error en el Radar de Precios", "url_pc": "https://www.pricecharting.com"}
+    url_final_pc = link_juego if link_juego else url_search
+
+    # 💾 PASO 3: GUARDADO EN CACHÉ B2B
+    if p_loose > 0 or p_cib > 0:
+        try:
+            datos_cache = {
+                "juego": nombre_busqueda,
+                "consola": consola,
+                "loose": p_loose,
+                "cib": p_cib,
+                "new": p_new,
+                "url_pc": url_final_pc,
+                "created_at": datetime.now().isoformat()
+            }
+            res_ex = supabase.table('cache_precios').select('id').eq('juego', nombre_busqueda).eq('consola', consola).execute()
+            if res_ex.data:
+                supabase.table('cache_precios').update(datos_cache).eq('id', res_ex.data[0]['id']).execute()
+            else:
+                supabase.table('cache_precios').insert(datos_cache).execute()
+            print("💾 [CACHÉ B2B] Nuevo precio guardado en Nube con éxito.")
+        except Exception as e:
+            print(f"⚠️ [CACHÉ B2B] Error guardando en BD: {e}")
+
+    return {
+        "status": "ok",
+        "mxn": {"loose": round(p_loose * tipo_cambio, 2), "cib": round(p_cib * tipo_cambio, 2), "new": round(p_new * tipo_cambio, 2)},
+        "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
+        "tipo_cambio": tipo_cambio,
+        "url_pc": url_final_pc
+    }
 
 # ==========================================
 # 📥 MOTOR MULTIMEDIA & WHATSAPP
@@ -207,7 +280,6 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
     hora = datetime.now().hour
     saludo = "Buenos días" if hora < 12 else "Buenas tardes" if hora < 19 else "Buenas noches"
 
-    # 1. FLUJO DE MERCADO ENVÍOS
     if "me interesa mercado envios" in texto.replace("í", "i").replace("é", "e"):
         respuesta = (
             "¡Perfecto! 📦 El proceso es el siguiente:\n\n"
@@ -218,11 +290,9 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
             "¿Qué juego te interesa comprar?"
         )
 
-    # 2. SALUDO Y MENÚ PRINCIPAL
     elif any(word in texto for word in ["hola", "buenas", "menu", "menú", "info"]):
         respuesta = f"¡{saludo}! 🎮 Soy el asistente virtual de Fantasy Games.\n\n¿En qué te ayudo?\n*1.* 👾 Ver Catálogo disponible\n*2.* 🚚 Entregas personales (Local)\n*3.* 🙋‍♂️ Hablar con Miguel\n*4.* 📦 Envíos fuera de Aguascalientes\n\n_O dime el nombre del juego que buscas y reviso si hay disponibilidad._"
 
-    # 3. CATÁLOGO DINÁMICO
     elif texto == "1" or "catalogo" in texto or "catálogo" in texto:
         try:
             res = supabase.table('inventario').select('nombre, consola, precio').gt('stock', 0).order('nombre').limit(15).execute()
@@ -234,7 +304,6 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
         except Exception:
             respuesta = "Estamos actualizando el inventario 📦. ¡Dime qué juego buscas!"
 
-    # 4. ENTREGAS LOCALES
     elif texto == "2" or "entrega local" in texto or "donde entregas" in texto or "ubicacion" in texto:
         respuesta = (
             "🚚 *Entregas en Aguascalientes:*\n\n"
@@ -244,12 +313,10 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
             f"💳 *APARTADOS:*\nPaga por adelantado aquí y te lo aparto:\n{LINK_MERCADOPAGO}\n\n¿Qué juego buscas?"
         )
 
-    # 5. HABLAR CON HUMANO
     elif texto == "3" or "humano" in texto or "miguel" in texto or "asesor" in texto:
         respuesta = "¡Claro! 👨‍💻 Le estoy mandando una notificación a Miguel. En cuanto se desocupe te contesta por aquí mismo."
         disparar_whatsapp_real(ADMIN_PHONE, f"🚨 *ALERTA CRM:* El prospecto {cliente} ({telefono}) está pidiendo atención humana.")
 
-    # 6. ENVÍOS FORÁNEOS
     elif texto == "4" or "fuera" in texto or "envios" in texto or "envíos" in texto or "foraneo" in texto:
         respuesta = (
             "📦 *Envíos Nacionales:*\nSi eres de fuera de Aguascalientes, puedo enviarte tu pedido por Mercado Envíos. "
@@ -257,7 +324,6 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
             "Si te interesa esta opción, por favor escríbeme exactamente la frase:\n*me interesa mercado envios*"
         )
 
-    # 7. AUTO-VENDEDOR
     elif len(texto) > 3:
         try:
             res = supabase.table('inventario').select('*').ilike('nombre', f"%{texto}%").execute()
@@ -273,14 +339,13 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
         except Exception:
             pass
 
-    # GUARDAR Y ENVIAR
     if respuesta:
         datos_guardar = {
             "nombre": cliente,
             "telefono": telefono,
             "origen": "WHATSAPP",
             "mensaje": f"TÚ: [BOT] {respuesta}",
-            "columna": columna_actual # 🛡️ BLINDAJE: Usa la columna en la que ya estaba el cliente
+            "columna": columna_actual 
         }
         supabase.table('prospectos').insert(datos_guardar).execute()
         disparar_whatsapp_real(telefono, respuesta)
@@ -303,7 +368,6 @@ def cargar_todo():
     except Exception as e:
         return {"error": "Error conectando a Nube B2B"}
 
-# 🛡️ GESTIÓN DE COLUMNAS (Para que no se borren al cerrar Godot)
 @app.post("/api/crear_columna")
 def crear_columna(datos: dict):
     try:
@@ -368,7 +432,6 @@ def borrar_permanente(datos: dict):
 # ==========================================
 @app.get("/api/buscar_maestro")
 def buscar_maestro(q: str):
-    # Buscador inteligente B2B para Autocompletado en Godot
     try:
         res = supabase.table('catalogo_maestro').select('*').ilike('nombre', f'%{q}%').limit(10).execute()
         return {"status": "ok", "resultados": res.data}
@@ -377,7 +440,6 @@ def buscar_maestro(q: str):
 
 @app.post("/api/inyectar_starter")
 def inyectar_starter():
-    # Inyecta los 300 juegos top al inventario
     try:
         maestros = supabase.table('catalogo_maestro').select('*').eq('starter_pack', True).execute()
         lote = []
@@ -411,11 +473,9 @@ def guardar_inventario(datos: InventarioItem):
         else:
             supabase.table('inventario').insert(datos.dict()).execute()
             
-        # 🚨 EL GATILLO DEL RADAR B2B 🚨
         res_alertas = supabase.table('alertas_mercado').select('*').ilike('juego', f"%{nombre_limpio}%").eq('activa', True).execute()
         for alerta in res_alertas.data:
             if alerta['precio_maximo'] >= datos.precio and datos.precio > 0:
-                # Dispara alerta de francotirador
                 disparar_whatsapp_real(ADMIN_PHONE, f"🎯 *¡RADAR B2B ACTIVADO!* 🎯\nSe acaba de dar de alta en la red:\n🎮 *{datos.nombre}* ({datos.consola})\n💰 Precio: ${datos.precio}\n👤 Alerta de: {alerta['usuario']}")
 
         return {"status": "ok"}
@@ -521,7 +581,6 @@ async def recibir_mensaje_meta(request: Request):
                     enlace = descargar_y_subir_multimedia(msg[tipo]["id"], msg[tipo].get("mime_type", ""), ".bin")
                     texto = f"[{tipo.upper()}] recibida: {enlace}"
                 
-                # 🛡️ BLINDAJE DE PERSISTENCIA: Obligamos a respetar la columna actual del cliente
                 res_ex = supabase.table('prospectos').select('columna').eq('nombre', nombre).order('id', desc=True).limit(1).execute()
                 col_destino = res_ex.data[0]['columna'] if res_ex.data else "Bandeja Nueva"
                 
@@ -530,7 +589,6 @@ async def recibir_mensaje_meta(request: Request):
                     "mensaje": texto, "columna": col_destino
                 }).execute()
                 
-                # 🛡️ El bot contesta comandos, o si está en Bandeja Nueva/Primer Contacto
                 es_comando = tipo == "text" and any(cmd in texto.lower() for cmd in ["hola", "buenas", "menu", "menú", "info"])
                 if (col_destino in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text") or es_comando:
                     procesar_respuesta_bot(nombre, tel, texto, col_destino)
@@ -538,6 +596,29 @@ async def recibir_mensaje_meta(request: Request):
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
     except Exception as e: 
         return PlainTextResponse(content="ERROR", status_code=500)
+
+# ==========================================
+# 🟢 ENVIAR MENSAJES DESDE GODOT (NUEVA RUTA)
+# ==========================================
+@app.post("/api/enviar_mensaje")
+def api_enviar_mensaje(datos: MensajeSaliente):
+    try:
+        supabase.table('prospectos').insert({
+            "nombre": datos.cliente,
+            "origen": "WHATSAPP",
+            "mensaje": f"TÚ: {datos.texto}",
+            "columna": "En Conversacion" 
+        }).execute()
+        
+        res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).limit(1).execute()
+        if res_tel.data:
+            telefono_destino = res_tel.data[0]['telefono']
+            disparar_whatsapp_real(telefono_destino, datos.texto)
+            return {"status": "ok"}
+        else:
+            return {"status": "error", "detalle": "Cliente sin teléfono registrado"}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
 
 # ==========================================
 # 🚀 MÓDULOS B2B E IA LIMPIADORA (CSV)
@@ -561,7 +642,6 @@ def api_importar_inventario(datos: dict):
         "GB": "GameBoy Color", "GBC": "GameBoy Color", "GBA": "GameBoy Advance"
     }
 
-    # 🧠 INTELIGENCIA ARTIFICIAL: Descargar Catálogo Maestro para Auto-Precio y Corrección
     try:
         res_maestro = supabase.table('catalogo_maestro').select('nombre, precio_sugerido').execute()
         nombres_maestros = [item['nombre'] for item in res_maestro.data]
@@ -582,7 +662,6 @@ def api_importar_inventario(datos: dict):
         nombre_corregido = nombre_original
         precio_asignado = float(juego.get("precio", 0.0))
         
-        # Corrección Difflib B2B
         if nombres_maestros:
             matches = difflib.get_close_matches(nombre_original, nombres_maestros, n=3, cutoff=0.6)
             if len(matches) == 1:
@@ -590,7 +669,6 @@ def api_importar_inventario(datos: dict):
             elif len(matches) > 1:
                 nombre_corregido = f"[⚠️ REVISAR] {nombre_original}"
                 
-        # Inyección de Precios B2B
         if precio_asignado <= 0.0:
             nom_limpio = nombre_corregido.replace("[⚠️ REVISAR] ", "").lower()
             if nom_limpio in diccionario_precios:
