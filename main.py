@@ -1,5 +1,5 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V7.3 (GOLD SAAS ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V7.4 (GOLD SAAS ENGINE)
 # Funciones: Auto-Vendedor AI, Radar Algorítmico, IA Limpiadora,
 # Finanzas, Red B2B, Caché Inteligente, Artillería Escalonada y Blindaje Total.
 # ==========================================
@@ -15,11 +15,11 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import difflib
 
-app = FastAPI(title="Motor Central CRM B2B - Engine V7.3 Gold")
+app = FastAPI(title="Motor Central CRM B2B - Engine V7.4 Gold")
 
 # --- 🔑 CREDENCIALES Y CONFIGURACIÓN DEL BOT ---
 META_ACCESS_TOKEN = "EAAQeucaUBYoBRIo9TZA0WoZBhQbqNuSKDdfqPeMKPJnASZBUYRuXL4oZACZC80DrmZCi1jrRvWpFsfwM5gr7AluJOBaJuhox5CZA4ZCjG6VrQqAbIyrX8YQFxhgjjyejPKUrrmMZAzvajWDRrCRJ0VZBFwU47ETnG6Xq7qzybeRZASKoRXdSLmS24JLQW0Vfiwqdi7KkgZDZD"
-META_PHONE_ID = "975963255609853" # 🟢 ID Real del Teléfono Corregido
+META_PHONE_ID = "975963255609853" # ID de Teléfono
 SUPABASE_URL = "https://hugvthovfcuuexaiuiqc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1Z3Z0aG92ZmN1dWV4YWl1aXFjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc2Mjk1MCwiZXhwIjoyMDkxMzM4OTUwfQ.Fzi0v4ZAV0jiXnk18unmFfY8nkub6nwNnsQ3pbe-zz4"
 SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
@@ -122,7 +122,6 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     tipo_cambio = obtener_dolar_hoy()
     nombre_busqueda = nombre.lower().strip()
     
-    # 🧠 PASO 1: REVISIÓN DE CACHÉ B2B (Adaptado a tus columnas de Supabase)
     try:
         res_cache = supabase.table('cache_precios').select('*').eq('juego', nombre_busqueda).eq('consola', consola).execute()
         if res_cache.data and len(res_cache.data) > 0:
@@ -142,7 +141,6 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     except Exception as e:
         print(f"⚠️ [CACHÉ] Tabla no detectada o error. Pasando a Web: {e}")
 
-    # 🌐 PASO 2: BÚSQUEDA WEB
     slugs_pc = {
         "PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3", "PS2": "playstation-2", "PS1": "playstation",
         "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox",
@@ -209,7 +207,6 @@ def api_consultar_precio(nombre: str, consola: str = ""):
 
     url_final_pc = link_juego if link_juego else url_search
 
-    # 💾 PASO 3: GUARDADO EN CACHÉ B2B
     if p_loose > 0 or p_cib > 0:
         try:
             datos_cache = {
@@ -239,7 +236,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     }
 
 # ==========================================
-# 📥 MOTOR MULTIMEDIA & WHATSAPP
+# 📥 MOTOR MULTIMEDIA & WHATSAPP ALARMAS
 # ==========================================
 def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_default: str):
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
@@ -267,7 +264,12 @@ def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
     try: 
-        requests.post(url, headers=headers, json=payload)
+        res = requests.post(url, headers=headers, json=payload)
+        # 🚨 ALARMA DE DIAGNÓSTICO PARA RENDER
+        if res.status_code != 200:
+            print(f"🔥 ERROR FATAL META AL ENVIAR A {telefono_destino}: HTTP {res.status_code} - {res.text}")
+        else:
+            print(f"✅ MENSAJE ENVIADO CORRECTAMENTE A {telefono_destino}")
     except Exception as e: 
         print(f"❌ Error Gateway API: {e}")
 
@@ -275,6 +277,7 @@ def disparar_whatsapp_real(telefono_destino: str, texto_mensaje: str):
 # 🤖 BOT AAA: EL EMPLEADO DIGITAL 24/7
 # ==========================================
 def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str):
+    print(f"🤖 [BOT] Analizando texto de {cliente}: '{texto_entrante}'")
     texto = texto_entrante.lower().strip()
     respuesta = ""
     hora = datetime.now().hour
@@ -589,8 +592,8 @@ async def recibir_mensaje_meta(request: Request):
                     "mensaje": texto, "columna": col_destino
                 }).execute()
                 
-                es_comando = tipo == "text" and any(cmd in texto.lower() for cmd in ["hola", "buenas", "menu", "menú", "info"])
-                if (col_destino in ["Bandeja Nueva", "Primer Contacto"] and tipo == "text") or es_comando:
+                # 🛡️ BLINDAJE FINAL: El bot SIEMPRE responde, EXCEPTO si tú estás hablando con el cliente manualmente
+                if tipo == "text" and col_destino != "En Conversacion":
                     procesar_respuesta_bot(nombre, tel, texto, col_destino)
                     
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
@@ -609,6 +612,9 @@ def api_enviar_mensaje(datos: MensajeSaliente):
             "mensaje": f"TÚ: {datos.texto}",
             "columna": "En Conversacion" 
         }).execute()
+        
+        # Al enviar un mensaje manual, el cliente pasa a "En Conversacion" para silenciar al bot
+        supabase.table('prospectos').update({'columna': 'En Conversacion'}).eq('nombre', datos.cliente).execute()
         
         res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).neq('telefono', None).limit(1).execute()
         if res_tel.data:
