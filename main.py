@@ -775,7 +775,54 @@ def api_importar_inventario(datos: dict):
         "actualizados": conteo_actualizados, 
         "mensaje": f"Sincronización B2B exitosa. Nuevos: {conteo_nuevos} | Actualizados: {conteo_actualizados}"
     }
+# ==========================================
+# ⚙️ CONFIGURACIÓN DEL BOT B2B (GET / POST)
+# ==========================================
 
+class BotConfig(BaseModel):
+    vendedor_id: str
+    link_pago: str
+    texto_entrega: str
+    admin_phone: str
+    bot_activo: bool
+
+@app.get("/api/bot_config")
+def obtener_config_bot(vendedor_id: str):
+    try:
+        res = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).execute()
+        if res.data and len(res.data) > 0:
+            return {"status": "ok", "datos": res.data[0]}
+        else:
+            return {"status": "error", "detalle": "Configuración no encontrada"}
+    except Exception as e:
+        return {"status": "error"}
+
+@app.post("/api/bot_config")
+def guardar_config_bot(datos: BotConfig):
+    try:
+        v_id = datos.vendedor_id.strip()
+        
+        # Preparamos el paquete. NO sobreescribimos los Tokens de Meta por seguridad
+        paquete = {
+            "vendedor_id": v_id,
+            "link_pago": datos.link_pago,
+            "texto_entrega": datos.texto_entrega,
+            "admin_phone": datos.admin_phone,
+            "bot_activo": datos.bot_activo
+        }
+        
+        # Lógica Upsert
+        res_ex = supabase.table('configuracion_bot').select('vendedor_id').eq('vendedor_id', v_id).execute()
+        
+        if res_ex.data and len(res_ex.data) > 0:
+            supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', v_id).execute()
+        else:
+            # Si es nuevo, insertamos
+            supabase.table('configuracion_bot').insert(paquete).execute()
+            
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detalle": "Error guardando configuración B2B"}
 # ==========================================
 # 🛑 BOTÓN DE ENCENDIDO (SIEMPRE AL FINAL)
 # ==========================================
