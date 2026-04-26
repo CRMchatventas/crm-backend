@@ -721,7 +721,6 @@ def obtener_metricas(vendedor_id: str = ""):
         }
     except Exception as e: 
         return {"status": "error"}
-
 # ==========================================
 # 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT)
 # ==========================================
@@ -733,8 +732,7 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
     if not lote_juegos or len(lote_juegos) == 0: 
         return {"status": "error", "detalle": "CSV vacío."}
 
-    # 👑 Detectar si el que sube es el Administrador (Tú)
-    es_admin = vendedor_maestro in ["ADMIN-MASTER", "ADMIN-VELTRIX", "VELTRIX-ROOT", "FANTASY-01"]
+    # 🚀 REGLA B2B: Eliminado el candado Admin. Ahora TODOS aportan al Crecimiento Global.
         
     consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
     estados_oficiales = ["Nuevo/Sellado", "Completo (CIB)", "Sin librito", "Solo disco (Loose)"]
@@ -829,7 +827,7 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
         }
 
         try:
-            # Revisa si existe basándose en el SKU B2B
+            # 1️⃣ Guardado en el Inventario Privado del Vendedor
             res_ex = supabase.table('inventario').select('id').eq('sku_b2b', sku_b2b).eq('vendedor_id', vendedor_maestro).execute()
             
             if res_ex.data and len(res_ex.data) > 0:
@@ -839,12 +837,18 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
                 supabase.table('inventario').insert(paquete_datos).execute()
                 conteo_nuevos += 1
                 
-            # 👑 AUTO-POBLAR CATÁLOGO MAESTRO (Solo si es Admin)
-            if es_admin:
-                res_maestro_check = supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).execute()
-                if not res_maestro_check.data:
-                    paquete_maestro = {"nombre": nombre_corregido, "consola": consola_final, "precio_sugerido": precio_asignado}
-                    supabase.table('catalogo_maestro').insert(paquete_maestro).execute()
+            # 2️⃣ CRECIMIENTO GLOBAL (Auto-poblar Catálogo Maestro para TODOS)
+            res_maestro_check = supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).execute()
+            if not res_maestro_check.data:
+                # El juego no existía en la red. Lo agregamos para que los demás lo hereden.
+                paquete_maestro = {
+                    "nombre": nombre_corregido, 
+                    "consola": consola_final, 
+                    "precio_sugerido": precio_asignado,
+                    "rareza": rareza_final
+                }
+                supabase.table('catalogo_maestro').insert(paquete_maestro).execute()
+                reporte_ia.append(f"✨ Aporte Global: '{nombre_corregido}' añadido a la red maestra.")
 
         except Exception:
             pass
