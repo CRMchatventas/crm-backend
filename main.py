@@ -722,6 +722,7 @@ def obtener_metricas(vendedor_id: str = ""):
     except Exception as e: 
         return {"status": "error"}
 # ==========================================
+# ==========================================
 # 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT)
 # ==========================================
 @app.post("/api/importar_inventario")
@@ -732,8 +733,6 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
     if not lote_juegos or len(lote_juegos) == 0: 
         return {"status": "error", "detalle": "CSV vacío."}
 
-    # 🚀 REGLA B2B: Eliminado el candado Admin. Ahora TODOS aportan al Crecimiento Global.
-        
     consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
     estados_oficiales = ["Nuevo/Sellado", "Completo (CIB)", "Sin librito", "Solo disco (Loose)"]
     
@@ -748,7 +747,6 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
         "GB": "GameBoy Color", "GBC": "GameBoy Color", "GBA": "GameBoy Advance"
     }
 
-    # 🧠 Diccionario CEREBRO de Expansión de Alias
     alias_juegos = {
         "san andreas": "Grand Theft Auto: San Andreas",
         "gta san andreas": "Grand Theft Auto: San Andreas",
@@ -783,7 +781,7 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
         nombre_corregido = nombre_original
         precio_asignado = float(juego.get("precio", 0.0))
         
-        # 1. Expansión de Alias con el Cerebro
+        # 1. Expansión de Alias Estático
         for alias, expansion in alias_juegos.items():
             if alias in nombre_lower:
                 nombre_corregido = expansion
@@ -791,7 +789,7 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
                     reporte_ia.append(f"Alias expandido: '{nombre_original}' -> '{nombre_corregido}'")
                 break
         
-        # 2. Corrección Ortográfica con Maestro
+        # 2. Corrección Ortográfica con Catálogo Maestro
         if nombres_maestros and nombre_corregido not in nombres_maestros:
             matches = difflib.get_close_matches(nombre_corregido, nombres_maestros, n=1, cutoff=0.7)
             if matches:
@@ -799,18 +797,54 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
                 nombre_corregido = matches[0]
                 reporte_ia.append(f"Ortografía corregida: '{antiguo}' -> '{nombre_corregido}'")
                 
-        # 3. Asignación de Precio (Si es 0)
+        # 3. Asignación de Precio y Auto-Completado de Nombres
+        consola_final = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
+        estado_final = limpiar_campo(juego.get("estado_general", "Solo disco (Loose)"), estados_oficiales)
+
         if precio_asignado <= 0.0:
             nom_limpio = nombre_corregido.lower()
             if nom_limpio in diccionario_precios:
                 precio_asignado = diccionario_precios[nom_limpio]
-                reporte_ia.append(f"Auto-Precio IA: ${precio_asignado} inyectado a '{nombre_corregido}'")
+                reporte_ia.append(f"Auto-Precio DB: ${precio_asignado} inyectado a '{nombre_corregido}'")
+            else:
+                # 🌐 BÚSQUEDA WEB EN VIVO
+                try:
+                    datos_pc = api_consultar_precio(nombre_corregido, consola_final)
+                    
+                    if datos_pc and datos_pc.get("status") == "ok":
+                        # 🧠 AUTO-COMPLETAR NOMBRE: Extraer el nombre perfecto desde el link de PriceCharting
+                        if "url_pc" in datos_pc and "/game/" in datos_pc["url_pc"]:
+                            slug_juego = datos_pc["url_pc"].split("/")[-1]
+                            nombre_perfecto = slug_juego.replace("-", " ").title()
+                            
+                            # Si la página encontró algo válido, sobrescribimos tu nombre corto
+                            if len(nombre_perfecto) > 3 and nombre_corregido.lower() != nombre_perfecto.lower():
+                                reporte_ia.append(f"Nombre Auto-Completado Web: '{nombre_corregido}' -> '{nombre_perfecto}'")
+                                nombre_corregido = nombre_perfecto
 
-        consola_final = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
-        estado_final = limpiar_campo(juego.get("estado_general", "Solo disco (Loose)"), estados_oficiales)
+                        # ASIGNAR PRECIO
+                        if estado_final == "Completo (CIB)":
+                            precio_asignado = datos_pc["mxn"]["cib"]
+                        else:
+                            precio_asignado = datos_pc["mxn"]["loose"]
+                            
+                        # BLINDAJE FINANCIERO: Si PriceCharting dice 0, marcamos alerta
+                        if precio_asignado <= 0.0:
+                            precio_asignado = 0.0 
+                            reporte_ia.append(f"⚠️ ATENCIÓN: No hay precio online para '{nombre_corregido}'. Quedó en $0 para revisión.")
+                        else:
+                            reporte_ia.append(f"Radar Web: ${precio_asignado} extraído de internet para '{nombre_corregido}'")
+                    else:
+                        # BLINDAJE FINANCIERO: No lo encontró en internet
+                        precio_asignado = 0.0
+                        reporte_ia.append(f"⚠️ ATENCIÓN: '{nombre_corregido}' es desconocido. Quedó en $0 para revisión.")
+                except Exception as e:
+                    # BLINDAJE FINANCIERO: Error de internet
+                    precio_asignado = 0.0
+                    reporte_ia.append(f"⚠️ ATENCIÓN: Falla al buscar '{nombre_corregido}'. Quedó en $0 para revisión.")
+
         rareza_final = calcular_rareza_ia(nombre_corregido, consola_final, precio_asignado)
 
-        # 🏷️ Generador de SKU B2B
         sku_b2b = f"{nombre_corregido}_{consola_final}_{estado_final}".lower().replace(" ", "-").replace(":", "").replace("/", "")
 
         paquete_datos = {
@@ -827,7 +861,7 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
         }
 
         try:
-            # 1️⃣ Guardado en el Inventario Privado del Vendedor
+            # 1️⃣ Guardado en Inventario Privado
             res_ex = supabase.table('inventario').select('id').eq('sku_b2b', sku_b2b).eq('vendedor_id', vendedor_maestro).execute()
             
             if res_ex.data and len(res_ex.data) > 0:
@@ -837,10 +871,9 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
                 supabase.table('inventario').insert(paquete_datos).execute()
                 conteo_nuevos += 1
                 
-            # 2️⃣ CRECIMIENTO GLOBAL (Auto-poblar Catálogo Maestro para TODOS)
+            # 2️⃣ CRECIMIENTO GLOBAL
             res_maestro_check = supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).execute()
             if not res_maestro_check.data:
-                # El juego no existía en la red. Lo agregamos para que los demás lo hereden.
                 paquete_maestro = {
                     "nombre": nombre_corregido, 
                     "consola": consola_final, 
