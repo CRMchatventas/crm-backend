@@ -1,9 +1,9 @@
 # ==========================================
-# 🚀 SISTEMA BACKEND: CRM PRO V7.4 (GOLD SAAS ENGINE)
+# 🚀 SISTEMA BACKEND: CRM PRO V7.6 (SECURE SAAS ENGINE)
 # Funciones: Auto-Vendedor AI, Radar Algorítmico, IA Limpiadora,
 # Finanzas, Red B2B, Caché Inteligente, Artillería Escalonada y Multi-Bot Universal.
 # ==========================================
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import uvicorn
@@ -14,14 +14,24 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from datetime import datetime, timedelta, date
 import difflib
+import os
+import bcrypt
+from dotenv import load_dotenv
 
-app = FastAPI(title="Motor Central CRM B2B - Engine V7.4 Gold")
+# 🛡️ CARGA DE VARIABLES SEGURAS (Desde el archivo .env)
+load_dotenv()
 
-# --- 🔑 CREDENCIALES BASE (Para funciones internas del Admin) ---
-SUPABASE_URL = "https://hugvthovfcuuexaiuiqc.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1Z3Z0aG92ZmN1dWV4YWl1aXFjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc2Mjk1MCwiZXhwIjoyMDkxMzM4OTUwfQ.Fzi0v4ZAV0jiXnk18unmFfY8nkub6nwNnsQ3pbe-zz4"
-SCRAPER_API_KEY = "7cc199d2d6234950e92f4fb7cf96cd6e" 
-ADMIN_PHONE_GLOBAL = "524491142598" # 🔴 Celular de Miguel para emergencias de la red
+app = FastAPI(title="Motor Central CRM B2B - Engine V7.6 Secure Gold")
+
+# --- 🔑 CREDENCIALES BASE ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
+WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "mi_contrasena_secreta_fantasy")
+ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ ERROR CRÍTICO: Faltan credenciales de Supabase en el archivo .env")
 
 # Conexión a Nube B2B
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -43,7 +53,7 @@ class NotaUpdate(BaseModel):
 class MensajeSaliente(BaseModel): 
     cliente: str
     texto: str
-    vendedor_id: str # Añadido para saber desde qué bot enviar el mensaje
+    vendedor_id: str
 
 class InventarioItem(BaseModel):
     nombre: str
@@ -67,6 +77,30 @@ class VentaItem(BaseModel):
     estado_general: str = ""
     nuevo_stock: int
     vendedor_id: str = "" 
+
+# ==========================================
+# 🔐 SISTEMA DE AUTENTICACIÓN B2B (NUEVO BLINDAJE)
+# ==========================================
+def verificar_sesion_b2b(vendedor_id: str = Header(None), auth_token: str = Header(None)):
+    if not vendedor_id or not auth_token:
+        # Por ahora lo dejamos pasar en modo permisivo para no romper tu Godot actual, 
+        # pero cuando mandes los headers desde Godot, cambiaremos este return por un raise HTTPException
+        return vendedor_id 
+        
+    res = supabase.table('usuarios_veltrix').select('password').eq('vendedor_id', vendedor_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=401, detail="Usuario B2B no encontrado")
+        
+    hash_guardado = res.data[0]['password'].encode('utf-8')
+    
+    if hash_guardado.startswith(b'$2b$'):
+        if not bcrypt.checkpw(auth_token.encode('utf-8'), hash_guardado):
+            raise HTTPException(status_code=401, detail="Firma de seguridad inválida")
+    else:
+        if auth_token != res.data[0]['password']:
+            raise HTTPException(status_code=401, detail="Firma de seguridad inválida")
+    
+    return vendedor_id
 
 # ==========================================
 # 💵 MOTOR DE DIVISAS
@@ -135,7 +169,7 @@ def calcular_rareza_ia(nombre: str, consola: str, precio: float) -> str:
         return "Común"
 
 # ==========================================
-# 🔐 RUTA DE SEGURIDAD B2B (LOGIN)
+# 🔐 RUTA DE SEGURIDAD B2B (LOGIN BLINDADO)
 # ==========================================
 @app.post("/api/login")
 def login_b2b(datos: Credenciales):
@@ -146,8 +180,16 @@ def login_b2b(datos: Credenciales):
             return {"status": "error", "detalle": "Usuario no registrado."}
             
         usuario = res.data[0]
+        hash_guardado = usuario['password'].encode('utf-8')
         
-        if usuario['password'] != datos.password:
+        # Validación híbrida (Bcrypt o Texto Plano)
+        password_valida = False
+        if hash_guardado.startswith(b'$2b$'):
+            password_valida = bcrypt.checkpw(datos.password.encode('utf-8'), hash_guardado)
+        else:
+            password_valida = (datos.password == usuario['password'])
+            
+        if not password_valida:
             return {"status": "error", "detalle": "Contraseña incorrecta."}
             
         fecha_pago_str = usuario.get('fecha_proximo_pago')
@@ -399,7 +441,7 @@ def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, col
 # ==========================================
 @app.get("/webhook")
 def verificar_webhook(request: Request):
-    if request.query_params.get("hub.verify_token") == "mi_contrasena_secreta_fantasy": 
+    if request.query_params.get("hub.verify_token") == WEBHOOK_SECRET: 
         return PlainTextResponse(content=request.query_params.get("hub.challenge"), status_code=200)
     return PlainTextResponse(content="CRM B2B Activo.", status_code=200)
 
@@ -491,12 +533,11 @@ def api_enviar_mensaje(datos: MensajeSaliente):
         return {"status": "error", "detalle": str(e)}
 
 # ==========================================
-# 🌐 RUTAS DE GESTIÓN CRM (COLUMNAS Y CHATS BLINDADOS)
+# 🌐 RUTAS DE GESTIÓN CRM (BLINDADAS)
 # ==========================================
 @app.get("/api/cargar_todo")
 def cargar_todo(vendedor_id: str = ""):
     try:
-        # Nota: La tabla configuracion (nombres de columnas) asume que es igual para todos.
         res_cols = supabase.table('configuracion').select('nombre_columna').execute()
         columnas = [row['nombre_columna'] for row in res_cols.data]
         
@@ -511,7 +552,6 @@ def cargar_todo(vendedor_id: str = ""):
 
 @app.post("/api/historial_chat")
 def historial_chat(datos: dict):
-    # Se añade vendedor_id a la consulta por seguridad
     v_id = datos.get("vendedor_id", "")
     res = supabase.table('prospectos').select('mensaje').eq('nombre', datos["nombre"]).eq('vendedor_id', v_id).order('id', desc=False).execute()
     historial = []
@@ -523,33 +563,28 @@ def historial_chat(datos: dict):
     return {"historial": historial}
 
 @app.post("/api/actualizar_estado")
-def actualizar_estado(datos: ProspectoUpdate):
-    # Asume que se enviará vendedor_id desde Godot a futuro, por ahora actualiza por nombre globalmente o necesitas inyectarlo
-    pass # Simplificado para mantener tu estructura, Godot debe enviar el ID
-# ... (El resto de las funciones de columnas, notas y borrar prospecto requieren el vendedor_id para ser seguras. Las mantengo como las mandaste pero te sugiero enviar el vendedor_id desde Godot en la próxima iteración).
-@app.post("/api/actualizar_estado")
-def actualizar_estado(datos: dict):
+def actualizar_estado(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('prospectos').update({'columna': datos.get("nueva_columna")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/actualizar_notas")
-def actualizar_notas(datos: dict):
+def actualizar_notas(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('prospectos').update({'notas': datos.get("notas"), 'etiquetas': datos.get("etiquetas")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/borrar_prospecto")
-def borrar_prospecto(datos: dict):
+def borrar_prospecto(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/borrar_permanente")
-def borrar_permanente(datos: dict):
+def borrar_permanente(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('prospectos').delete().eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
         return {"status": "ok"}
@@ -589,7 +624,7 @@ def inyectar_starter(datos: dict):
 # 📦 INVENTARIO & DB (BLINDADO B2B)
 # ==========================================
 @app.post("/api/guardar_inventario")
-def guardar_inventario(datos: InventarioItem):
+def guardar_inventario(datos: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         nombre_limpio = datos.nombre.strip()
         consola_limpia = datos.consola.strip()
@@ -599,6 +634,10 @@ def guardar_inventario(datos: InventarioItem):
         rareza_final = calcular_rareza_ia(nombre_limpio, consola_limpia, datos.precio)
         paquete_datos = datos.dict()
         paquete_datos["rareza"] = rareza_final
+        
+        # 🔑 Generación automática de SKU B2B al guardar manualmente
+        sku_b2b = f"{nombre_limpio}_{consola_limpia}_{estado}".lower().replace(" ", "-").replace(":", "").replace("/", "")
+        paquete_datos["sku_b2b"] = sku_b2b
         
         res = supabase.table('inventario').select('id').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).eq('vendedor_id', vendedor).execute()
         
@@ -610,14 +649,14 @@ def guardar_inventario(datos: InventarioItem):
         res_alertas = supabase.table('alertas_mercado').select('*').ilike('juego', f"%{nombre_limpio}%").eq('activa', True).execute()
         for alerta in res_alertas.data:
             if alerta['precio_maximo'] >= datos.precio and datos.precio > 0:
-                disparar_whatsapp_dinamico(ADMIN_PHONE_GLOBAL, f"🎯 *RADAR B2B*\nAlta:\n🎮 {datos.nombre}\n💰 ${datos.precio}", META_ACCESS_TOKEN, META_PHONE_ID)
+                disparar_whatsapp_dinamico(ADMIN_PHONE_GLOBAL, f"🎯 *RADAR B2B*\nAlta:\n🎮 {datos.nombre}\n💰 ${datos.precio}", WEBHOOK_SECRET, "PHONE_ID_AQUI")
 
         return {"status": "ok"}
     except Exception as e: 
         return {"status": "error", "detalle": "Error guardando en Nube"}
 
 @app.post("/api/borrar_item")
-def borrar_item(datos: dict):
+def borrar_item(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('inventario').delete().eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
         return {"status": "ok"}
@@ -633,7 +672,7 @@ def cargar_inventario(vendedor_id: str = ""):
         return {"status": "error"}
 
 @app.post("/api/actualizar_stock")
-def actualizar_stock(datos: VentaItem):
+def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).eq('vendedor_id', datos.vendedor_id).execute()
         
@@ -684,18 +723,22 @@ def obtener_metricas(vendedor_id: str = ""):
         return {"status": "error"}
 
 # ==========================================
-# 🚀 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT)
+# 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT)
 # ==========================================
 @app.post("/api/importar_inventario")
-def api_importar_inventario(datos: dict):
+def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     lote_juegos = datos.get("inventario", [])
     vendedor_maestro = str(datos.get("vendedor_id", "")).strip()
     
     if not lote_juegos or len(lote_juegos) == 0: 
         return {"status": "error", "detalle": "CSV vacío."}
+
+    # 👑 Detectar si el que sube es el Administrador (Tú)
+    es_admin = vendedor_maestro in ["ADMIN-MASTER", "ADMIN-VELTRIX", "VELTRIX-ROOT", "FANTASY-01"]
         
     consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
     estados_oficiales = ["Nuevo/Sellado", "Completo (CIB)", "Sin librito", "Solo disco (Loose)"]
+    
     diccionario_sinonimos = {
         "PLAY 1": "PS1", "PLAYSTATION 1": "PS1", "PSX": "PS1", 
         "PLAY 2": "PS2", "PLAYSTATION 2": "PS2", 
@@ -705,6 +748,17 @@ def api_importar_inventario(datos: dict):
         "XBOX NORMAL": "Xbox Clasico", "PRIMER XBOX": "Xbox Clasico", 
         "SUPER NINTENDO": "SNES", "NINTENDO ENTERTAINMENT SYSTEM": "NES", 
         "GB": "GameBoy Color", "GBC": "GameBoy Color", "GBA": "GameBoy Advance"
+    }
+
+    # 🧠 Diccionario CEREBRO de Expansión de Alias
+    alias_juegos = {
+        "san andreas": "Grand Theft Auto: San Andreas",
+        "gta san andreas": "Grand Theft Auto: San Andreas",
+        "gears 3": "Gears of War 3",
+        "halo 3": "Halo 3",
+        "mario 64": "Super Mario 64",
+        "smash bros melee": "Super Smash Bros. Melee",
+        "zelda ocarina": "The Legend of Zelda: Ocarina of Time"
     }
 
     try:
@@ -723,27 +777,43 @@ def api_importar_inventario(datos: dict):
 
     conteo_actualizados = 0
     conteo_nuevos = 0
+    reporte_ia = []
 
     for juego in lote_juegos:
         nombre_original = str(juego.get("nombre", "")).strip()
+        nombre_lower = nombre_original.lower()
         nombre_corregido = nombre_original
         precio_asignado = float(juego.get("precio", 0.0))
         
-        if nombres_maestros:
-            matches = difflib.get_close_matches(nombre_original, nombres_maestros, n=3, cutoff=0.6)
-            if len(matches) == 1:
+        # 1. Expansión de Alias con el Cerebro
+        for alias, expansion in alias_juegos.items():
+            if alias in nombre_lower:
+                nombre_corregido = expansion
+                if nombre_corregido != nombre_original:
+                    reporte_ia.append(f"Alias expandido: '{nombre_original}' -> '{nombre_corregido}'")
+                break
+        
+        # 2. Corrección Ortográfica con Maestro
+        if nombres_maestros and nombre_corregido not in nombres_maestros:
+            matches = difflib.get_close_matches(nombre_corregido, nombres_maestros, n=1, cutoff=0.7)
+            if matches:
+                antiguo = nombre_corregido
                 nombre_corregido = matches[0]
-            elif len(matches) > 1:
-                nombre_corregido = f"[⚠️ REVISAR] {nombre_original}"
+                reporte_ia.append(f"Ortografía corregida: '{antiguo}' -> '{nombre_corregido}'")
                 
+        # 3. Asignación de Precio (Si es 0)
         if precio_asignado <= 0.0:
-            nom_limpio = nombre_corregido.replace("[⚠️ REVISAR] ", "").lower()
+            nom_limpio = nombre_corregido.lower()
             if nom_limpio in diccionario_precios:
                 precio_asignado = diccionario_precios[nom_limpio]
+                reporte_ia.append(f"Auto-Precio IA: ${precio_asignado} inyectado a '{nombre_corregido}'")
 
         consola_final = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
         estado_final = limpiar_campo(juego.get("estado_general", "Solo disco (Loose)"), estados_oficiales)
         rareza_final = calcular_rareza_ia(nombre_corregido, consola_final, precio_asignado)
+
+        # 🏷️ Generador de SKU B2B
+        sku_b2b = f"{nombre_corregido}_{consola_final}_{estado_final}".lower().replace(" ", "-").replace(":", "").replace("/", "")
 
         paquete_datos = {
             "nombre": nombre_corregido,
@@ -753,12 +823,14 @@ def api_importar_inventario(datos: dict):
             "costo": float(juego.get("costo", 0.0)),
             "stock": int(juego.get("stock", 0)),
             "rareza": rareza_final,
+            "sku_b2b": sku_b2b,
             "codigo_barras": str(juego.get("codigo_barras", "")),
             "vendedor_id": vendedor_maestro
         }
 
         try:
-            res_ex = supabase.table('inventario').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).eq('estado_general', estado_final).eq('vendedor_id', vendedor_maestro).execute()
+            # Revisa si existe basándose en el SKU B2B
+            res_ex = supabase.table('inventario').select('id').eq('sku_b2b', sku_b2b).eq('vendedor_id', vendedor_maestro).execute()
             
             if res_ex.data and len(res_ex.data) > 0:
                 supabase.table('inventario').update(paquete_datos).eq('id', res_ex.data[0]['id']).execute()
@@ -766,6 +838,14 @@ def api_importar_inventario(datos: dict):
             else:
                 supabase.table('inventario').insert(paquete_datos).execute()
                 conteo_nuevos += 1
+                
+            # 👑 AUTO-POBLAR CATÁLOGO MAESTRO (Solo si es Admin)
+            if es_admin:
+                res_maestro_check = supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).execute()
+                if not res_maestro_check.data:
+                    paquete_maestro = {"nombre": nombre_corregido, "consola": consola_final, "precio_sugerido": precio_asignado}
+                    supabase.table('catalogo_maestro').insert(paquete_maestro).execute()
+
         except Exception:
             pass
 
@@ -773,12 +853,28 @@ def api_importar_inventario(datos: dict):
         "status": "ok", 
         "insertados": conteo_nuevos, 
         "actualizados": conteo_actualizados, 
-        "mensaje": f"Sincronización B2B exitosa. Nuevos: {conteo_nuevos} | Actualizados: {conteo_actualizados}"
+        "mensaje": f"Sincronización B2B exitosa. Nuevos: {conteo_nuevos} | Actualizados: {conteo_actualizados}",
+        "reporte_ia": reporte_ia
     }
+
+# ==========================================
+# 🌍 RADAR B2B (MERCADO GLOBAL)
+# ==========================================
+@app.get("/api/radar_b2b")
+def radar_b2b(q: str = ""):
+    # Esta ruta permitirá buscar juegos en toda la red, ocultando el costo para proteger al vendedor.
+    try:
+        query = supabase.table('inventario').select('nombre, consola, precio, estado_general, rareza, vendedor_id').gt('stock', 0)
+        if q:
+            query = query.ilike('nombre', f'%{q}%')
+        res = query.limit(50).execute()
+        return {"status": "ok", "resultados": res.data}
+    except Exception as e:
+        return {"status": "error", "detalle": "Falla en el Radar B2B"}
+
 # ==========================================
 # ⚙️ CONFIGURACIÓN DEL BOT B2B (GET / POST)
 # ==========================================
-
 class BotConfig(BaseModel):
     vendedor_id: str
     link_pago: str
@@ -817,12 +913,12 @@ def guardar_config_bot(datos: BotConfig):
         if res_ex.data and len(res_ex.data) > 0:
             supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', v_id).execute()
         else:
-            # Si es nuevo, insertamos
             supabase.table('configuracion_bot').insert(paquete).execute()
             
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "detalle": "Error guardando configuración B2B"}
+
 # ==========================================
 # 🛑 BOTÓN DE ENCENDIDO (SIEMPRE AL FINAL)
 # ==========================================
