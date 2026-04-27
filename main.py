@@ -17,6 +17,16 @@ import difflib
 import os
 import bcrypt
 from dotenv import load_dotenv
+import time
+import hashlib
+import requests # Asegúrate de tener esto para los timeouts
+import io
+import csv
+from fastapi.responses import StreamingResponse
+
+# 🛡️ MEMORIAS DE SEGURIDAD B2B
+registro_actividad_b2b = {} # Para los strikes de búsquedas manuales
+historial_hashes_b2b = {}   # Para evitar que suban el mismo Excel 10 veces seguidas
 
 # 🛡️ CARGA DE VARIABLES SEGURAS (Desde el archivo .env)
 load_dotenv()
@@ -215,10 +225,47 @@ def login_b2b(datos: Credenciales):
         return {"status": "error", "detalle": "Error en el servidor B2B."}
 
 # ==========================================
-# 📈 MOTOR DE PRECIOS PRO (CACHÉ + FRANCOTIRADOR)
+# 📈 MOTOR DE PRECIOS PRO (CACHÉ + FRANCOTIRADOR + BLINDAJE B2B)
 # ==========================================
 @app.get("/api/consultar_precio")
-def api_consultar_precio(nombre: str, consola: str = ""):
+def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo"):
+    # ==========================================
+    # 🛡️ ESCUDO ANTI-SPAM (SISTEMA DE STRIKES)
+    # ==========================================
+    if vendedor_id != "ADMIN_VELTRIX":
+        tiempo_actual = time.time()
+        llave_spam = f"precio_{vendedor_id}"
+        
+        # Leemos el historial del cliente (0 strikes iniciales)
+        estado = registro_actividad_b2b.get(llave_spam, {"strikes": 0, "last": 0, "ban": 0})
+        
+        # 1. ¿Cumpliendo condena en la cárcel?
+        if tiempo_actual < estado["ban"]:
+            restante = int((estado["ban"] - tiempo_actual) / 60)
+            return {"status": "error", "detalle": f"🚫 BAN ACTIVO: Espera {restante} minutos.", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        # 2. ¿Clics a lo loco? (Menos de 10 segs entre clics)
+        if tiempo_actual - estado["last"] < 10:
+            estado["strikes"] += 1
+            estado["last"] = tiempo_actual
+            
+            if estado["strikes"] >= 3:
+                # 3er Strike = A la cárcel por 30 minutos (30 * 60 segundos)
+                estado["ban"] = tiempo_actual + (30 * 60) 
+                estado["strikes"] = 0
+                registro_actividad_b2b[llave_spam] = estado
+                return {"status": "error", "detalle": "🚫 BANEADO: Múltiples intentos rápidos. Bloqueado por 30 mins.", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+            registro_actividad_b2b[llave_spam] = estado
+            return {"status": "error", "detalle": f"⚠️ Espera 10 segundos. (Strike {estado['strikes']}/3)", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        # 3. Clic legal, reseteamos el historial
+        estado["strikes"] = 0
+        estado["last"] = tiempo_actual
+        registro_actividad_b2b[llave_spam] = estado
+    # ==========================================
+
+    # --- AQUÍ COMIENZA TU LÓGICA ORIGINAL INTACTA ---
     tipo_cambio = obtener_dolar_hoy()
     nombre_busqueda = nombre.lower().strip()
     
@@ -256,7 +303,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     
     html_search = obtener_html_escalonado(url_search)
     if not html_search:
-        return {"status": "error", "detalle": "Error Radar de Precios", "url_pc": "https://www.pricecharting.com"}
+        return {"status": "error", "detalle": "Error Radar de Precios", "url_pc": "https://www.pricecharting.com", "mxn": {"loose": 0, "cib": 0, "new": 0}}
         
     soup = BeautifulSoup(html_search, 'html.parser')
     link_juego = None
@@ -264,7 +311,13 @@ def api_consultar_precio(nombre: str, consola: str = ""):
     etiqueta_busqueda = f"/game/{slug_esperado}/"
     palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
     
-    for a in soup.find_all('a', href=True):
+    # 🎯 FIX: Aislar solo la tabla principal de resultados para ignorar las barras laterales
+    tabla_resultados = soup.find(id="games_table")
+    
+    # Si encontró la tabla, solo buscamos links ahí adentro. Si no, busca en toda la página (fallback)
+    nodos_a_buscar = tabla_resultados.find_all('a', href=True) if tabla_resultados else soup.find_all('a', href=True)
+    
+    for a in nodos_a_buscar:
         href = a['href'].lower()
         if '/game/' in href and not any(b in href for b in palabras_prohibidas):
             if etiqueta_busqueda in href:
@@ -272,7 +325,7 @@ def api_consultar_precio(nombre: str, consola: str = ""):
                 break
     
     if not link_juego:
-        for a in soup.find_all('a', href=True):
+        for a in nodos_a_buscar:
             href = a['href'].lower()
             if '/game/' in href and not any(b in href for b in palabras_prohibidas):
                 link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
@@ -621,6 +674,66 @@ def inyectar_starter(datos: dict):
         return {"status": "error"}
 
 # ==========================================
+# 📥 GENERADOR DINÁMICO DE PLANTILLAS B2B
+# ==========================================
+@app.get("/api/descargar_plantilla")
+def api_descargar_plantilla(vendedor_id: str = "anonimo"):
+    print(f"📥 [SISTEMA] Generando plantilla dinámica para: {vendedor_id}")
+    
+    try:
+        # 1. Traemos el Catálogo Maestro (Los nombres oficiales)
+        res_maestro = supabase.table('catalogo_maestro').select('*').execute()
+        items_maestros = res_maestro.data if res_maestro.data else []
+        
+        # 2. Traemos el Inventario Privado del usuario (Sus stocks y costos reales)
+        res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id).execute()
+        dict_privado = {item['nombre']: item for item in res_privado.data} if res_privado.data else {}
+
+        # 3. Creamos el archivo CSV en memoria RAM
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # 🟢 FILA 1: Instrucciones idénticas a tu Godot
+        instrucciones = ['INSTRUCCIONES: No borrar filas 1 y 2.los Datos inician en fila 3. "poner nombre(lo mas exacto posible), consola (ejem: PS2,XBOX), costo(en cuanto lo compraste), Precio (en cuanto lo quieres vender) si lo dejas en 0, se rellena el precio automaticamente por precio Sugerido IA., Stock (cuantos tienes), estado SKU (solo poner una opcion de estas "NUEVO/SELLADO--COMPLETO--SIN LIBRITO--SOLO DISCO" Rareza NO tocarla, se llena sola y detalles(lo que consideres ejem: "esta rayado, esta impecable, etc.). Por Ultimo, guardar el archivo como extencion .CSV"']
+        writer.writerow(instrucciones)
+        
+        # 🟢 FILA 2: Cabeceras oficiales (Exactamente como las lee tu importador)
+        writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "detalles"])
+
+        # 4. Cruzamos la información
+        # Si el juego ya está en su inventario, ponemos sus datos. Si no, lo ponemos en ceros.
+        for m in items_maestros:
+            nombre = m['nombre']
+            consola = m['consola']
+            
+            if nombre in dict_privado:
+                # Datos reales del vendedor
+                inv = dict_privado[nombre]
+                writer.writerow([
+                    nombre, consola, 
+                    inv.get('costo', 0), 
+                    inv.get('precio', 0), 
+                    inv.get('stock', 0), 
+                    inv.get('estado_general', 'Completo (CIB)'),
+                    inv.get('descripcion_detallada', '')
+                ])
+            else:
+                # Datos base (Stock 0)
+                writer.writerow([nombre, consola, 0, m.get('precio_sugerido', 0), 0, "Completo (CIB)", ""])
+
+        # 5. Preparar la descarga
+        output.seek(0)
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode("utf-8")),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=Plantilla_{vendedor_id}.csv"}
+        )
+
+    except Exception as e:
+        print(f"❌ Error al generar plantilla: {e}")
+        return {"status": "error", "detalle": str(e)}
+
+# ==========================================
 # 📦 INVENTARIO & DB (BLINDADO B2B)
 # ==========================================
 @app.post("/api/guardar_inventario")
@@ -723,6 +836,7 @@ def obtener_metricas(vendedor_id: str = ""):
         return {"status": "error"}
 # ==========================================
 # ==========================================
+# ==========================================
 # 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT)
 # ==========================================
 @app.post("/api/importar_inventario")
@@ -734,7 +848,14 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
         return {"status": "error", "detalle": "CSV vacío."}
 
     consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
-    estados_oficiales = ["Nuevo/Sellado", "Completo (CIB)", "Sin librito", "Solo disco (Loose)"]
+    
+    # ✨ MAPEO DE ESTADOS OFICIALES (Fuerza Bruta)
+    mapa_estados = {
+        "NUEVO": "Nuevo/Sellado", "SELLADO": "Nuevo/Sellado", "NUEVO/SELLADO": "Nuevo/Sellado",
+        "COMPLETO": "Completo", "CIB": "Completo", "COMPLETO (CIB)": "Completo",
+        "SIN LIBRITO": "Sin librito", "SIN MANUAL": "Sin librito",
+        "SOLO DISCO": "Solo disco", "SUELTO": "Solo disco", "LOOSE": "Solo disco"
+    }
     
     diccionario_sinonimos = {
         "PLAY 1": "PS1", "PLAYSTATION 1": "PS1", "PSX": "PS1", 
@@ -778,14 +899,18 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
     for juego in lote_juegos:
         nombre_original = str(juego.get("nombre", "")).strip()
         nombre_lower = nombre_original.lower()
-        nombre_corregido = nombre_original
+        
+        # ✨ FIX DE ESTÉTICA: Forzamos el formato "Title Case" desde el inicio.
+        # "ALIAS PS2" -> "Alias Ps2", "007 everything" -> "007 Everything"
+        nombre_corregido = nombre_original.title() 
+        
         precio_asignado = float(juego.get("precio", 0.0))
         
         # 1. Expansión de Alias Estático
         for alias, expansion in alias_juegos.items():
             if alias in nombre_lower:
                 nombre_corregido = expansion
-                if nombre_corregido != nombre_original:
+                if nombre_corregido != nombre_original.title():
                     reporte_ia.append(f"Alias expandido: '{nombre_original}' -> '{nombre_corregido}'")
                 break
         
@@ -797,9 +922,12 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
                 nombre_corregido = matches[0]
                 reporte_ia.append(f"Ortografía corregida: '{antiguo}' -> '{nombre_corregido}'")
                 
-        # 3. Asignación de Precio y Auto-Completado de Nombres
+        # 3. Asignación de Precio, Consola y Estado
         consola_final = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
-        estado_final = limpiar_campo(juego.get("estado_general", "Solo disco (Loose)"), estados_oficiales)
+        
+        # ✨ APLICAMOS LA FUERZA BRUTA AL ESTADO
+        estado_crudo = str(juego.get("estado_general", "")).strip().upper()
+        estado_final = mapa_estados.get(estado_crudo, "Solo disco")
 
         if precio_asignado <= 0.0:
             nom_limpio = nombre_corregido.lower()
@@ -809,37 +937,34 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
             else:
                 # 🌐 BÚSQUEDA WEB EN VIVO
                 try:
-                    datos_pc = api_consultar_precio(nombre_corregido, consola_final)
+                    datos_pc = api_consultar_precio(nombre_corregido, consola_final, vendedor_maestro)
                     
                     if datos_pc and datos_pc.get("status") == "ok":
-                        # 🧠 AUTO-COMPLETAR NOMBRE: Extraer el nombre perfecto desde el link de PriceCharting
+                        # 🧠 AUTO-COMPLETAR NOMBRE
                         if "url_pc" in datos_pc and "/game/" in datos_pc["url_pc"]:
                             slug_juego = datos_pc["url_pc"].split("/")[-1]
                             nombre_perfecto = slug_juego.replace("-", " ").title()
                             
-                            # Si la página encontró algo válido, sobrescribimos tu nombre corto
                             if len(nombre_perfecto) > 3 and nombre_corregido.lower() != nombre_perfecto.lower():
                                 reporte_ia.append(f"Nombre Auto-Completado Web: '{nombre_corregido}' -> '{nombre_perfecto}'")
                                 nombre_corregido = nombre_perfecto
 
-                        # ASIGNAR PRECIO
-                        if estado_final == "Completo (CIB)":
+                        # ASIGNAR PRECIO SEGÚN ESTADO CORREGIDO
+                        if estado_final == "Completo" or estado_final == "Nuevo/Sellado":
                             precio_asignado = datos_pc["mxn"]["cib"]
                         else:
                             precio_asignado = datos_pc["mxn"]["loose"]
                             
-                        # BLINDAJE FINANCIERO: Si PriceCharting dice 0, marcamos alerta
+                        # BLINDAJE FINANCIERO
                         if precio_asignado <= 0.0:
                             precio_asignado = 0.0 
                             reporte_ia.append(f"⚠️ ATENCIÓN: No hay precio online para '{nombre_corregido}'. Quedó en $0 para revisión.")
                         else:
                             reporte_ia.append(f"Radar Web: ${precio_asignado} extraído de internet para '{nombre_corregido}'")
                     else:
-                        # BLINDAJE FINANCIERO: No lo encontró en internet
                         precio_asignado = 0.0
                         reporte_ia.append(f"⚠️ ATENCIÓN: '{nombre_corregido}' es desconocido. Quedó en $0 para revisión.")
                 except Exception as e:
-                    # BLINDAJE FINANCIERO: Error de internet
                     precio_asignado = 0.0
                     reporte_ia.append(f"⚠️ ATENCIÓN: Falla al buscar '{nombre_corregido}'. Quedó en $0 para revisión.")
 
@@ -857,7 +982,8 @@ def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion
             "rareza": rareza_final,
             "sku_b2b": sku_b2b,
             "codigo_barras": str(juego.get("codigo_barras", "")),
-            "vendedor_id": vendedor_maestro
+            "vendedor_id": vendedor_maestro,
+            "descripcion_detallada": str(juego.get("detalles", ""))
         }
 
         try:
