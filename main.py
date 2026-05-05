@@ -666,7 +666,7 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         
         # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -813,7 +813,7 @@ async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventa
         
         # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -1008,7 +1008,7 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     
     # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
     api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
