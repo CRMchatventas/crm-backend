@@ -664,11 +664,17 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         }}
         """
         
-        # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
+        # BLINDAJE EXTREMO: La llave va en el Header, la URL queda limpia y pública
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
-        headers = {'Content-Type': 'application/json'}
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    
+        headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key_limpia  # <-- Aquí viaja la llave, invisible para los logs
+        }
+    
         payload = {
+        # ... (Tu payload queda igualito a como lo tienes) ...
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2}
         }
@@ -811,11 +817,17 @@ async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventa
         }}
         """
         
-        # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
+        # BLINDAJE EXTREMO: La llave va en el Header, la URL queda limpia y pública
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
-        headers = {'Content-Type': 'application/json'}
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    
+        headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key_limpia  # <-- Aquí viaja la llave, invisible para los logs
+        }
+    
         payload = {
+        # ... (Tu payload queda igualito a como lo tienes) ...
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4} # Un poco más creativo para sonar persuasivo
         }
@@ -1006,11 +1018,17 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }}
     """
     
-    # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
-    api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_limpia}"
-    headers = {'Content-Type': 'application/json'}
-    payload = {
+        # BLINDAJE EXTREMO: La llave va en el Header, la URL queda limpia y pública
+        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    
+        headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key_limpia  # <-- Aquí viaja la llave, invisible para los logs
+        }
+    
+        payload = {
+        # ... (Tu payload queda igualito a como lo tienes) ...
         "contents": [{
             "parts": [
                 {"text": prompt},
