@@ -39,7 +39,7 @@ logger = logging.getLogger("VeltrixEngine")
 load_dotenv()
 
 # ✨ CONFIGURACIÓN GEMINI AI (Free Tier)
-GENAI_KEY = os.getenv("GEMINI_API_KEY")
+GENAI_KEY = os.getenv("GENAI_KEY")
 
 # 🛡️ MEMORIAS DE SEGURIDAD B2B
 registro_actividad_b2b = {} # Para los strikes de búsquedas manuales
