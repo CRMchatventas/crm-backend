@@ -1368,9 +1368,12 @@ def inyectar_starter(datos: dict):
 # 📥 GENERADOR DINÁMICO DE PLANTILLAS B2B
 # ==========================================
 @app.get("/api/descargar_plantilla")
-def api_descargar_plantilla(vendedor_id: str = "anonimo"):
-    print(f"📥 [SISTEMA] Generando plantilla dinámica para: {vendedor_id}")
+# 1. Metemos al Guardia de Seguridad y quitamos el "anonimo"
+def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
     
+    # 2. Usamos el ID real validado por el token
+    print(f"📥 [SISTEMA] Generando plantilla dinámica segura para: {vendedor_id_real}")
+        
     try:
         # 1. Traemos el Catálogo Maestro (Los nombres oficiales)
         res_maestro = supabase.table('catalogo_maestro').select('*').execute()
@@ -1464,18 +1467,22 @@ def guardar_inventario(datos: InventarioItem): # 🚨 ELIMINAMOS EL 'Depends'
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('inventario').delete().eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        # CÓDIGO BLINDADO:
+        supabase.table('inventario').delete().eq('vendedor_id', _sesion).eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).execute()
         return {"status": "ok"}
     except Exception as e: 
         return {"status": "error"}
 
 @app.get("/api/cargar_inventario")
-def cargar_inventario(vendedor_id: str = ""):
-    try: 
-        res = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id).order('nombre', desc=False).execute()
+# 1. Quitamos el vendedor_id = "" y metemos a nuestro Guardia de Seguridad
+def cargar_inventario(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
+    try:
+        # 2. Usamos el ID real que nos dio el guardia para buscar en Supabase
+        res = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).order('nombre', desc=False).execute()
+        
         return {"status": "ok", "inventario": res.data}
-    except Exception as e: 
-        return {"status": "error"}
+    except Exception as e:
+        return {"status": "error", "detalle": str(e)}
 
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
