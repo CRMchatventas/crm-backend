@@ -25,6 +25,9 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 import uvicorn
+import io
+import csv
+import difflib
 
 # ==========================================
 # 📝 CONFIGURACIÓN DE LOGGING PROFESIONAL
