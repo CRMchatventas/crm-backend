@@ -6,3 +6,5 @@ supabase==2.4.3
 httpx
 beautifulsoup4
 python-dotenv
+bcrypt
+python-jose[cryptography]
