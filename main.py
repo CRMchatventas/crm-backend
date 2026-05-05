@@ -664,15 +664,17 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         }}
         """
         
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+        # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
+        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2}
         }
         
-        # 🚀 HTTPX ASINCRONO: Peticiones no bloqueantes
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # 🚀 HTTPX ASINCRONO: Peticiones no bloqueantes (Aumentamos timeout a 60.0)
+        async with httpx.AsyncClient(timeout=60.0) as client:
             max_intentos = 3
             for intento in range(max_intentos):
                 res = await client.post(url, headers=headers, json=payload)
@@ -691,6 +693,9 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
                     await asyncio.sleep(2.5) 
                     continue 
                 else:
+                    # 🔥 AQUÍ INYECTAMOS LA RADIOGRAFÍA 🔥
+                    print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
+                    print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
                     raise Exception(f"Google API devolvió error {res.status_code}")
                     
             raise Exception("Se agotaron los reintentos para la API de Google (429 continuo).")
@@ -806,29 +811,36 @@ async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventa
         }}
         """
         
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+        # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
+        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4} # Un poco más creativo para sonar persuasivo
         }
         
+        # Ejecutamos la petición
         loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload))
+        res = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=60.0))
         
         if res.status_code == 200:
             data = res.json()
             texto_sucio = data['candidates'][0]['content']['parts'][0]['text']
             
-            if '```json' in texto_sucio: texto_sucio = texto_sucio.split('```json')[1].split('```')[0]
-            elif '```' in texto_sucio: texto_sucio = texto_sucio.split('```')[1].split('```')[0]
-                
-            return json.loads(texto_sucio.strip())
+            # 🔥 Limpiador de JSON a prueba de balas (usando tu técnica de chr)
+            simbolo = chr(96) * 3
+            texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
+            
+            return json.loads(texto_limpio)
         else:
+            # RADIOGRAFÍA PARA ATRAPAR EL ERROR
+            print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
+            print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
             return None
 
     except Exception as e:
-        print(f"⚠️ [IA FINANCIERA ERROR]: {e}")
+        print(f"⚠️ [IA FINANCIERA ERROR]: {str(e)}")
         return None
 
 async def bucle_seguimiento_24h():
@@ -994,7 +1006,9 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+    # BLINDAJE DE URL: Limpiamos espacios y forzamos la ruta estable
+    api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key_limpia}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
@@ -1006,17 +1020,22 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
         "generationConfig": {"temperature": 0.1}
     }
     
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        res = await client.post(url, headers=headers, json=payload)
-        if res.status_code == 200:
-            data = res.json()
-            texto_sucio = data['candidates'][0]['content']['parts'][0]['text']
+    # 1. Subimos el tiempo a 60 segundos para evitar cortes cuando procese imágenes pesadas
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(url, headers=headers, json=payload)
             
-            simbolo = chr(96) * 3
-            texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
-            return json.loads(texto_limpio)
-        else:
-            raise Exception("Fallo en la conexión visual con Gemini")
+            if res.status_code == 200:
+                data = res.json()
+                texto_sucio = data['candidates'][0]['content']['parts'][0]['text']
+                
+                simbolo = chr(96) * 3
+                texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
+                return json.loads(texto_limpio)
+            else:
+                # 🔥 2. AQUÍ ENTRA LA RADIOGRAFÍA EN LUGAR DE TU EXCEPCIÓN GENÉRICA 🔥
+                print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
+                print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
+                raise Exception(f"Fallo en la conexión visual con Gemini. Código: {res.status_code}")
 
 # ==========================================
 # 🚀 MOTOR FANTASMA (TRABAJO EN SEGUNDO PLANO MULTIMODAL)
