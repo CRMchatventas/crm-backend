@@ -1021,7 +1021,7 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }
     
     # 1. Subimos el tiempo a 60 segundos para evitar cortes cuando procese imágenes pesadas
-async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         res = await client.post(url, headers=headers, json=payload)
             
         if res.status_code == 200:
@@ -1031,11 +1031,11 @@ async with httpx.AsyncClient(timeout=60.0) as client:
             simbolo = chr(96) * 3
             texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
             return json.loads(texto_limpio)
-            else:
-                # 🔥 2. AQUÍ ENTRA LA RADIOGRAFÍA EN LUGAR DE TU EXCEPCIÓN GENÉRICA 🔥
-                print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
-                print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
-                raise Exception(f"Fallo en la conexión visual con Gemini. Código: {res.status_code}")
+        else:
+            # 🔥 2. AQUÍ ENTRA LA RADIOGRAFÍA EN LUGAR DE TU EXCEPCIÓN GENÉRICA 🔥
+            print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
+            print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
+            raise Exception(f"Fallo en la conexión visual con Gemini. Código: {res.status_code}")
 
 # ==========================================
 # 🚀 MOTOR FANTASMA (TRABAJO EN SEGUNDO PLANO MULTIMODAL)
