@@ -664,7 +664,7 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         }}
         """
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -806,7 +806,7 @@ async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventa
         }}
         """
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -994,7 +994,7 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
