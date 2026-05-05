@@ -923,11 +923,6 @@ async def bucle_seguimiento_24h():
         # El reloj duerme 1 hora antes de volver a revisar la base de datos
         await asyncio.sleep(3600)
 
-# ==========================================================
-# 🛡️ MEMORIAS DE SEGURIDAD Y ANTI-DUPLICADOS
-# ==========================================================
-procesados_recientemente = set() #
-
 # ==========================================
 # 🔗 WEBHOOK (RECEPCIÓN MULTI-TENANT BLINDADA AAA)
 # ==========================================
@@ -1184,10 +1179,9 @@ async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_recepto
 # 🟢 ENVIAR MENSAJES DESDE GODOT (MULTI-TENANT)
 # ==========================================
 @app.post("/api/enviar_mensaje")
-def api_enviar_mensaje(datos: MensajeSaliente):
+def api_enviar_mensaje(datos: MensajeSaliente, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Extraemos la config de ESTE vendedor para tener su Token
-        res_config = supabase.table('configuracion_bot').select('*').eq('vendedor_id', datos.vendedor_id).execute()
+        res_config = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).execute()
         if not res_config.data:
             return {"status": "error", "detalle": "Configuración de bot no encontrada."}
             
@@ -1198,12 +1192,12 @@ def api_enviar_mensaje(datos: MensajeSaliente):
             "origen": "WHATSAPP",
             "mensaje": f"TÚ: {datos.texto}",
             "columna": "En Conversacion",
-            "vendedor_id": datos.vendedor_id
+            "vendedor_id": _sesion
         }).execute()
         
-        supabase.table('prospectos').update({'columna': 'En Conversacion'}).eq('nombre', datos.cliente).eq('vendedor_id', datos.vendedor_id).execute()
+        supabase.table('prospectos').update({'columna': 'En Conversacion'}).eq('nombre', datos.cliente).eq('vendedor_id', _sesion).execute()
         
-        res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).eq('vendedor_id', datos.vendedor_id).neq('telefono', None).limit(1).execute()
+        res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).eq('vendedor_id', _sesion).neq('telefono', None).limit(1).execute()
         
         if res_tel.data:
             telefono_destino = res_tel.data[0]['telefono']
@@ -1218,42 +1212,24 @@ def api_enviar_mensaje(datos: MensajeSaliente):
 # 🌐 RUTAS DE GESTIÓN CRM (BLINDADAS)
 # ==========================================
 @app.get("/api/cargar_todo")
-def cargar_todo(vendedor_id: str = ""):
+def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🏢 1. EL ESQUELETO UNIVERSAL (IZQUIERDA)
-        columnas_izq = [
-            "Bandeja Nueva", 
-            "Envios Masivos", 
-            "Con Descuento", 
-            "Requiere Asistencia"
-        ]
+        columnas_izq = ["Bandeja Nueva", "Envios Masivos", "Con Descuento", "Requiere Asistencia"]
+        columnas_der = ["Por Entregar", "Vendidos", "Papelera"]
         
-        # 🏢 2. EL ESQUELETO UNIVERSAL (DERECHA)
-        columnas_der = [
-            "Por Entregar", 
-            "Vendidos", 
-            "Papelera"
-        ]
-        
-        # 🔍 3. LAS COLUMNAS PERSONALIZADAS DEL CLIENTE
-        res_cols = supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', vendedor_id).execute()
+        res_cols = supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', _sesion).execute()
         
         columnas_custom = []
         for row in res_cols.data:
             nombre = row['nombre_columna']
-            # 🛡️ FILTRO ANTI-FANTASMAS: Ignora las fijas Y destruye a "En Atencion"
             if nombre.upper() not in [c.upper() for c in (columnas_izq + columnas_der)] and nombre.upper() != "EN ATENCION":
                 columnas_custom.append(nombre)
                 
-        # ✨ 4. LA MAGIA UX: Si el cliente no tiene columnas propias, le regalamos la "+"
         if not columnas_custom:
             columnas_custom = ["+"]
                 
-        # 🧩 5. ENSAMBLAMOS EL ROMPECABEZAS
         columnas_finales = columnas_izq + columnas_custom + columnas_der
-        
-        # 🧾 6. PEDIMOS LOS CLIENTES Y SUS CHATS
-        res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', vendedor_id).order('id', desc=False).execute()
+        res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('id', desc=False).execute()
         
         ultimos = {}
         for fila in res_prospectos.data: 
@@ -1265,12 +1241,11 @@ def cargar_todo(vendedor_id: str = ""):
         return {"error": "Error conectando a Nube B2B"}
 
 @app.post("/api/crear_columna")
-def crear_columna(datos: dict):
+def crear_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Insertamos la nueva columna con el gafete del cliente
         supabase.table('configuracion').insert({
             'nombre_columna': datos.get("nombre_columna"),
-            'vendedor_id': datos.get("vendedor_id", "")
+            'vendedor_id': _sesion
         }).execute()
         return {"status": "ok"}
     except Exception as e:
@@ -1278,26 +1253,24 @@ def crear_columna(datos: dict):
         return {"status": "error"}
 
 @app.post("/api/borrar_columna")
-def borrar_columna(datos: dict):
+def borrar_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').delete().eq('nombre_columna', datos.get("nombre_columna")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('configuracion').delete().eq('nombre_columna', datos.get("nombre_columna")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error"}
 
 @app.post("/api/renombrar_columna")
-def renombrar_columna(datos: dict):
+def renombrar_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Cambia el nombre en la tabla configuracion
-        supabase.table('configuracion').update({'nombre_columna': datos.get("nuevo_nombre")}).eq('nombre_columna', datos.get("viejo_nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('configuracion').update({'nombre_columna': datos.get("nuevo_nombre")}).eq('nombre_columna', datos.get("viejo_nombre")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error"}
 
 @app.post("/api/historial_chat")
-def historial_chat(datos: dict):
-    v_id = datos.get("vendedor_id", "")
-    res = supabase.table('prospectos').select('mensaje').eq('nombre', datos["nombre"]).eq('vendedor_id', v_id).order('id', desc=False).execute()
+def historial_chat(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+    res = supabase.table('prospectos').select('mensaje').eq('nombre', datos["nombre"]).eq('vendedor_id', _sesion).order('id', desc=False).execute()
     historial = []
     for fila in res.data:
         texto = fila['mensaje']
@@ -1309,28 +1282,28 @@ def historial_chat(datos: dict):
 @app.post("/api/actualizar_estado")
 def actualizar_estado(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'columna': datos.get("nueva_columna")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('prospectos').update({'columna': datos.get("nueva_columna")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'notas': datos.get("notas"), 'etiquetas': datos.get("etiquetas")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('prospectos').update({'notas': datos.get("notas"), 'etiquetas': datos.get("etiquetas")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/borrar_prospecto")
 def borrar_prospecto(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
 @app.post("/api/borrar_permanente")
 def borrar_permanente(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').delete().eq('nombre', datos.get("nombre")).eq('vendedor_id', datos.get("vendedor_id", "")).execute()
+        supabase.table('prospectos').delete().eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
     except Exception as e: return {"status": "error"}
 
@@ -1346,15 +1319,14 @@ def buscar_maestro(q: str):
         return {"status": "error", "detalle": "Error consultando Catálogo"}
 
 @app.post("/api/inyectar_starter")
-def inyectar_starter(datos: dict):
+def inyectar_starter(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        vendedor = datos.get("vendedor_id", "")
         maestros = supabase.table('catalogo_maestro').select('*').eq('starter_pack', True).execute()
         lote = []
         for m in maestros.data:
             item = {
                 "nombre": m["nombre"], "consola": m["consola"], "precio": m["precio_sugerido"],
-                "costo": 0, "stock": 0, "estado_general": "Solo disco (Loose)", "codigo_barras": "", "vendedor_id": vendedor
+                "costo": 0, "stock": 0, "estado_general": "Solo disco (Loose)", "codigo_barras": "", "vendedor_id": _sesion
             }
             lote.append(item)
         
@@ -1431,22 +1403,21 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
 # 📦 INVENTARIO & DB (BLINDADO B2B - SIN CADENERO)
 # ==========================================
 @app.post("/api/guardar_inventario")
-def guardar_inventario(datos: InventarioItem): # 🚨 ELIMINAMOS EL 'Depends'
+def guardar_inventario(datos: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)): 
     try:
         nombre_limpio = datos.nombre.strip()
         consola_limpia = datos.consola.strip()
         estado = datos.estado_general.strip()
-        vendedor = datos.vendedor_id.strip()
         
         rareza_final = calcular_rareza_ia(nombre_limpio, consola_limpia, datos.precio)
         paquete_datos = datos.dict()
         paquete_datos["rareza"] = rareza_final
+        paquete_datos["vendedor_id"] = _sesion # 🛡️ Forzamos el ID real
         
-        # 🔑 Generación automática de SKU B2B al guardar manualmente
         sku_b2b = f"{nombre_limpio}_{consola_limpia}_{estado}".lower().replace(" ", "-").replace(":", "").replace("/", "")
         paquete_datos["sku_b2b"] = sku_b2b
         
-        res = supabase.table('inventario').select('id').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).eq('vendedor_id', vendedor).execute()
+        res = supabase.table('inventario').select('id').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).eq('vendedor_id', _sesion).execute()
         
         if res.data and len(res.data) > 0:
             supabase.table('inventario').update(paquete_datos).eq('id', res.data[0]['id']).execute()
@@ -1460,7 +1431,6 @@ def guardar_inventario(datos: InventarioItem): # 🚨 ELIMINAMOS EL 'Depends'
 
         return {"status": "ok"}
     except Exception as e: 
-        # 🚨 ESTO HARÁ QUE PYTHON GRITE EL ERROR REAL EN LA CONSOLA NEGRA
         print(f"\n❌ [ERROR REAL EN SUPABASE]: {str(e)}\n")
         return {"status": "error", "detalle": str(e)}
 
@@ -1487,16 +1457,16 @@ def cargar_inventario(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).eq('vendedor_id', datos.vendedor_id).execute()
+        res = supabase.table('inventario').select('precio, costo').eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).eq('vendedor_id', _sesion).execute()
         
         if res.data and len(res.data) > 0:
             precio_venta = res.data[0].get('precio', 0.0)
             costo_compra = res.data[0].get('costo', 0.0)
             ganancia = precio_venta - costo_compra
             
-            supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).eq('vendedor_id', datos.vendedor_id).execute()
+            supabase.table('inventario').update({'stock': datos.nuevo_stock}).eq('nombre', datos.nombre).eq('consola', datos.consola).eq('estado_general', datos.estado_general).eq('vendedor_id', _sesion).execute()
             
-            registro = {"nombre_juego": datos.nombre, "precio_venta": precio_venta, "costo": costo_compra, "ganancia": ganancia, "vendedor_id": datos.vendedor_id}
+            registro = {"nombre_juego": datos.nombre, "precio_venta": precio_venta, "costo": costo_compra, "ganancia": ganancia, "vendedor_id": _sesion}
             supabase.table('registro_ventas').insert(registro).execute()
             
             return {"status": "ok"}
@@ -1506,9 +1476,9 @@ def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b
         return {"status": "error"}
 
 @app.get("/api/buscar_por_codigo")
-def buscar_por_codigo(codigo: str, vendedor_id: str = ""):
+def buscar_por_codigo(codigo: str, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).eq('vendedor_id', vendedor_id).execute()
+        res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).eq('vendedor_id', _sesion).execute()
         if res.data and len(res.data) > 0: 
             return {"status": "ok", "juego": res.data[0]}
         return {"status": "error"}
@@ -1516,14 +1486,14 @@ def buscar_por_codigo(codigo: str, vendedor_id: str = ""):
         return {"status": "error"}
 
 @app.get("/api/metricas")
-def obtener_metricas(vendedor_id: str = ""):
+def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res_inv = supabase.table('inventario').select('precio, costo, stock').eq('vendedor_id', vendedor_id).execute()
+        res_inv = supabase.table('inventario').select('precio, costo, stock').eq('vendedor_id', _sesion).execute()
         total_piezas = sum(item.get('stock', 0) for item in res_inv.data if item.get('stock', 0) > 0)
         valor_inventario = sum((item.get('stock', 0) * item.get('precio', 0.0)) for item in res_inv.data if item.get('stock', 0) > 0)
         costo_inventario = sum((item.get('stock', 0) * item.get('costo', 0.0)) for item in res_inv.data if item.get('stock', 0) > 0)
         
-        res_ventas = supabase.table('registro_ventas').select('ganancia, precio_venta').eq('vendedor_id', vendedor_id).execute()
+        res_ventas = supabase.table('registro_ventas').select('ganancia, precio_venta').eq('vendedor_id', _sesion).execute()
         ventas_totales = sum(v.get('precio_venta', 0.0) for v in res_ventas.data)
         ganancia_real = sum(v.get('ganancia', 0.0) for v in res_ventas.data)
         
@@ -1745,9 +1715,9 @@ class BotConfig(BaseModel):
     bot_activo: bool
 
 @app.get("/api/bot_config")
-def obtener_config_bot(vendedor_id: str):
+def obtener_config_bot(_sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).execute()
+        res = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).execute()
         if res.data and len(res.data) > 0:
             return {"status": "ok", "datos": res.data[0]}
         else:
@@ -1756,13 +1726,11 @@ def obtener_config_bot(vendedor_id: str):
         return {"status": "error"}
 
 @app.post("/api/bot_config")
-def guardar_config_bot(datos: BotConfig):
+def guardar_config_bot(datos: BotConfig, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        v_id = datos.vendedor_id.strip()
-        
-        # Preparamos el paquete. NO sobreescribimos los Tokens de Meta por seguridad
+        # Preparamos el paquete forzando el ID real de la sesión
         paquete = {
-            "vendedor_id": v_id,
+            "vendedor_id": _sesion,
             "link_pago": datos.link_pago,
             "texto_entrega": datos.texto_entrega,
             "admin_phone": datos.admin_phone,
@@ -1770,57 +1738,16 @@ def guardar_config_bot(datos: BotConfig):
         }
         
         # Lógica Upsert
-        res_ex = supabase.table('configuracion_bot').select('vendedor_id').eq('vendedor_id', v_id).execute()
+        res_ex = supabase.table('configuracion_bot').select('vendedor_id').eq('vendedor_id', _sesion).execute()
         
         if res_ex.data and len(res_ex.data) > 0:
-            supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', v_id).execute()
+            supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', _sesion).execute()
         else:
             supabase.table('configuracion_bot').insert(paquete).execute()
             
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "detalle": "Error guardando configuración B2B"}
-
-async def bucle_seguimiento_24h():
-    """
-    ⏱️ RELOJ B2B: Ejecuta descuentos automáticos cada hora.
-    """
-    while True:
-        print("🕒 [RELOJ] Revisando seguimientos de 24 horas...")
-        ahora = datetime.now()
-        hace_24h = (ahora - timedelta(hours=24)).isoformat()
-
-        # 1. Recuperación de "Envios Masivos" -> "Con Descuento"
-        res = supabase.table('prospectos').select('*').eq('columna', 'Envios Masivos').lt('ultima_interaccion_ia', hace_24h).execute()
-        
-        for p in res.data:
-            juego = p.get('ultimo_juego_interes', 'el artículo')
-            msg = f"¡Hola {p['nombre']}! 👋 Sigo pensando en ese *{juego}*. Si te animas hoy, ¡te descuento $50 de una vez! Te lo dejo en oferta especial. 😉"
-            
-            # Teletransportar a 'Con Descuento'
-            supabase.table('prospectos').update({
-                'columna': 'Con Descuento',
-                'ultima_interaccion_ia': ahora.isoformat()
-            }).eq('id', p['id']).execute()
-            
-            # Aquí dispararías el WhatsApp (necesitas recuperar el token del vendedor)
-            print(f"💰 [OFERTA] Descuento de $50 enviado a {p['nombre']} por {juego}")
-
-        # 2. Recuperación de "Con Descuento" -> "Requiere Asistencia" (Oferta del cliente)
-        res_desc = supabase.table('prospectos').select('*').eq('columna', 'Con Descuento').lt('ultima_interaccion_ia', hace_24h).execute()
-        
-        for p in res_desc.data:
-            msg = f"¿Sigues ahí? 🎮 Me interesa que te lleves ese juego. Dime, ¿cuánto ofrecerías tú? ¡Hazme una oferta y lo platico con mi jefe! 🤝"
-            
-            supabase.table('prospectos').update({
-                'columna': 'Requiere Asistencia',
-                'estado_iluminacion': 'verde_alerta',
-                'ultima_interaccion_ia': ahora.isoformat()
-            }).eq('id', p['id']).execute()
-            
-            print(f"🤝 [REGATEO] Cliente {p['nombre']} movido a Humano para negociar.")
-
-        await asyncio.sleep(3600) # Revisa cada hora
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
