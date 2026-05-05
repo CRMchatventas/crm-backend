@@ -1018,17 +1018,16 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }}
     """
     
-        # BLINDAJE EXTREMO: La llave va en el Header, la URL queda limpia y pública
-        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    # BLINDAJE EXTREMO: La llave va en el Header, la URL queda limpia y pública
+    api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     
-        headers = {
+    headers = {
         'Content-Type': 'application/json',
         'x-goog-api-key': api_key_limpia  # <-- Aquí viaja la llave, invisible para los logs
-        }
+    }
     
-        payload = {
-        # ... (Tu payload queda igualito a como lo tienes) ...
+    payload = {
         "contents": [{
             "parts": [
                 {"text": prompt},
@@ -1038,7 +1037,7 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
         "generationConfig": {"temperature": 0.1}
     }
     
-    # 1. Subimos el tiempo a 60 segundos para evitar cortes cuando procese imágenes pesadas
+    # 1. Subimos el tiempo a 60 segundos para evitar cortes
     async with httpx.AsyncClient(timeout=60.0) as client:
         res = await client.post(url, headers=headers, json=payload)
             
@@ -1050,8 +1049,8 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
             texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
             return json.loads(texto_limpio)
         else:
-            # 🔥 2. AQUÍ ENTRA LA RADIOGRAFÍA EN LUGAR DE TU EXCEPCIÓN GENÉRICA 🔥
-            print(f"❌ [HTTP ERROR {res.status_code}] URL: {url.split('?')[0]}")
+            # 🔥 RADIOGRAFÍA 🔥
+            print(f"❌ [HTTP ERROR {res.status_code}] URL: {url}")
             print(f"📄 [RESPUESTA GOOGLE]: {res.text}") 
             raise Exception(f"Fallo en la conexión visual con Gemini. Código: {res.status_code}")
 
