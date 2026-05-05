@@ -131,44 +131,45 @@ class SeguimientoVenta(BaseModel):
     ultima_oferta: float = 0.0
 
 # ==========================================
-# 🔐 SISTEMA DE AUTENTICACIÓN B2B (JWT + FALLBACK)
+# 🔐 SISTEMA DE AUTENTICACIÓN B2B (JWT ESTRICTO)
 # ==========================================
 def crear_token_jwt(vendedor_id: str, email: str):
     expiracion = datetime.utcnow() + timedelta(days=1)
     payload = {"sub": vendedor_id, "email": email, "exp": expiracion}
     return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
-def verificar_sesion_b2b(vendedor_id: str = Header(None), auth_token: str = Header(None)):
-    if not vendedor_id or not auth_token:
-        logger.warning("⚠️ [AUTH] Intento de acceso sin headers. Permisivo activo temporalmente.")
-        return vendedor_id 
+async def verificar_sesion_b2b(authorization: str = Header(None), auth_token: str = Header(None)):
+    """
+    El Cadenero del SaaS: Nadie pasa sin un Token JWT válido.
+    Extrae y garantiza el vendedor_id real, ignorando lo que diga el frontend.
+    """
+    # 1. Buscamos el token en los headers (soporta Bearer estándar o auth-token directo)
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+    elif auth_token:
+        token = auth_token
+        
+    # 2. CERO TOLERANCIA: Si no hay token, se bloquea la puerta de inmediato.
+    if not token:
+        logger.error("🚨 [AUTH] Intento de acceso bloqueado. Petición sin Token.")
+        raise HTTPException(status_code=401, detail="Acceso denegado: Credenciales faltantes")
         
     try:
-        payload = jwt.decode(auth_token, JWT_SECRET, algorithms=[ALGORITHM])
-        token_vendedor_id = payload.get("sub")
-        if token_vendedor_id != vendedor_id:
-            logger.error("🚨 [AUTH RIESGO] Vendedor ID en cabecera no coincide con el Token.")
-            raise HTTPException(status_code=403, detail="Violación Multi-Tenant detectada.")
-        return token_vendedor_id
+        # 3. Desencriptamos el pase VIP
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        vendedor_id_real = payload.get("sub") # Tú lo guardaste como "sub" en crear_token_jwt
+        
+        if not vendedor_id_real:
+            raise HTTPException(status_code=401, detail="Token corrupto: Identidad de vendedor no encontrada")
+            
+        # 4. Entregamos la verdadera identidad del vendedor
+        return vendedor_id_real 
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Sesión expirada. Vuelve a iniciar sesión.")
     except jwt.InvalidTokenError:
-        # Fallback al sistema viejo para compatibilidad con Godot
-        res = supabase.table('usuarios_veltrix').select('password').eq('vendedor_id', vendedor_id).execute()
-        if not res.data:
-            raise HTTPException(status_code=401, detail="Usuario B2B no encontrado")
-            
-        hash_guardado = res.data[0]['password'].encode('utf-8')
-        
-        if hash_guardado.startswith(b'$2b$'):
-            if not bcrypt.checkpw(auth_token.encode('utf-8'), hash_guardado):
-                raise HTTPException(status_code=401, detail="Firma de seguridad inválida")
-        else:
-            if auth_token != res.data[0]['password']:
-                raise HTTPException(status_code=401, detail="Firma de seguridad inválida")
-        
-        return vendedor_id
+        raise HTTPException(status_code=401, detail="Token alterado o inválido. Intento de brecha bloqueado.")
 
 # ==========================================
 # 🛡️ VALIDACIÓN DE FIRMA META (WEBHOOK SECURITY)
