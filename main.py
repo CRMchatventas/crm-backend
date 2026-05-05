@@ -994,7 +994,7 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
     }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GENAI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GENAI_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
