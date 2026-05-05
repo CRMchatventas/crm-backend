@@ -1355,7 +1355,7 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
         items_maestros = res_maestro.data if res_maestro.data else []
         
         # 2. Traemos el Inventario Privado del usuario (Sus stocks y costos reales)
-        res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id).execute()
+        res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).execute()
         dict_privado = {item['nombre']: item for item in res_privado.data} if res_privado.data else {}
 
         # 3. Creamos el archivo CSV en memoria RAM
@@ -1514,7 +1514,7 @@ def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/importar_inventario")
 def api_importar_inventario(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     lote_juegos = datos.get("inventario", [])
-    vendedor_maestro = str(datos.get("vendedor_id", "")).strip()
+    vendedor_maestro = _sesion
     
     if not lote_juegos or len(lote_juegos) == 0: 
         return {"status": "error", "detalle": "CSV vacío."}
