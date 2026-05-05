@@ -698,9 +698,10 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
                     texto_limpio = texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip()
                     return json.loads(texto_limpio)
                     
-                elif res.status_code == 429:
-                    logger.warning(f"⚠️ [IA RATE LIMIT] Google pide calma (Error 429). Reintentando en 2.5s... (Intento {intento+1}/{max_intentos})")
-                    await asyncio.sleep(2.5) 
+                elif res.status_code in [429, 503]: # 🛡️ Ahora reintenta si hay tráfico o saturación
+                    motivo = "RATE LIMIT" if res.status_code == 429 else "CONGESTIÓN"
+                    logger.warning(f"⚠️ [IA {motivo}] Google está ocupado. Reintentando en 3s... (Intento {intento+1}/{max_intentos})")
+                    await asyncio.sleep(3.0) 
                     continue 
                 else:
                     # 🔥 AQUÍ INYECTAMOS LA RADIOGRAFÍA 🔥
