@@ -289,12 +289,16 @@ def login_b2b(datos: Credenciales):
                 suscripcion_valida = False
                 supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id']).execute()
 
+        # 🛡️ FIX AAA: AQUÍ GENERAMOS EL TOKEN VIP
+        token_jwt = crear_token_jwt(usuario['vendedor_id'], usuario['email'])
+
         paquete_seguro = {
             "vendedor_id": usuario['vendedor_id'],
             "email": usuario['email'],
             "estado": usuario['estado'],
             "pais": usuario.get('pais', 'México'),
-            "suscripcion_activa": suscripcion_valida
+            "suscripcion_activa": suscripcion_valida,
+            "token": token_jwt # 🔑 ¡ESTA ES LA LLAVE QUE GODOT NECESITA!
         }
         
         return {"status": "ok", "datos": paquete_seguro}
