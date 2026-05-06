@@ -1115,29 +1115,78 @@ def inyectar_starter(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
         return {"status": "ok", "inyectados": len(lote)}
     except Exception: return {"status": "error"}
 
+# ==========================================
+# 📥 GENERADOR DINÁMICO DE PLANTILLAS B2B (VERSIÓN ÉLITE)
+# ==========================================
 @app.get("/api/descargar_plantilla")
 def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
+    """
+    Genera un archivo CSV que cruza el catálogo maestro con el inventario 
+    específico del vendedor, permitiendo actualizaciones masivas.
+    """
+    logger.info(f"📥 [SISTEMA] Generando plantilla dinámica para el vendedor: {vendedor_id_real}")
+    
     try:
-        items_maestros = supabase.table('catalogo_maestro').select('*').execute().data or []
+        # 1. Obtenemos la base de datos maestra y el inventario privado
+        res_maestro = supabase.table('catalogo_maestro').select('*').execute()
+        items_maestros = res_maestro.data if res_maestro.data else []
+        
         res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).execute()
         dict_privado = {item['nombre']: item for item in res_privado.data} if res_privado.data else {}
 
+        # 2. Creamos el CSV en memoria
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['INSTRUCCIONES: No borrar filas 1 y 2.los Datos inician en fila 3...'])
+        
+        # Fila 1: Instrucciones para el usuario final
+        instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Los datos inician en la fila 3. Formato: nombre, consola, costo, precio, stock, estado, detalles. Guardar como .CSV'
+        writer.writerow([instrucciones])
+        
+        # Fila 2: Cabeceras oficiales (Deben coincidir con tu importador de Godot)
         writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "detalles"])
 
+        # 3. Cruzamos la información (Upsert Logic)
         for m in items_maestros:
-            nombre, consola = m['nombre'], m['consola']
+            nombre = m['nombre']
+            consola = m['consola']
+            
             if nombre in dict_privado:
+                # Si el vendedor ya tiene el juego, usamos sus datos reales
                 inv = dict_privado[nombre]
-                writer.writerow([nombre, consola, inv.get('costo', 0), inv.get('precio', 0), inv.get('stock', 0), inv.get('estado_general', 'Completo (CIB)'), inv.get('descripcion_detallada', '')])
+                writer.writerow([
+                    nombre, 
+                    consola, 
+                    inv.get('costo', 0), 
+                    inv.get('precio', 0), 
+                    inv.get('stock', 0), 
+                    inv.get('estado_general', 'Completo (CIB)'), 
+                    inv.get('descripcion_detallada', '')
+                ])
             else:
-                writer.writerow([nombre, consola, 0, m.get('precio_sugerido', 0), 0, "Completo (CIB)", ""])
+                # Si es un juego nuevo para él, precargamos el precio sugerido
+                writer.writerow([
+                    nombre, 
+                    consola, 
+                    0, 
+                    m.get('precio_sugerido', 0), 
+                    0, 
+                    "Completo (CIB)", 
+                    ""
+                ])
 
-        output.seek(0)
-        return StreamingResponse(io.BytesIO(output.getvalue().encode("utf-8")), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=Plantilla_{vendedor_id_real}.csv"})
-    except Exception as e: return {"status": "error", "detalle": str(e)}
+        # 4. Preparar el envío (Usamos utf-8-sig para que Excel abra los acentos correctamente)
+        contenido_csv = output.getvalue().encode("utf-8-sig")
+        output.close()
+        
+        return StreamingResponse(
+            io.BytesIO(contenido_csv), 
+            media_type="text/csv", 
+            headers={"Content-Disposition": f"attachment; filename=Plantilla_Veltrix_{vendedor_id_real}.csv"}
+        )
+
+    except Exception as e:
+        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla: {str(e)}")
+        return {"status": "error", "detalle": "Error interno al generar el archivo CSV."}
 
 # ==========================================
 # 📦 INVENTARIO & DB (BLINDADO B2B + FANTASMAS)
