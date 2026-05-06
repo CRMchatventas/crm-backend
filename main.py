@@ -1595,5 +1595,7 @@ def guardar_config_bot(datos: BotConfig, _sesion: str = Depends(verificar_sesion
         return {"status": "ok"}
     except Exception: return {"status": "error"}
 
+app.include_router(router)
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
