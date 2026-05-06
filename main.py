@@ -1121,10 +1121,10 @@ def inyectar_starter(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
 @app.get("/api/descargar_plantilla")
 def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
     """
-    Genera una plantilla de 9 columnas para Veltrix Engine.
-    Prepara el terreno para Rareza y Código de Barras sin afectar la carga actual.
+    Genera una plantilla de 9 columnas para Veltrix Engine con valores numéricos puros.
+    Elimina el formato de moneda ($) para asegurar la compatibilidad con el importador.
     """
-    logger.info(f"📥 [SISTEMA] Generando plantilla de 9 columnas para: {vendedor_id_real}")
+    logger.info(f"📥 [SISTEMA] Generando plantilla técnica (Sin $) para: {vendedor_id_real}")
     
     try:
         # 1. Obtención de datos (Maestro + Inventario Privado)
@@ -1138,43 +1138,47 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
         output = io.StringIO()
         writer = csv.writer(output)
         
-        # Fila 1: Instrucciones actualizadas para el usuario
-        instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Datos inician en fila 3. Rareza: Comun, Demandado, Joya, Elite. Estado: Nuevo/sellado, Completo, Sin librito, Solo disco.'
+        # Fila 1: Instrucciones (Énfasis en números puros)
+        instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Datos inician en fila 3. PRECIOS: Solo números (ej: 500.50), NO usar signo $. Rareza: Dejar vacío para autocompletado por IA.'
         writer.writerow([instrucciones])
         
         # Fila 2: Cabeceras Oficiales (9 COLUMNAS)
         # Índices: 0:nom, 1:cons, 2:cost, 3:prec, 4:stk, 5:est, 6:rar, 7:cod, 8:det
         writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "rareza", "codigo_barras", "detalles"])
 
-        # 3. Construcción de filas
+        # 3. Construcción de filas con limpieza de datos
         for m in items_maestros:
             nombre = m['nombre']
             consola = m['consola']
             
             if nombre in dict_privado:
-                # Datos existentes del vendedor
                 inv = dict_privado[nombre]
+                
+                # Aseguramos que costo y precio sean números sin caracteres de moneda
+                costo_limpio = inv.get('costo', 0)
+                precio_limpio = inv.get('precio', 0)
+                
                 writer.writerow([
                     nombre, 
                     consola, 
-                    inv.get('costo', 0), 
-                    inv.get('precio', 0), 
+                    costo_limpio, 
+                    precio_limpio, 
                     inv.get('stock', 0), 
                     inv.get('estado_general', 'Completo'),
-                    inv.get('rareza', 'Comun'),
+                    inv.get('rareza', ''), # Dejar vacío para que la IA tome la decisión al importar
                     inv.get('codigo_barras', ''),
                     inv.get('descripcion_detallada', '')
                 ])
             else:
-                # Sugerencia para items nuevos en el inventario del vendedor
+                # Sugerencia para items nuevos con precios en 0 para disparar la IA al cargar
                 writer.writerow([
                     nombre, 
                     consola, 
                     0, 
-                    m.get('precio_sugerido', 0), 
+                    0, 
                     0, 
                     "Completo", 
-                    "Comun", 
+                    "", 
                     "", 
                     ""
                 ])
@@ -1190,8 +1194,8 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
         )
 
     except Exception as e:
-        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla de 9 columnas: {str(e)}")
-        return {"status": "error", "detalle": "Error interno al generar el archivo CSV."}
+        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla técnica: {str(e)}")
+        return {"status": "error", "detalle": "Error interno al generar el archivo CSV numérico."}
 
 # ==========================================
 # 📦 INVENTARIO & DB (BLINDADO B2B + FANTASMAS)
