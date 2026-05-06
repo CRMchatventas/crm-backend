@@ -1121,37 +1121,38 @@ def inyectar_starter(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
 @app.get("/api/descargar_plantilla")
 def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
     """
-    Genera un archivo CSV que cruza el catálogo maestro con el inventario 
-    específico del vendedor, permitiendo actualizaciones masivas.
+    Genera una plantilla de 9 columnas para Veltrix Engine.
+    Prepara el terreno para Rareza y Código de Barras sin afectar la carga actual.
     """
-    logger.info(f"📥 [SISTEMA] Generando plantilla dinámica para el vendedor: {vendedor_id_real}")
+    logger.info(f"📥 [SISTEMA] Generando plantilla de 9 columnas para: {vendedor_id_real}")
     
     try:
-        # 1. Obtenemos la base de datos maestra y el inventario privado
+        # 1. Obtención de datos (Maestro + Inventario Privado)
         res_maestro = supabase.table('catalogo_maestro').select('*').execute()
         items_maestros = res_maestro.data if res_maestro.data else []
         
         res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).execute()
         dict_privado = {item['nombre']: item for item in res_privado.data} if res_privado.data else {}
 
-        # 2. Creamos el CSV en memoria
+        # 2. Creación del CSV en memoria
         output = io.StringIO()
         writer = csv.writer(output)
         
-        # Fila 1: Instrucciones para el usuario final
-        instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Los datos inician en la fila 3. Formato: nombre, consola, costo, precio, stock, estado, detalles. Guardar como .CSV'
+        # Fila 1: Instrucciones actualizadas para el usuario
+        instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Datos inician en fila 3. Rareza: Comun, Demandado, Joya, Elite. Estado: Nuevo/sellado, Completo, Sin librito, Solo disco.'
         writer.writerow([instrucciones])
         
-        # Fila 2: Cabeceras oficiales (Deben coincidir con tu importador de Godot)
-        writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "detalles"])
+        # Fila 2: Cabeceras Oficiales (9 COLUMNAS)
+        # Índices: 0:nom, 1:cons, 2:cost, 3:prec, 4:stk, 5:est, 6:rar, 7:cod, 8:det
+        writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "rareza", "codigo_barras", "detalles"])
 
-        # 3. Cruzamos la información (Upsert Logic)
+        # 3. Construcción de filas
         for m in items_maestros:
             nombre = m['nombre']
             consola = m['consola']
             
             if nombre in dict_privado:
-                # Si el vendedor ya tiene el juego, usamos sus datos reales
+                # Datos existentes del vendedor
                 inv = dict_privado[nombre]
                 writer.writerow([
                     nombre, 
@@ -1159,22 +1160,26 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
                     inv.get('costo', 0), 
                     inv.get('precio', 0), 
                     inv.get('stock', 0), 
-                    inv.get('estado_general', 'Completo (CIB)'), 
+                    inv.get('estado_general', 'Completo'),
+                    inv.get('rareza', 'Comun'),
+                    inv.get('codigo_barras', ''),
                     inv.get('descripcion_detallada', '')
                 ])
             else:
-                # Si es un juego nuevo para él, precargamos el precio sugerido
+                # Sugerencia para items nuevos en el inventario del vendedor
                 writer.writerow([
                     nombre, 
                     consola, 
                     0, 
                     m.get('precio_sugerido', 0), 
                     0, 
-                    "Completo (CIB)", 
+                    "Completo", 
+                    "Comun", 
+                    "", 
                     ""
                 ])
 
-        # 4. Preparar el envío (Usamos utf-8-sig para que Excel abra los acentos correctamente)
+        # 4. Empaquetado para descarga segura (UTF-8-SIG para Excel)
         contenido_csv = output.getvalue().encode("utf-8-sig")
         output.close()
         
@@ -1185,7 +1190,7 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
         )
 
     except Exception as e:
-        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla: {str(e)}")
+        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla de 9 columnas: {str(e)}")
         return {"status": "error", "detalle": "Error interno al generar el archivo CSV."}
 
 # ==========================================
