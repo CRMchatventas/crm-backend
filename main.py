@@ -1333,22 +1333,95 @@ def generar_sku(vendedor: str, n: str, c: str, e: str) -> str:
 # 🎮 NORMALIZADORES DE NEGOCIO
 # ==========================================
 def normalizar_consola(raw: str):
-    mapa = {
-        "playstation 4": "PS4",
-        "ps4": "PS4",
-        "xbox one": "Xbox One",
-        "switch": "Nintendo Switch"
-    }
-    n = normalizar(raw)
-    return mapa.get(n, raw.title()), n
+    consolas_oficiales = [
+        "PS5","PS4","PS3","PS2","PS1",
+        "Xbox One","Xbox 360","Xbox Clasico",
+        "Nintendo Switch","Nintendo 3DS","Nintendo DS","Nintendo 64",
+        "GameCube","GameBoy Advance","GameBoy Color",
+        "Wii","Wii U","SNES","NES","Genesis"
+    ]
 
-def normalizar_estado(raw: str):
-    r = normalizar(raw)
-    if "nuevo" in r or "sellado" in r:
-        return "Nuevo/Sellado"
-    if "loose" in r or "suelto" in r:
-        return "Solo disco"
-    return "Completo"
+    # ==========================================
+    # 🔧 NORMALIZACIÓN BASE
+    # ==========================================
+    n = normalizar(raw)
+
+    # ==========================================
+    # 🎯 MAPA DE ALIAS (PRIORIDAD ALTA)
+    # ==========================================
+    alias = {
+        "ps5": "PS5",
+        "ps 5": "PS5",
+
+        "ps4": "PS4",
+        "ps 4": "PS4",
+        "playstation 4": "PS4",
+        "play 4": "PS4",
+
+        "ps3": "PS3",
+        "playstation 3": "PS3",
+
+        "ps2": "PS2",
+        "playstation 2": "PS2",
+
+        "ps1": "PS1",
+        "psone": "PS1",
+        "playstation 1": "PS1",
+
+        "xbox one": "Xbox One",
+        "xone": "Xbox One",
+
+        "xbox 360": "Xbox 360",
+
+        "xbox": "Xbox Clasico",
+        "xbox clasico": "Xbox Clasico",
+        "xbox classic": "Xbox Clasico",
+
+        "switch": "Nintendo Switch",
+        "nintendo switch": "Nintendo Switch",
+
+        "n64": "Nintendo 64",
+        "nintendo64": "Nintendo 64",
+
+        "gamecube": "GameCube",
+
+        "gba": "GameBoy Advance",
+        "gameboy advance": "GameBoy Advance",
+
+        "gbc": "GameBoy Color",
+
+        "super nintendo": "SNES",
+        "snes": "SNES",
+
+        "nes": "NES",
+
+        "genesis": "Genesis",
+        "sega genesis": "Genesis"
+    }
+
+    if n in alias:
+        oficial = alias[n]
+        return oficial, normalizar(oficial)
+
+    # ==========================================
+    # 🧠 FUZZY MATCH (FALLBACK CONTROLADO)
+    # ==========================================
+    raw_title = raw.strip().title()
+
+    match = difflib.get_close_matches(
+        raw_title,
+        consolas_oficiales,
+        n=1,
+        cutoff=0.82  # 🔥 más estricto
+    )
+
+    if match:
+        return match[0], normalizar(match[0])
+
+    # ==========================================
+    # ⚠️ FALLBACK FINAL (NO CONFIABLE)
+    # ==========================================
+    return raw_title, n
 
 # ==========================================
 # 🚀 ENDPOINT PRINCIPAL
