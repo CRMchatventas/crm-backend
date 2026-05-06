@@ -722,6 +722,75 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
             "respuesta": "¡Hola! Estoy revisando la información, dame un segundo y un asesor humano te atiende enseguida. 🕹️", 
             "juego_detectado": "Desconocido"
         }
+
+# ==========================================
+# 🚨 SISTEMA DE ALERTAS VIP (IA HANDOFF SUMMARY)
+# ==========================================
+async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
+    """
+    🧠 CEREBRO EJECUTIVO: Lee la plática y le hace un reporte de 3 líneas al dueño.
+    """
+    try:
+        motivo = "quiere cerrar una compra / reportó un pago" if intencion == "COMPRA" else "solicita hablar con un humano / tiene dudas"
+        
+        prompt = f"""
+        Eres el asistente personal del Director de Ventas. 
+        El cliente {cliente} {motivo}. Necesitas darle un resumen rápido al Director por WhatsApp.
+        
+        Lee este historial reciente del cliente:
+        {historial_str}
+        
+        Escribe un resumen en 2 o 3 viñetas muy breves. 
+        Menciona EXACTAMENTE:
+        - Qué juego o producto quiere.
+        - Si es local o foráneo (si se puede deducir).
+        - Cuál es el estatus (ej. "Quiere pagar pero duda del envío", "Mandó comprobante de $550", "Pregunta por el descuento llevando 3").
+        
+        Responde SOLO con el texto del resumen, usando emojis. Sé directo y profesional.
+        """
+        
+        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': api_key_limpia}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2} # Temperatura baja para que sea analítico y preciso
+        }
+        
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=30.0))
+        
+        if res.status_code == 200:
+            return res.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+        return "⚠️ El cliente requiere atención (No se pudo generar el resumen detallado)."
+        
+    except Exception as e:
+        logger.error(f"❌ Error generando resumen IA: {e}")
+        return "⚠️ El cliente requiere atención en el panel."
+
+def enviar_alerta_whatsapp_admin(cliente: str, telefono_cliente: str, intencion: str, resumen_ia: str, config: dict):
+    # 📱 Buscamos tu número en la BD, si no está, usamos el tuyo por defecto (2598)
+    telefono_admin = config.get("admin_phone")
+    if not telefono_admin or len(telefono_admin) < 10:
+        telefono_admin = "524491142598" 
+        
+    token = config.get("meta_token", "")
+    phone_id = config.get("meta_phone_id", "")
+    
+    encabezado = "🚨 *ASISTENCIA REQUERIDA*" if intencion == "HUMANO" else "💰 *NUEVA VENTA DETECTADA*"
+    
+    mensaje_alerta = (
+        f"{encabezado}\n\n"
+        f"👤 *Cliente:* {cliente}\n"
+        f"📱 *Teléfono:* {telefono_cliente}\n\n"
+        f"🧠 *Reporte de la IA:*\n"
+        f"{resumen_ia}\n\n"
+        f"👉 *Abre Godot para contestar desde el número oficial.*"
+    )
+    
+    disparar_whatsapp_dinamico(telefono_admin, mensaje_alerta, token, phone_id)
+    print(f"📲 [NOTIFICACIÓN VIP] Alerta enviada a tu celular ({telefono_admin}).")
+
 # ==========================================================
 # 🤖 BOT AAA: EL EMPLEADO DIGITAL UNIVERSAL (CON MOTOR DE INTENCIONES)
 # ==========================================================
@@ -751,17 +820,24 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
     nueva_columna = columna_actual
     iluminacion = "oro" 
 
-    # 🎯 LÓGICA DE TELETRANSPORTE AUTOMATIZADO
+    # 🎯 LÓGICA DE TELETRANSPORTE AUTOMATIZADO Y ALERTAS
     if decision["intencion"] == "HUMANO":
         nueva_columna = "Requiere Asistencia"
         iluminacion = "verde_alerta"
         print(f"🚨 [ASISTENCIA] {cliente} solicita humano. Moviendo a Requiere Asistencia.")
+        
+        # 🤖 GENERAR RESUMEN Y MANDAR A TU WHATSAPP PERSONAL
+        resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial_str)
+        enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
 
     elif decision["intencion"] == "COMPRA":
-        # ¡Ahora solo llegará aquí si el cliente confirma el PAGO!
         nueva_columna = "Por Entregar"
         iluminacion = "verde_exito"
         print(f"💰 [VENTA CERRADA] {cliente} ha confirmado pago. Moviendo a Por Entregar.")
+        
+        # 🤖 GENERAR RESUMEN DE VENTA Y MANDAR A TU WHATSAPP PERSONAL
+        resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial_str)
+        enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
 
     elif decision["intencion"] == "COTIZACION":
         if columna_actual == "Bandeja Nueva":
