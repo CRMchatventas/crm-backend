@@ -1340,6 +1340,13 @@ def normalizar_consola(raw: str):
         "GameCube","GameBoy Advance","GameBoy Color",
         "Wii","Wii U","SNES","NES","Genesis"
     ]
+def normalizar_estado(raw: str):
+    r = normalizar(raw)
+    if "nuevo" in r or "sellado" in r:
+        return "Nuevo/Sellado"
+    if "loose" in r or "suelto" in r:
+        return "Solo disco"
+    return "Completo"
 
     # ==========================================
     # 🔧 NORMALIZACIÓN BASE
