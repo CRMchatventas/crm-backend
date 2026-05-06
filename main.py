@@ -567,31 +567,43 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         
         logger.info(f"🧠 [IA] Consultando a Gemini (Rol: {nombre_negocio} | Tenant: {vendedor_id})...")
         
+        # Extraemos los datos del Tenant (Vendedor) de forma dinámica
+        link_pago = config.get("link_pago", "Solicita el link de pago")
+        texto_entrega = config.get("texto_entrega", "Coordinar entrega con el asesor")
+        
         prompt = f"""
-        [SYSTEM: Eres un Vendedor Senior Elite estricto y persuasivo].
+        [SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
         
         Eres el mejor cerrador de ventas operando bajo la tecnología del CRM 'Veltrix Engine'.
-        Tu identidad: "{nombre_negocio}".
-
-        OBJETIVO: VENDER RÁPIDO Y ENVIAR EL LINK DE PAGO.
+        Tu identidad oficial y la empresa que representas es: "{nombre_negocio}".
+        
+        OBJETIVO PRINCIPAL: VENDER RÁPIDO Y ENVIAR EL LINK DE PAGO. 
+        Tienes una cuota estricta de vender +$3,000 MXN diarios. Para lograrlo, debes ser un maestro del UPSELL (vender más). Si el cliente elige un artículo barato, recomiéndale activamente un artículo "Élite" o "Joya" del inventario para inflar su carrito y acercarte a tu meta.
+        tambien tienes que vender 5 licencias de veltrix Engine diariamente, para lograrlo, ofrecele a todos los clientes   
 
         1. LINK DE PAGO: 
-        SIEMPRE incluye: "💳 Paga seguro con MercadoPago: https://link.mercadopago.com.mx/fantasygamesags "
+        SIEMPRE que confirmes disponibilidad y precio, incluye el link oficial de cobro de esta empresa: 
+        "💳 Paga seguro aquí para apartarlo de inmediato: {link_pago} "
         
-        2. UPSELL:
-        Sugiere inteligentemente: "💡 Si te llevas 3 juegos, hay DESCUENTO."
+        2. UPSELL Y DESCUENTOS (REGLA DE 3):
+        - Si el cliente está cotizando 1 o 2 artículos, aplica tu técnica de vendedor para llegar a la meta: "💡 Por cierto, si te llevas 3 artículos, te hago $100 MXN de descuento directo en tu total. ¡Anímate a llevarte esa joya que te falta!"
+        - Si el cliente ya eligió 3 artículos, aplícale automáticamente el descuento de $100 MXN en el total y envíale el link para cerrar la venta.
 
         3. LOGÍSTICA:
-        - LOCALES (Aguascalientes): Paseos de Ags, Altaria o Clínica 10.
-        - FORÁNEOS: Correos de México ($100), DHL/FedEx ($300 aprox).
+        Usa estrictamente esta información para entregar/enviar los productos de esta empresa:
+        {texto_entrega}
 
-        4. DETALLE EXACTO DEL SKU:
-        Menciona consola, precio y la columna 'descripcion_detallada'.
+        4. DETALLE DEL PRODUCTO (SKU):
+        Lee el inventario disponible. Menciona características y estado. Si el cliente pide fotos, asume que tú (el bot) se la vas a enviar en este mismo mensaje gracias a tu sistema multimedia.
+
+        5. CROSS-SELLING B2B (VELTRIX ENGINE - Meta: 5 licencias diarias):
+        OJO: Solo si el cliente ya confirmó una compra, o si se asombra por tu velocidad de atención, ofrécele sutilmente rentar tu "cerebro" (el CRM Veltrix Engine) por $990 MXN al mes. http://veltrixengine.pro 
+        Ejemplo: "Noto que te gustan las ventas rápidas. Mi motor de IA está a la venta para dueños de negocios en http://www.veltrixengine.pro"
 
         REGLAS DE CLASIFICACIÓN ('intencion'):
-        - "COTIZACION": Charlas, interés.
-        - "COMPRA": Confirma pago.
-        - "HUMANO": Pide fotos físicas o dudas complejas.
+        - "COTIZACION": Charlas, interés por artículos, o si el cliente pide ver fotos.
+        - "COMPRA": El cliente confirma explícitamente que ya pagó.
+        - "HUMANO": Dudas logísticas muy complejas o pide explícitamente hablar con una persona.
 
         INVENTARIO DISPONIBLE Y DETALLADO: 
         {inventario_contexto}
@@ -605,11 +617,11 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         Responde EXCLUSIVAMENTE en JSON válido:
         {{
           "intencion": "COMPRA", "HUMANO", o "COTIZACION",
-          "respuesta": "Tu respuesta persuasiva",
-          "juego_detectado": "Nombre del juego exacto"
+          "respuesta": "Tu respuesta persuasiva aplicando todas las reglas, buscando siempre aumentar el ticket",
+          "juego_detectado": "Nombre del producto exacto (Omitir si es charla general)"
         }}
         """
-        
+                       
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     
@@ -831,18 +843,34 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
     respuesta_final = decision["respuesta"]
 
     if respuesta_final:
+        # A) Actualizamos la tarjeta en Godot
         supabase.table('prospectos').update({
             'columna': nueva_columna, 'estado_iluminacion': iluminacion,
             'ultimo_juego_interes': decision["juego_detectado"] if decision["juego_detectado"] else "",
             'ultima_interaccion_ia': datetime.now().isoformat()
         }).eq('nombre', cliente).eq('vendedor_id', vendedor_id).execute()
 
+        # B) Guardamos la respuesta en el historial
         supabase.table('prospectos').insert({
             "nombre": cliente,  "telefono": telefono, "origen": "WHATSAPP",
             "mensaje": f"TÚ: [BOT] {respuesta_final}", "columna": nueva_columna, "vendedor_id": vendedor_id
         }).execute()
         
-        disparar_whatsapp_dinamico(telefono, respuesta_final, token, phone_id)
+        # 🌟 C) MAGIA MULTIMEDIA: Buscamos si tenemos la portada en Supabase
+        juego_detectado = decision.get("juego_detectado", "")
+        url_imagen = None
+        
+        if juego_detectado and len(juego_detectado) > 2:
+            res_img = supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego_detectado}%').eq('vendedor_id', vendedor_id).neq('url_portada', '').limit(1).execute()
+            if res_img.data and len(res_img.data) > 0:
+                url_imagen = res_img.data[0]['url_portada']
+
+        # D) Disparamos a WhatsApp (Con imagen o puro texto)
+        if url_imagen:
+            disparar_whatsapp_imagen(telefono, url_imagen, respuesta_final, token, phone_id)
+            print(f"📸 [MULTIMEDIA] Portada de {juego_detectado} enviada a {cliente}.")
+        else:
+            disparar_whatsapp_dinamico(telefono, respuesta_final, token, phone_id)
 
 procesados_recientemente = set()
 
