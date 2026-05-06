@@ -17,18 +17,31 @@ import requests
 import mimetypes
 import urllib.parse
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from supabase import create_client, Client
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
+from typing import Dict, Any, List
 import uvicorn
 import io
 import csv
 import difflib
 import base64
+import logging
+import unicodedata
+
+router = APIRouter()
+logger = logging.getLogger("veltrix.b2b")
+
+# ==========================================
+# ⚙️ CONFIG GLOBAL
+# ==========================================
+BATCH_SIZE = 250
+MAX_BG_TASKS = 30
+PRECIO_FALLBACK = 50.0
 
 # ==========================================
 # 📝 CONFIGURACIÓN DE LOGGING PROFESIONAL
@@ -1291,143 +1304,197 @@ def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
     except Exception: return {"status": "error"}
 
 # ==========================================
-# 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT + PORTADAS)
+# 🧰 HELPERS CORE
 # ==========================================
-@app.post("/api/importar_inventario")
+def normalizar(texto: str) -> str:
+    if not texto:
+        return ""
+    t = str(texto).lower().strip()
+    t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+    return " ".join(t.split())
+
+def safe_float(val) -> float:
+    try:
+        return float(str(val).replace("$", "").replace(",", "").strip())
+    except:
+        return 0.0
+
+def safe_int(val, default=0) -> int:
+    try:
+        return int(float(str(val)))
+    except:
+        return default
+
+def generar_sku(vendedor: str, n: str, c: str, e: str) -> str:
+    base = f"{vendedor}|{n}|{c}|{e}"
+    return hashlib.sha1(base.encode()).hexdigest()
+
+# ==========================================
+# 🎮 NORMALIZADORES DE NEGOCIO
+# ==========================================
+def normalizar_consola(raw: str):
+    mapa = {
+        "playstation 4": "PS4",
+        "ps4": "PS4",
+        "xbox one": "Xbox One",
+        "switch": "Nintendo Switch"
+    }
+    n = normalizar(raw)
+    return mapa.get(n, raw.title()), n
+
+def normalizar_estado(raw: str):
+    r = normalizar(raw)
+    if "nuevo" in r or "sellado" in r:
+        return "Nuevo/Sellado"
+    if "loose" in r or "suelto" in r:
+        return "Solo disco"
+    return "Completo"
+
+# ==========================================
+# 🚀 ENDPOINT PRINCIPAL
+# ==========================================
+@router.post("/api/importar_inventario")
 async def api_importar_inventario(
-    datos: dict, 
-    background_tasks: BackgroundTasks, 
+    datos: dict,
+    background_tasks: BackgroundTasks,
     _sesion: str = Depends(verificar_sesion_b2b)
 ):
-    """
-    Motor de Importación Veltrix V-4.6:
-    - Procesamiento masivo (Bulk Upsert)
-    - Inteligencia de precios y rareza integrada
-    - Multi-tenant hermético por vendedor_id
-    """
-    lote_juegos = datos.get("inventario", [])
-    if not lote_juegos: 
-        return {"status": "error", "detalle": "CSV vacío o mal procesado."}
+    inicio = time.time()
+    lote = datos.get("inventario", [])
 
-    logger.info(f"🚀 [IMPORT] Iniciando carga masiva para Vendedor: {_sesion}")
+    if not isinstance(lote, list) or len(lote) == 0:
+        return {"status": "error", "detalle": "Inventario vacío o inválido"}
 
-    # --- CONFIGURACIÓN DE NORMALIZACIÓN ---
-    consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
-    mapa_estados = {"NUEVO": "Nuevo/Sellado", "SELLADO": "Nuevo/Sellado", "CIB": "Completo", "COMPLETO": "Completo", "LOOSE": "Solo disco", "SUELTO": "Solo disco"}
-    diccionario_sinonimos = {"PLAY 1": "PS1", "PLAY 2": "PS2", "PLAY 3": "PS3", "XBOX NORMAL": "Xbox Clasico", "SUPER NINTENDO": "SNES"}
+    logger.info(f"🚀 IMPORT START | vendedor={_sesion} | items={len(lote)}")
 
-    # --- PRE-CARGA DE DATOS MAESTROS (Optimización de Memoria) ---
+    # ==========================================
+    # 📚 CARGA CATÁLOGO MAESTRO (CACHE)
+    # ==========================================
+    mapa_maestro = {}
+
     try:
-        res_m = supabase.table('catalogo_maestro').select('nombre, consola, precio_sugerido').execute()
-        maestro_data = res_m.data or []
-        nombres_maestros = [item['nombre'] for item in maestro_data]
-        # Mapa para búsqueda rápida de precios sugeridos
-        mapa_precios_maestros = {f"{i['nombre']}|{i['consola']}".lower(): i['precio_sugerido'] for i in maestro_data}
+        res = supabase.table("catalogo_maestro") \
+            .select("nombre, consola, precio_sugerido") \
+            .execute()
+
+        for i in (res.data or []):
+            key = f"{normalizar(i['nombre'])}|{normalizar(i['consola'])}"
+            mapa_maestro[key] = i["precio_sugerido"]
+
     except Exception as e:
-        logger.error(f"❌ Error precargando maestro: {e}")
-        nombres_maestros, mapa_precios_maestros = [], {}
+        logger.error(f"❌ maestro preload error: {e}")
 
-    items_para_inventario = []
-    items_para_maestro = []
-    
-    # --- CICLO DE INTELIGENCIA DE DATOS ---
-    for juego in lote_juegos:
-        # 1. Limpieza de Nombre
-        nom_usuario = str(juego.get("nombre", "")).strip()
-        if not nom_usuario: continue
-        
-        # Fuzzy Matching con el catálogo maestro para unificar nombres
-        matches = difflib.get_close_matches(nom_usuario, nombres_maestros, n=1, cutoff=0.8)
-        nombre_final = matches[0] if matches else nom_usuario.title()
+    # ==========================================
+    # 🧠 PROCESAMIENTO EN MEMORIA (DEDUP)
+    # ==========================================
+    dict_inv = {}
+    dict_maestro = {}
 
-        # 2. Limpieza de Consola
-        cons_raw = str(juego.get("consola", "")).strip().upper()
-        consola_final = diccionario_sinonimos.get(cons_raw, limpiar_campo_generico(cons_raw, consolas_oficiales))
+    for item in lote:
+        try:
+            nombre_raw = str(item.get("nombre", "")).strip()
+            if not nombre_raw:
+                continue
 
-        # 3. Estado y Precios
-        estado_raw = str(juego.get("estado_general", "")).strip().upper()
-        estado_final = mapa_estados.get(estado_raw, "Completo")
-        
-        precio_asignado = float(str(juego.get("precio", 0)).replace("$", "").replace(",", ""))
-        
-        # 🧠 INTELIGENCIA DE PRECIOS: Si es 0, buscamos en Maestro o API
-        llave_maestro = f"{nombre_final}|{consola_final}".lower()
-        if precio_asignado <= 0:
-            if llave_maestro in mapa_precios_maestros:
-                precio_asignado = mapa_precios_maestros[llave_maestro]
-            else:
-                # Intento de Scraping Externo / API PriceCharting
-                try:
-                    datos_ext = api_consultar_precio(nombre_final, consola_final, _sesion)
-                    if datos_ext and datos_ext.get("status") == "ok":
-                        precio_asignado = datos_ext["mxn"]["cib"] if "Completo" in estado_final else datos_ext["mxn"]["loose"]
-                except: precio_asignado = 0.0
+            n_norm = normalizar(nombre_raw)
+            n_disp = nombre_raw.title()
 
-        # 4. Rareza e Identificador Único
-        rareza_final = calcular_rareza_ia(nombre_final, consola_final, precio_asignado)
-        
-        # SKU Único Multi-tenant: Evita que el Vendedor A choque con el Vendedor B
-        sku_b2b = f"{_sesion}_{nombre_final}_{consola_final}_{estado_final}".lower().replace(" ", "_")
+            c_disp, c_norm = normalizar_consola(item.get("consola", ""))
+            e_disp = normalizar_estado(item.get("estado_general", ""))
+            e_norm = normalizar(e_disp)
 
-        # Preparar objeto para Inventario Privado
-        items_para_inventario.append({
-            "vendedor_id": _sesion,
-            "sku_b2b": sku_b2b,
-            "nombre": nombre_final,
-            "consola": consola_final,
-            "estado_general": estado_final,
-            "precio": precio_asignado,
-            "costo": float(str(juego.get("costo", 0)).replace("$", "").replace(",", "")),
-            "stock": int(juego.get("stock", 1)),
-            "rareza": rareza_final,
-            "codigo_barras": str(juego.get("codigo_barras", "")),
-            "descripcion_detallada": str(juego.get("detalles", ""))
-        })
+            sku = generar_sku(_sesion, n_norm, c_norm, e_norm)
 
-        # Preparar objeto para Catálogo Maestro (Solo si no existe en nuestra pre-carga)
-        if llave_maestro not in mapa_precios_maestros:
-            items_para_maestro.append({
-                "nombre": nombre_final,
-                "consola": consola_final,
-                "precio_sugerido": precio_asignado,
-                "rareza": rareza_final
-            })
+            # 🔁 FUSIÓN EN RAM
+            if sku in dict_inv:
+                dict_inv[sku]["stock"] += safe_int(item.get("stock", 1), 1)
+                continue
 
-    # --- PERSISTENCIA MASIVA (UPSERT) ---
+            precio = safe_float(item.get("precio", 0))
+            key_m = f"{n_norm}|{c_norm}"
+
+            if precio <= 0:
+                precio = mapa_maestro.get(key_m, PRECIO_FALLBACK)
+
+            obj = {
+                "vendedor_id": _sesion,
+                "sku_b2b": sku,
+                "nombre": n_disp,
+                "consola": c_disp,
+                "estado_general": e_disp,
+                "precio": precio,
+                "costo": safe_float(item.get("costo", 0)),
+                "stock": max(0, safe_int(item.get("stock", 1), 1)),
+                "rareza": str(item.get("rareza", "Comun")),
+                "codigo_barras": str(item.get("codigo_barras", "")),
+                "descripcion_detallada": str(item.get("detalles", ""))
+            }
+
+            dict_inv[sku] = obj
+
+            # 🌐 MAESTRO GLOBAL
+            if key_m not in mapa_maestro:
+                dict_maestro[key_m] = {
+                    "nombre": n_disp,
+                    "consola": c_disp,
+                    "precio_sugerido": precio,
+                    "rareza": obj["rareza"]
+                }
+
+        except Exception as e:
+            logger.warning(f"⚠️ item error: {e}")
+            continue
+
+    # ==========================================
+    # 💾 UPSERT SEGURO POR BLOQUES
+    # ==========================================
     try:
-        # A. Actualizar Inventario Privado (Multi-tenant)
-        # on_conflict='sku_b2b' asegura que si el juego ya existe para ESE vendedor, se actualice
-        res_inv = supabase.table('inventario').upsert(items_para_inventario, on_conflict='sku_b2b').execute()
-        
-        # B. Alimentar Catálogo Maestro Global
-        if items_para_maestro:
-            supabase.table('catalogo_maestro').upsert(items_para_maestro, on_conflict='nombre,consola').execute()
+        lista_inv = list(dict_inv.values())
+        lista_maestro = list(dict_maestro.values())
 
-        # C. Disparar Cacería de Portadas (Background)
-        if res_inv.data:
-            for inv_item in res_inv.data:
-                background_tasks.add_task(
-                    cazar_portada_y_guardar_background, 
-                    str(inv_item['id']), 
-                    inv_item['nombre'], 
-                    inv_item['consola']
-                )
+        total_bg = 0
+
+        for i in range(0, len(lista_inv), BATCH_SIZE):
+            chunk = lista_inv[i:i + BATCH_SIZE]
+
+            res = supabase.table("inventario") \
+                .upsert(chunk, on_conflict="sku_b2b") \
+                .execute()
+
+            # 🧵 BACKGROUND CONTROLADO
+            if res.data:
+                for row in res.data:
+                    if total_bg >= MAX_BG_TASKS:
+                        break
+                    background_tasks.add_task(
+                        cazar_portada_y_guardar_background,
+                        str(row["id"]),
+                        row["nombre"],
+                        row["consola"]
+                    )
+                    total_bg += 1
+
+        # 🌐 CATÁLOGO GLOBAL
+        for i in range(0, len(lista_maestro), BATCH_SIZE):
+            chunk = lista_maestro[i:i + BATCH_SIZE]
+            supabase.table("catalogo_maestro") \
+                .upsert(chunk, on_conflict="nombre,consola") \
+                .execute()
+
+        duracion = round(time.time() - inicio, 2)
+
+        logger.info(f"✅ IMPORT OK | items={len(lista_inv)} | time={duracion}s")
 
         return {
-            "status": "ok", 
-            "procesados": len(items_para_inventario), 
-            "nuevos_maestro": len(items_para_maestro),
-            "mensaje": "Sincronización masiva exitosa"
+            "status": "ok",
+            "procesados": len(lista_inv),
+            "nuevos_maestro": len(lista_maestro),
+            "tiempo": f"{duracion}s"
         }
 
     except Exception as e:
-        logger.error(f"❌ Error crítico en Upsert: {e}")
+        logger.error(f"❌ UPSERT ERROR: {e}")
         return {"status": "error", "detalle": str(e)}
-
-# Función auxiliar para limpieza de strings
-def limpiar_campo_generico(valor, lista_oficial):
-    coincidencias = difflib.get_close_matches(str(valor), lista_oficial, n=1, cutoff=0.5)
-    return coincidencias[0] if coincidencias else str(valor).strip().title()
 
 @app.get("/api/radar_b2b")
 def radar_b2b(q: str = ""):
