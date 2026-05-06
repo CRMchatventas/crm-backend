@@ -1332,22 +1332,40 @@ def generar_sku(vendedor: str, n: str, c: str, e: str) -> str:
 # ==========================================
 # 🎮 NORMALIZADORES DE NEGOCIO
 # ==========================================
-def normalizar_consola(raw: str):
-    consolas_oficiales = [
-        "PS5","PS4","PS3","PS2","PS1",
-        "Xbox One","Xbox 360","Xbox Clasico",
-        "Nintendo Switch","Nintendo 3DS","Nintendo DS","Nintendo 64",
-        "GameCube","GameBoy Advance","GameBoy Color",
-        "Wii","Wii U","SNES","NES","Genesis"
-    ]
-def normalizar_estado(raw: str):
-    r = normalizar(raw)
-    if "nuevo" in r or "sellado" in r:
-        return "Nuevo/Sellado"
-    if "loose" in r or "suelto" in r:
-        return "Solo disco"
-    return "Completo"
+# ==========================================
+# ⚙️ NORMALIZADORES BLINDADOS V-5.1
+# ==========================================
 
+def normalizar_consola(raw: str):
+    try:
+        consolas_oficiales = ["PS5","PS4","PS3","PS2","PS1","Xbox One","Xbox 360","Xbox Clasico","Nintendo Switch","Nintendo 3DS","Nintendo DS","Nintendo 64","GameCube","GameBoy Advance","GameBoy Color","Wii","Wii U","SNES","NES","Genesis"]
+        
+        # 1. Limpieza básica
+        n = normalizar(raw) # Usa tu función normalizar() ya existente
+        raw_title = str(raw).strip().title()
+        
+        # 2. Intento de coincidencia inteligente
+        match = difflib.get_close_matches(raw_title, consolas_oficiales, n=1, cutoff=0.7)
+        
+        if match:
+            return str(match[0]), normalizar(match[0])
+            
+        # 3. Si no hay match, devolvemos lo que puso el usuario pero limpio
+        return raw_title, n
+    except Exception as e:
+        logger.error(f"❌ Error crítico en normalizar_consola: {e}")
+        return "Otro (PC/Varios)", "otro"
+
+def normalizar_estado(raw: str):
+    try:
+        r = normalizar(raw)
+        if any(x in r for x in ["nuevo", "sellado"]): 
+            return "Nuevo/Sellado"
+        if any(x in r for x in ["loose", "suelto", "disco", "cartucho"]): 
+            return "Solo disco"
+        return "Completo"
+    except:
+        return "Completo"
     # ==========================================
     # 🔧 NORMALIZACIÓN BASE
     # ==========================================
