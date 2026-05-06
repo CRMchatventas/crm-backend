@@ -1294,81 +1294,140 @@ def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
 # 🧠 MÓDULOS B2B E IA LIMPIADORA (CSV UPSERT + PORTADAS)
 # ==========================================
 @app.post("/api/importar_inventario")
-def api_importar_inventario(datos: dict, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)):
+async def api_importar_inventario(
+    datos: dict, 
+    background_tasks: BackgroundTasks, 
+    _sesion: str = Depends(verificar_sesion_b2b)
+):
+    """
+    Motor de Importación Veltrix V-4.6:
+    - Procesamiento masivo (Bulk Upsert)
+    - Inteligencia de precios y rareza integrada
+    - Multi-tenant hermético por vendedor_id
+    """
     lote_juegos = datos.get("inventario", [])
-    if not lote_juegos: return {"status": "error", "detalle": "CSV vacío."}
+    if not lote_juegos: 
+        return {"status": "error", "detalle": "CSV vacío o mal procesado."}
 
+    logger.info(f"🚀 [IMPORT] Iniciando carga masiva para Vendedor: {_sesion}")
+
+    # --- CONFIGURACIÓN DE NORMALIZACIÓN ---
     consolas_oficiales = ["PS5", "PS4", "PS3", "PS2", "PS1", "Xbox One", "Xbox 360", "Xbox Clasico", "Nintendo Switch", "Nintendo 3DS", "Nintendo DS", "Nintendo 64", "GameCube", "GameBoy Advance", "GameBoy Color", "Wii", "Wii U", "SNES", "NES", "Genesis", "Otro (PC/Varios)"]
-    mapa_estados = {"NUEVO": "Nuevo/Sellado", "SELLADO": "Nuevo/Sellado", "NUEVO/SELLADO": "Nuevo/Sellado", "COMPLETO": "Completo", "CIB": "Completo", "COMPLETO (CIB)": "Completo", "SIN LIBRITO": "Sin librito", "SIN MANUAL": "Sin librito", "SOLO DISCO": "Solo disco", "SUELTO": "Solo disco", "LOOSE": "Solo disco"}
-    diccionario_sinonimos = {"PLAY 1": "PS1", "PLAY 2": "PS2", "PLAY 3": "PS3", "XBOX NORMAL": "Xbox Clasico", "SUPER NINTENDO": "SNES", "GB": "GameBoy Color"}
+    mapa_estados = {"NUEVO": "Nuevo/Sellado", "SELLADO": "Nuevo/Sellado", "CIB": "Completo", "COMPLETO": "Completo", "LOOSE": "Solo disco", "SUELTO": "Solo disco"}
+    diccionario_sinonimos = {"PLAY 1": "PS1", "PLAY 2": "PS2", "PLAY 3": "PS3", "XBOX NORMAL": "Xbox Clasico", "SUPER NINTENDO": "SNES"}
 
+    # --- PRE-CARGA DE DATOS MAESTROS (Optimización de Memoria) ---
     try:
-        res_maestro = supabase.table('catalogo_maestro').select('nombre, precio_sugerido').execute()
-        nombres_maestros = [item['nombre'] for item in res_maestro.data]
-        diccionario_precios = {item['nombre'].lower(): item['precio_sugerido'] for item in res_maestro.data}
-    except Exception:
-        nombres_maestros, diccionario_precios = [], {}
+        res_m = supabase.table('catalogo_maestro').select('nombre, consola, precio_sugerido').execute()
+        maestro_data = res_m.data or []
+        nombres_maestros = [item['nombre'] for item in maestro_data]
+        # Mapa para búsqueda rápida de precios sugeridos
+        mapa_precios_maestros = {f"{i['nombre']}|{i['consola']}".lower(): i['precio_sugerido'] for i in maestro_data}
+    except Exception as e:
+        logger.error(f"❌ Error precargando maestro: {e}")
+        nombres_maestros, mapa_precios_maestros = [], {}
 
-    def limpiar_campo(texto_usuario, lista_oficial):
-        t_upper = str(texto_usuario).strip().upper()
-        if t_upper in diccionario_sinonimos: return diccionario_sinonimos[t_upper]
-        coincidencias = difflib.get_close_matches(str(texto_usuario).strip(), lista_oficial, n=1, cutoff=0.5)
-        return coincidencias[0] if coincidencias else str(texto_usuario).strip()
-
-    conteo_actualizados, conteo_nuevos, reporte_ia = 0, 0, []
-
+    items_para_inventario = []
+    items_para_maestro = []
+    
+    # --- CICLO DE INTELIGENCIA DE DATOS ---
     for juego in lote_juegos:
-        nombre_original = str(juego.get("nombre", "")).strip()
-        nombre_corregido = nombre_original.title() 
-        precio_asignado = float(juego.get("precio", 0.0))
+        # 1. Limpieza de Nombre
+        nom_usuario = str(juego.get("nombre", "")).strip()
+        if not nom_usuario: continue
         
-        if nombres_maestros and nombre_corregido not in nombres_maestros:
-            matches = difflib.get_close_matches(nombre_corregido, nombres_maestros, n=1, cutoff=0.7)
-            if matches: nombre_corregido = matches[0]
-                
-        consola_final = limpiar_campo(juego.get("consola", ""), consolas_oficiales)
-        estado_final = mapa_estados.get(str(juego.get("estado_general", "")).strip().upper(), "Solo disco")
+        # Fuzzy Matching con el catálogo maestro para unificar nombres
+        matches = difflib.get_close_matches(nom_usuario, nombres_maestros, n=1, cutoff=0.8)
+        nombre_final = matches[0] if matches else nom_usuario.title()
 
-        if precio_asignado <= 0.0:
-            nom_limpio = nombre_corregido.lower()
-            if nom_limpio in diccionario_precios:
-                precio_asignado = diccionario_precios[nom_limpio]
+        # 2. Limpieza de Consola
+        cons_raw = str(juego.get("consola", "")).strip().upper()
+        consola_final = diccionario_sinonimos.get(cons_raw, limpiar_campo_generico(cons_raw, consolas_oficiales))
+
+        # 3. Estado y Precios
+        estado_raw = str(juego.get("estado_general", "")).strip().upper()
+        estado_final = mapa_estados.get(estado_raw, "Completo")
+        
+        precio_asignado = float(str(juego.get("precio", 0)).replace("$", "").replace(",", ""))
+        
+        # 🧠 INTELIGENCIA DE PRECIOS: Si es 0, buscamos en Maestro o API
+        llave_maestro = f"{nombre_final}|{consola_final}".lower()
+        if precio_asignado <= 0:
+            if llave_maestro in mapa_precios_maestros:
+                precio_asignado = mapa_precios_maestros[llave_maestro]
             else:
+                # Intento de Scraping Externo / API PriceCharting
                 try:
-                    datos_pc = api_consultar_precio(nombre_corregido, consola_final, _sesion)
-                    if datos_pc and datos_pc.get("status") == "ok":
-                        precio_asignado = datos_pc["mxn"]["cib"] if estado_final in ["Completo", "Nuevo/Sellado"] else datos_pc["mxn"]["loose"]
-                        if precio_asignado <= 0.0: precio_asignado = 0.0 
-                except Exception: precio_asignado = 0.0
+                    datos_ext = api_consultar_precio(nombre_final, consola_final, _sesion)
+                    if datos_ext and datos_ext.get("status") == "ok":
+                        precio_asignado = datos_ext["mxn"]["cib"] if "Completo" in estado_final else datos_ext["mxn"]["loose"]
+                except: precio_asignado = 0.0
 
-        rareza_final = calcular_rareza_ia(nombre_corregido, consola_final, precio_asignado)
-        sku_b2b = f"{nombre_corregido}_{consola_final}_{estado_final}".lower().replace(" ", "-").replace(":", "").replace("/", "")
+        # 4. Rareza e Identificador Único
+        rareza_final = calcular_rareza_ia(nombre_final, consola_final, precio_asignado)
+        
+        # SKU Único Multi-tenant: Evita que el Vendedor A choque con el Vendedor B
+        sku_b2b = f"{_sesion}_{nombre_final}_{consola_final}_{estado_final}".lower().replace(" ", "_")
 
-        paquete_datos = {
-            "nombre": nombre_corregido, "consola": consola_final, "estado_general": estado_final,
-            "precio": precio_asignado, "costo": float(juego.get("costo", 0.0)), "stock": int(juego.get("stock", 0)),
-            "rareza": rareza_final, "sku_b2b": sku_b2b, "codigo_barras": str(juego.get("codigo_barras", "")),
-            "vendedor_id": _sesion, "descripcion_detallada": str(juego.get("detalles", ""))
+        # Preparar objeto para Inventario Privado
+        items_para_inventario.append({
+            "vendedor_id": _sesion,
+            "sku_b2b": sku_b2b,
+            "nombre": nombre_final,
+            "consola": consola_final,
+            "estado_general": estado_final,
+            "precio": precio_asignado,
+            "costo": float(str(juego.get("costo", 0)).replace("$", "").replace(",", "")),
+            "stock": int(juego.get("stock", 1)),
+            "rareza": rareza_final,
+            "codigo_barras": str(juego.get("codigo_barras", "")),
+            "descripcion_detallada": str(juego.get("detalles", ""))
+        })
+
+        # Preparar objeto para Catálogo Maestro (Solo si no existe en nuestra pre-carga)
+        if llave_maestro not in mapa_precios_maestros:
+            items_para_maestro.append({
+                "nombre": nombre_final,
+                "consola": consola_final,
+                "precio_sugerido": precio_asignado,
+                "rareza": rareza_final
+            })
+
+    # --- PERSISTENCIA MASIVA (UPSERT) ---
+    try:
+        # A. Actualizar Inventario Privado (Multi-tenant)
+        # on_conflict='sku_b2b' asegura que si el juego ya existe para ESE vendedor, se actualice
+        res_inv = supabase.table('inventario').upsert(items_para_inventario, on_conflict='sku_b2b').execute()
+        
+        # B. Alimentar Catálogo Maestro Global
+        if items_para_maestro:
+            supabase.table('catalogo_maestro').upsert(items_para_maestro, on_conflict='nombre,consola').execute()
+
+        # C. Disparar Cacería de Portadas (Background)
+        if res_inv.data:
+            for inv_item in res_inv.data:
+                background_tasks.add_task(
+                    cazar_portada_y_guardar_background, 
+                    str(inv_item['id']), 
+                    inv_item['nombre'], 
+                    inv_item['consola']
+                )
+
+        return {
+            "status": "ok", 
+            "procesados": len(items_para_inventario), 
+            "nuevos_maestro": len(items_para_maestro),
+            "mensaje": "Sincronización masiva exitosa"
         }
 
-        try:
-            res_ex = supabase.table('inventario').select('id').eq('sku_b2b', sku_b2b).eq('vendedor_id', _sesion).execute()
-            if res_ex.data and len(res_ex.data) > 0:
-                supabase.table('inventario').update(paquete_datos).eq('id', res_ex.data[0]['id']).execute()
-                conteo_actualizados += 1
-            else:
-                insert_res = supabase.table('inventario').insert(paquete_datos).execute()
-                conteo_nuevos += 1
-                # 👻 Disparamos cacería de portada solo a las piezas nuevas para no saturar al scraper
-                if insert_res.data:
-                    background_tasks.add_task(cazar_portada_y_guardar_background, str(insert_res.data[0]['id']), nombre_corregido, consola_final)
+    except Exception as e:
+        logger.error(f"❌ Error crítico en Upsert: {e}")
+        return {"status": "error", "detalle": str(e)}
 
-            if not supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_corregido).eq('consola', consola_final).execute().data:
-                supabase.table('catalogo_maestro').insert({"nombre": nombre_corregido, "consola": consola_final, "precio_sugerido": precio_asignado, "rareza": rareza_final}).execute()
-
-        except Exception: pass
-
-    return {"status": "ok", "insertados": conteo_nuevos, "actualizados": conteo_actualizados, "mensaje": f"Sincronización B2B exitosa."}
+# Función auxiliar para limpieza de strings
+def limpiar_campo_generico(valor, lista_oficial):
+    coincidencias = difflib.get_close_matches(str(valor), lista_oficial, n=1, cutoff=0.5)
+    return coincidencias[0] if coincidencias else str(valor).strip().title()
 
 @app.get("/api/radar_b2b")
 def radar_b2b(q: str = ""):
