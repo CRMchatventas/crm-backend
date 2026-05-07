@@ -13,7 +13,6 @@ import hashlib
 import bcrypt
 import jwt
 import httpx
-import requests
 import mimetypes
 import urllib.parse
 import re
@@ -23,7 +22,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from supabase import create_client, Client
 from datetime import datetime, timedelta, date
@@ -81,11 +80,11 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================================
-# 🧠 MEMORIA RAM OPERATIVA (ESTADO GLOBAL)
+# 🧠 MEMORIA RAM OPERATIVA (ESTADO GLOBAL & SINGLETONS)
 # ==========================================================
-registro_actividad_b2b = {} # Para los strikes de búsquedas manuales
-historial_hashes_b2b = {}   # Para evitar que suban el mismo Excel
-procesados_recientemente = deque(maxlen=1000)
+registro_actividad_b2b = {} 
+historial_hashes_b2b = {}   
+procesados_recientemente = deque(maxlen=1000) # Memoria circular anti-colapso RAM
 cache_respuestas_ia = {}
 locks_por_tenant = {}
 
@@ -94,14 +93,24 @@ rate_limit_tenant = defaultdict(list)
 rate_limit_phone = defaultdict(list)
 rate_limit_global = []
 
+# ⚡ HTTPX Singleton (Evita colapso de sockets - Auditoría F)
+http_client: httpx.AsyncClient = None
+
 # ==========================================
-# 🔥 SWITCH DE ENCENDIDO (MOTOR 24H) 🔥
+# 🔥 SWITCH DE ENCENDIDO (MOTOR 24H & SINGLETONS) 🔥
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global http_client
+    # Inicializamos el cliente HTTP global una sola vez
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+    http_client = httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT), limits=limits)
+    
     logger.info("🚀 [SISTEMA] Motor Central Veltrix Iniciado...")
     asyncio.create_task(bucle_seguimiento_24h())
     yield
+    # Limpieza al apagar
+    await http_client.aclose()
     logger.info("🛑 [SISTEMA] Motor Central Apagado.")
 
 # ✨ INICIALIZACIÓN
@@ -116,7 +125,7 @@ app.add_middleware(
 )
 
 # ==========================================
-# --- 📦 MODELOS DE DATOS (B2B BLINDADOS) ---
+# --- 📦 MODELOS DE DATOS (PYDANTIC BLINDADOS) ---
 # ==========================================
 class Credenciales(BaseModel):
     email: str
@@ -125,18 +134,18 @@ class Credenciales(BaseModel):
 class ProspectoUpdate(BaseModel): 
     nombre: str
     nueva_columna: str
-    vendedor_id: str = "" 
+    vendedor_id: str = Field(..., description="ID del tenant obligatorio")
     
 class NotaUpdate(BaseModel): 
     nombre: str
     notas: str
     etiquetas: str
-    vendedor_id: str = "" 
+    vendedor_id: str = Field(..., description="ID del tenant obligatorio")
     
 class MensajeSaliente(BaseModel): 
     cliente: str
     texto: str
-    vendedor_id: str = "" 
+    vendedor_id: str = Field(..., description="ID del tenant obligatorio")
 
 class InventarioItem(BaseModel):
     nombre: str
@@ -148,7 +157,7 @@ class InventarioItem(BaseModel):
     url_portada: str = ""             
     estado_general: str = "Bueno"      
     rareza: str = "" 
-    vendedor_id: str = ""             
+    vendedor_id: str = Field(..., description="ID del tenant obligatorio")             
     tiene_caja: bool = False
     tiene_manual: bool = False
     es_portada_original: bool = False
@@ -159,7 +168,7 @@ class VentaItem(BaseModel):
     consola: str
     estado_general: str = ""
     nuevo_stock: int
-    vendedor_id: str = ""
+    vendedor_id: str = Field(..., description="ID del tenant obligatorio")
 
 class BotConfig(BaseModel):
     vendedor_id: str
@@ -206,6 +215,7 @@ async def validar_firma_meta(request: Request):
     firma_calculada = "sha256=" + hmac.new(WEBHOOK_SECRET.encode("utf-8"), cuerpo_bytes, hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(firma_meta, firma_calculada):
+        logger.warning("🚨 Intento de inyección de webhook Meta.")
         raise HTTPException(status_code=403, detail="Firma inválida")
     return True
 
@@ -218,7 +228,8 @@ def now_ts() -> float:
 def limpiar_texto(texto: str) -> str:
     if not texto: return ""
     texto = str(texto).strip().replace("\x00", "")
-    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"\s+", " ", texto) # Remueve saltos y espacios extra
+    texto = texto.replace("{", "").replace("}", "") # Sanitización anti prompt-injection
     return texto[:MAX_MENSAJE_LEN]
 
 def generar_hash_cache(*args) -> str:
@@ -268,30 +279,29 @@ def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
     return True
 
 # ==========================================
-# 💵 MOTOR DE PRECIOS & SCRAPER BASE
+# 💵 MOTOR DE PRECIOS & SCRAPER ASYNC (Auditoría L)
 # ==========================================
-def obtener_dolar_hoy():
+async def obtener_dolar_hoy_async():
     try:
-        res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+        res = await http_client.get("https://api.exchangerate-api.com/v4/latest/USD")
         return float(res.json().get("rates", {}).get("MXN", 18.00))
     except Exception: return 18.00
 
-def obtener_html_escalonado(url_objetivo: str) -> str:
+async def obtener_html_escalonado_async(url_objetivo: str) -> str:
     estrategias = [
-        ("🟢 Artillería Ligera", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"),
-        ("🟡 Artillería Media", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&render=true"),
-        ("🔴 Artillería Pesada", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&premium=true&render=true")
+        ("🟢 Ligera", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"),
+        ("🟡 Media", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&render=true")
     ]
     headers_humanos = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     for _, url_scraper in estrategias:
         try:
-            res = requests.get(url_scraper, timeout=45)
+            res = await http_client.get(url_scraper)
             if res.status_code == 200 and "scraperapi" not in res.text.lower():
                 if "pricecharting" in res.text.lower() or "price" in res.text.lower():
                     return res.text
         except Exception: pass
     try:
-        res = requests.get(url_objetivo, headers=headers_humanos, timeout=15)
+        res = await http_client.get(url_objetivo, headers=headers_humanos)
         if res.status_code == 200: return res.text
     except Exception: pass
     return ""
@@ -320,40 +330,45 @@ def calcular_precio_venta_inteligente(precio_mercado_mxn: float, costo_compra: f
     return float(round(precio_bruto / 10) * 10)
 
 # ==========================================
-# 📥 MOTOR MULTIMEDIA & WHATSAPP
+# 📥 MOTOR MULTIMEDIA & WHATSAPP ASYNC (Auditoría L)
 # ==========================================
-def descargar_y_subir_multimedia(media_id: str, mime_type: str, extension_default: str, token_vendedor: str):
+async def descargar_y_subir_multimedia_async(media_id: str, mime_type: str, extension_default: str, token_vendedor: str):
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
     headers = {"Authorization": f"Bearer {token_vendedor}"}
-    res_info = requests.get(url_info, headers=headers)
-    if res_info.status_code == 200:
-        media_url = res_info.json().get("url")
-        res_media = requests.get(media_url, headers=headers)
-        if res_media.status_code == 200:
-            file_bytes = res_media.content
-            timestamp = int(datetime.now().timestamp())
-            ext = mimetypes.guess_extension(mime_type) or extension_default
-            file_path = f"archivo_{timestamp}{ext}"
-            try:
+    try:
+        res_info = await http_client.get(url_info, headers=headers)
+        if res_info.status_code == 200:
+            media_url = res_info.json().get("url")
+            res_media = await http_client.get(media_url, headers=headers)
+            if res_media.status_code == 200:
+                file_bytes = res_media.content
+                timestamp = int(now_ts())
+                ext = mimetypes.guess_extension(mime_type) or extension_default
+                file_path = f"archivo_{timestamp}{ext}"
+                # Storage upload (sincrónico de Supabase, lo mantenemos)
                 supabase.storage.from_("multimedia").upload(file_path, file_bytes, {"content-type": mime_type})
                 return supabase.storage.from_("multimedia").get_public_url(file_path)
-            except Exception as e:
-                logger.error(f"❌ Error Nube B2B Multimedia: {e}")
+    except Exception as e:
+        logger.exception("❌ Error Nube B2B Multimedia")
     return None
 
-def disparar_whatsapp_dinamico(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
+async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
     url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
-    try: requests.post(url, headers=headers, json=payload, timeout=5)
-    except Exception as e: logger.warning(f"⚠️ Error disparando WhatsApp: {e}")
+    try: 
+        await http_client.post(url, headers=headers, json=payload)
+    except Exception as e: 
+        logger.exception("⚠️ Error disparando WhatsApp Text")
 
-def disparar_whatsapp_imagen(telefono_destino: str, url_imagen: str, texto_mensaje: str, token: str, phone_id: str):
+async def disparar_whatsapp_imagen_async(telefono_destino: str, url_imagen: str, texto_mensaje: str, token: str, phone_id: str):
     url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "image", "image": {"link": url_imagen, "caption": texto_mensaje}}
-    try: requests.post(url, headers=headers, json=payload, timeout=5)
-    except Exception as e: logger.warning(f"⚠️ Error disparando WhatsApp (Imagen): {e}")
+    try: 
+        await http_client.post(url, headers=headers, json=payload)
+    except Exception as e: 
+        logger.exception("⚠️ Error disparando WhatsApp Imagen")
 
 async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_juego: str, consola: str):
     logger.info(f"🖼️ [PORTADAS] Buscando en background para: {nombre_juego}")
@@ -361,7 +376,8 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
         consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
         query = f"{nombre_juego} {consola_web}".replace(" ", "+")
         url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
-        html_search = obtener_html_escalonado(url_search)
+        
+        html_search = await obtener_html_escalonado_async(url_search)
         if not html_search: return
         
         soup = BeautifulSoup(html_search, 'html.parser')
@@ -372,19 +388,19 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
         if not imagen_url.startswith("http"):
             imagen_url = "https:" + imagen_url if imagen_url.startswith("//") else "https://www.pricecharting.com" + imagen_url
 
-        async with httpx.AsyncClient() as client:
-            res_img = await client.get(imagen_url)
-            if res_img.status_code != 200: return
-            image_bytes = res_img.content
+        res_img = await http_client.get(imagen_url)
+        if res_img.status_code != 200: return
+        image_bytes = res_img.content
 
-        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{int(time.time())}.jpg"
+        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{int(now_ts())}.jpg"
         supabase.storage.from_("portadas").upload(nombre_archivo, image_bytes, {"content-type": "image/jpeg"})
         url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
         supabase.table('inventario').update({"url_portada": url_publica}).eq('id', juego_id_supabase).execute()
-    except Exception: pass
+    except Exception: 
+        pass
 
 # ==========================================================
-# 🧠 CLIENTE GEMINI CENTRALIZADO (NÚCLEO IA)
+# 🧠 CLIENTE GEMINI CENTRALIZADO (NÚCLEO IA SINGLETON)
 # ==========================================================
 async def consultar_gemini_json(prompt: str, temperature: float = 0.2):
     api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
@@ -397,91 +413,66 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.2):
         "generationConfig": {"temperature": temperature, "topP": 0.8, "topK": 20, "maxOutputTokens": 400}
     }
 
-    timeout = httpx.Timeout(GEMINI_TIMEOUT)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for intento in range(GEMINI_REINTENTOS):
-            try:
-                res = await client.post(url, headers=headers, json=payload)
-                if res.status_code == 200:
-                    data = res.json()
-                    texto = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    json_limpio = limpiar_json_gemini(texto)
-                    if json_limpio: return json_limpio
-                    raise Exception("Gemini devolvió JSON inválido")
+    # Usamos el singleton global HTTPX en lugar de crear uno nuevo (Auditoría F)
+    for intento in range(GEMINI_REINTENTOS):
+        try:
+            res = await http_client.post(url, headers=headers, json=payload)
+            if res.status_code == 200:
+                data = res.json()
+                texto = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                json_limpio = limpiar_json_gemini(texto)
+                if json_limpio: return json_limpio
+                raise Exception("Gemini devolvió JSON inválido")
 
-                elif res.status_code in [429, 500, 502, 503, 504]:
-                    espera = (2 ** intento)
-                    logger.warning(f"⚠️ Gemini ocupado ({res.status_code}) | Espera: {espera}s")
-                    await asyncio.sleep(espera)
-                    continue
-                else:
-                    raise Exception(f"Gemini Error {res.status_code}: {res.text[:300]}")
+            elif res.status_code in [429, 500, 502, 503, 504]:
+                espera = (2 ** intento)
+                logger.warning(f"⚠️ Gemini ocupado ({res.status_code}) | Espera: {espera}s")
+                await asyncio.sleep(espera)
+                continue
+            else:
+                raise Exception(f"Gemini Error {res.status_code}: {res.text[:300]}")
 
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ Timeout Gemini")
-                await asyncio.sleep(1.5)
-            except Exception as e:
-                logger.error(f"❌ Gemini Exception: {e}")
-                if intento >= GEMINI_REINTENTOS - 1: raise
-                await asyncio.sleep(1.5)
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ Timeout Gemini")
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.exception(f"❌ Gemini Exception en intento {intento}")
+            if intento >= GEMINI_REINTENTOS - 1: raise
+            await asyncio.sleep(1.5)
+            
     raise Exception("Gemini agotó reintentos")
 
 # ==========================================================
 # 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-5.8)
 # ==========================================================
-
 async def analizar_intencion_venta_ia(
     texto_cliente: str,
     inventario_contexto: str,
     historial_chat: str,
     config: dict
 ):
-
     try:
-
         vendedor_id = config.get("vendedor_id", "V-001")
         nombre_negocio = config.get("nombre_negocio", "Fantasy Games")
 
         texto_cliente = limpiar_texto(texto_cliente)
         historial_chat = limpiar_texto(historial_chat)
 
-        # ==========================================
         # ⚡ CACHE ANTI-GASTO TOKENS
-        # ==========================================
-
-        cache_key = generar_hash_cache(
-            vendedor_id,
-            texto_cliente,
-            historial_chat[-200:]
-        )
-
+        cache_key = generar_hash_cache(vendedor_id, texto_cliente, historial_chat[-200:])
         cache_item = cache_respuestas_ia.get(cache_key)
 
-        if cache_item:
-            edad = now_ts() - cache_item["ts"]
+        if cache_item and (now_ts() - cache_item["ts"]) < 90:
+            logger.info("⚡ CACHE HIT IA")
+            return cache_item["data"]
 
-            if edad < 90:
-                logger.info("⚡ CACHE HIT IA")
-                return cache_item["data"]
-
-        # ==========================================
         # 🔒 LOCK POR TENANT
-        # ==========================================
-
         if vendedor_id not in locks_por_tenant:
             locks_por_tenant[vendedor_id] = asyncio.Lock()
 
         async with locks_por_tenant[vendedor_id]:
-
-            link_pago = config.get(
-                "link_pago",
-                "Solicita el link de pago"
-            )
-
-            texto_entrega = config.get(
-                "texto_entrega",
-                "Coordinar entrega con asesor"
-            )
+            link_pago = config.get("link_pago", "Solicita el link de pago")
+            texto_entrega = config.get("texto_entrega", "Coordinar entrega con asesor")
 
             prompt = f"""
 [SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
@@ -517,7 +508,6 @@ Menciona características y estado (Completo, Sin Librito, Solo Disco). Si el cl
 
 5. CROSS-SELLING B2B (VELTRIX ENGINE - Meta: 5 licencias):
 OJO: Solo si el cliente ya confirmó una compra, o si se asombra por tu velocidad de atención, ofrécele sutilmente rentar tu "cerebro" (el CRM Veltrix Engine) por $990 MXN al mes. 
-Ejemplo: "Noto que te gustan las ventas rápidas. Mi motor de IA está a la venta para dueños de negocios en http://www.veltrixengine.pro"
 
 REGLAS DE CLASIFICACIÓN ('intencion') - ¡SÍGUELAS AL PIE DE LA LETRA!:
 - "COTIZACION": (Usa esta el 95% de las veces). Si el cliente pregunta "¿dónde entregan?", "¿cuánto cuesta?", pide fotos, o dice que apenas va a pagar. ¡Tú respondes!
@@ -540,57 +530,27 @@ Responde EXCLUSIVAMENTE en JSON válido:
   "juego_detectado": "Nombre del producto exacto (Omitir si es charla general)"
 }}
 """
-
-            data = await consultar_gemini_json(
-                prompt,
-                temperature=GEMINI_TEMP
-            )
-
+            data = await consultar_gemini_json(prompt, temperature=GEMINI_TEMP)
             data = validar_respuesta_ia(data)
 
-            # ==========================================
             # 💾 GUARDAR CACHE
-            # ==========================================
-
-            cache_respuestas_ia[cache_key] = {
-                "ts": now_ts(),
-                "data": data
-            }
-
+            cache_respuestas_ia[cache_key] = {"ts": now_ts(), "data": data}
             return data
 
     except Exception as e:
-
-        logger.error(f"❌ ERROR analizar_intencion_venta_ia: {e}")
-
+        logger.exception("❌ ERROR analizar_intencion_venta_ia")
         return {
             "intencion": "HUMANO",
-            "respuesta": (
-                "Estoy revisando la información. "
-                "Un asesor continuará contigo enseguida. 🎮"
-            ),
+            "respuesta": "Estoy revisando la información. Un asesor continuará contigo enseguida. 🎮",
             "juego_detectado": ""
         }
-
 
 # ==========================================================
 # 🚨 RESUMEN HANDOFF IA
 # ==========================================================
-
-async def generar_resumen_handoff_ia(
-    cliente: str,
-    intencion: str,
-    historial_str: str
-):
-
+async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
     try:
-
-        motivo = (
-            "quiere cerrar compra"
-            if intencion == "COMPRA"
-            else "requiere ayuda humana"
-        )
-
+        motivo = "quiere cerrar compra" if intencion == "COMPRA" else "requiere ayuda humana"
         prompt = f"""
 Cliente: {cliente}
 Motivo: {motivo}
@@ -599,39 +559,22 @@ Historial:
 {historial_str}
 
 Genera resumen ejecutivo en 3 viñetas.
-
 JSON:
 {{
   "resumen":"texto"
 }}
 """
-
         data = await consultar_gemini_json(prompt, temperature=0.1)
-
-        return data.get(
-            "resumen",
-            "⚠️ Cliente requiere atención humana"
-        )
-
+        return data.get("resumen", "⚠️ Cliente requiere atención humana")
     except Exception as e:
-
-        logger.error(f"❌ ERROR HANDOFF: {e}")
-
+        logger.exception("❌ ERROR HANDOFF")
         return "⚠️ Cliente requiere atención humana"
-
 
 # ==========================================================
 # 💰 OFERTA INTELIGENTE
 # ==========================================================
-
-async def generar_oferta_inteligente(
-    cliente: str,
-    juego_detectado: str,
-    inventario_contexto: str
-):
-
+async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventario_contexto: str):
     try:
-
         prompt = f"""
 Cliente: {cliente}
 Juego: {juego_detectado}
@@ -640,34 +583,23 @@ Inventario:
 {inventario_contexto}
 
 Genera remarketing corto.
-
 JSON:
 {{
   "nuevo_precio_ofrecido":"0",
   "mensaje_oferta":"texto"
 }}
 """
-
         data = await consultar_gemini_json(prompt, temperature=0.3)
-
-        if not data:
-            return None
+        if not data: return None
 
         return {
-            "nuevo_precio_ofrecido": str(
-                data.get("nuevo_precio_ofrecido", "0")
-            ),
-            "mensaje_oferta": limpiar_texto(
-                data.get("mensaje_oferta", "")
-            )
+            "nuevo_precio_ofrecido": str(data.get("nuevo_precio_ofrecido", "0")),
+            "mensaje_oferta": limpiar_texto(data.get("mensaje_oferta", ""))
         }
-
     except Exception as e:
-
-        logger.error(f"❌ ERROR OFERTA IA: {e}")
+        logger.exception("❌ ERROR OFERTA IA")
         return None
-
-
+        
 # ==========================================================
 # 🚨 ALERTA ADMIN
 # ==========================================================
