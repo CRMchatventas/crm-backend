@@ -1818,6 +1818,35 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
         raise HTTPException(status_code=500, detail="Error cargando chat")
 
 # ==========================================================
+# 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
+# ==========================================================
+@app.get("/api/cargar_inventario")
+def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
+    """
+    Busca todos los artículos en la tabla 'inventario' 
+    que pertenecen al vendedor logueado (ej. V-001).
+    """
+    try:
+        # 🛡️ Realizamos la consulta a Supabase filtrando por el vendedor_id
+        # IMPORTANTE: Asegúrate que tu tabla en Supabase se llame 'inventario'
+        res = supabase.table('inventario').select("*").eq('vendedor_id', _sesion).execute()
+        
+        # Log en la consola de Render para rastrear la carga
+        print(f"📦 [INVENTARIO] Sincronizando {len(res.data)} artículos para el ID: {_sesion}")
+        
+        return {
+            "status": "ok", 
+            "inventario": res.data
+        }
+        
+    except Exception as e:
+        print(f"❌ [ERROR INVENTARIO] Falló la carga: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Error interno al acceder a la tabla de inventario"
+        )
+
+# ==========================================================
 # 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
 # ==========================================================
 app.include_router(router)
