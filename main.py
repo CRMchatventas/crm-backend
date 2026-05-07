@@ -1360,11 +1360,12 @@ def normalizar_estado(raw: str):
     r = normalizar(raw)
     if any(x in r for x in ["nuevo", "sellado", "new", "sealed"]): 
         return "Nuevo/Sellado"
+    # 🎯 Nueva detección específica para Sin Librito
     if any(x in r for x in ["sin librito", "no manual", "sin manual", "incomplete"]): 
         return "Sin librito"
     if any(x in r for x in ["loose", "suelto", "disco", "cartucho", "solo"]): 
         return "Solo disco"
-    # Si no es ninguna de las anteriores, es Completo (CIB)
+    # Fallback si no es ninguna de las anteriores
     return "Completo"
     # ==========================================
     # 🔧 NORMALIZACIÓN BASE
