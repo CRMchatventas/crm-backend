@@ -601,66 +601,47 @@ JSON:
         return None
         
 # ==========================================================
-# 🚨 ALERTA ADMIN
+# 🚨 SERVICIO DE ALERTAS (CAPA DE NOTIFICACIÓN)
 # ==========================================================
-
-def enviar_alerta_whatsapp_admin(
+async def enviar_alerta_whatsapp_admin(
     cliente: str,
     telefono_cliente: str,
     intencion: str,
     resumen_ia: str,
     config: dict
 ):
-
     try:
-
         telefono_admin = config.get("admin_phone")
-
         if not telefono_admin:
             telefono_admin = ADMIN_PHONE_GLOBAL
 
         token = config.get("meta_token", "")
         phone_id = config.get("meta_phone_id", "")
 
-        encabezado = (
-            "🚨 ASISTENCIA REQUERIDA"
-            if intencion == "HUMANO"
-            else "💰 NUEVA VENTA DETECTADA"
-        )
+        encabezado = "🚨 *ASISTENCIA REQUERIDA*" if intencion == "HUMANO" else "💰 *NUEVA VENTA DETECTADA*"
 
         mensaje = (
             f"{encabezado}\n\n"
             f"👤 Cliente: {cliente}\n"
             f"📱 Teléfono: {telefono_cliente}\n\n"
-            f"🧠 IA:\n{resumen_ia}"
+            f"🧠 Análisis IA:\n{resumen_ia}"
         )
 
-        disparar_whatsapp_dinamico(
-            telefono_admin,
-            mensaje,
-            token,
-            phone_id
-        )
+        # Usamos el singleton asíncrono para no bloquear
+        await disparar_whatsapp_dinamico_async(telefono_admin, mensaje, token, phone_id)
 
     except Exception as e:
-        logger.error(f"❌ ERROR ALERTA ADMIN: {e}")
+        logger.exception("❌ ERROR CRÍTICO ALERTA ADMIN")
 
 
 # ==========================================================
-# ⏱️ RELOJ 24H
+# ⏱️ WORKER BACKGROUND: RELOJ 24H (CARRITOS ABANDONADOS)
 # ==========================================================
-
 async def bucle_seguimiento_24h():
-
     while True:
-
         try:
-
-            logger.info("🕒 Escaneando prospectos abandonados...")
-
-            hace_24h = (
-                datetime.now() - timedelta(hours=24)
-            ).isoformat()
+            logger.info("🕒 Escaneando prospectos abandonados (Multi-Tenant)...")
+            hace_24h = (datetime.now() - timedelta(hours=24)).isoformat()
 
             res = (
                 supabase
@@ -668,7 +649,7 @@ async def bucle_seguimiento_24h():
                 .select('*')
                 .eq('columna', 'Envios Masivos')
                 .lt('ultima_interaccion_ia', hace_24h)
-                .limit(100)
+                .limit(100) # Paginación preventiva
                 .execute()
             )
 
@@ -678,86 +659,108 @@ async def bucle_seguimiento_24h():
                 await asyncio.sleep(3600)
                 continue
 
+            # Agrupación por tenant para optimizar consultas de inventario
             agrupados = defaultdict(list)
-
             for p in prospectos:
                 agrupados[p.get('vendedor_id', 'V-001')].append(p)
 
             for vendedor_id, items in agrupados.items():
-
-                # ==========================================
-                # 🔒 MULTI-TENANT AISLADO
-                # ==========================================
-
-                res_conf = (
-                    supabase
-                    .table('configuracion_bot')
-                    .select('*')
-                    .eq('vendedor_id', vendedor_id)
-                    .limit(1)
-                    .execute()
-                )
-
+                
+                # 🔒 Configuración Aislada
+                res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
                 if not res_conf.data:
                     continue
-
                 config = res_conf.data[0]
 
-                res_inv = (
-                    supabase
-                    .table('inventario')
-                    .select('nombre, precio, precio_minimo, stock')
-                    .eq('vendedor_id', vendedor_id)
-                    .gt('stock', 0)
-                    .limit(MAX_CONTEXTO_INV)
-                    .execute()
-                )
-
+                # 📦 Contexto de Inventario
+                res_inv = supabase.table('inventario').select('nombre, precio, precio_minimo, stock').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
                 contexto_inv = str(res_inv.data or [])
 
                 for p in items:
-
+                    telefono_cliente = p.get('telefono', '')
+                    cliente_nombre = p.get('nombre', 'Cliente')
+                    
                     oferta = await generar_oferta_inteligente(
-                        p.get('nombre', 'Cliente'),
+                        cliente_nombre,
                         p.get('ultimo_juego_interes', 'videojuego'),
                         contexto_inv
                     )
 
-                    if not oferta:
+                    if not oferta or not oferta.get("mensaje_oferta"):
                         continue
 
-                    mensaje = oferta.get("mensaje_oferta", "")
+                    mensaje_remarketing = oferta.get("mensaje_oferta", "")
 
-                    if not mensaje:
-                        continue
-
-                    telefono = p.get('telefono', '')
-
-                    disparar_whatsapp_dinamico(
-                        telefono,
-                        mensaje,
+                    # 📤 Envío asíncrono
+                    await disparar_whatsapp_dinamico_async(
+                        telefono_cliente,
+                        mensaje_remarketing,
                         config.get('meta_token', ''),
                         config.get('meta_phone_id', '')
                     )
 
+                    # 💾 Actualización de Estado (CRM)
                     supabase.table('prospectos').update({
                         'columna': 'Con Descuento',
                         'estado_iluminacion': 'oro',
                         'ultima_interaccion_ia': datetime.now().isoformat()
-                    }).eq('id', p['id']).execute()
+                    }).eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_id).execute()
+                    
+                    # 💬 Inserción en Tabla de Chat (Arquitectura Separada)
+                    supabase.table('mensajes_chat').insert({
+                        'telefono': telefono_cliente,
+                        'vendedor_id': vendedor_id,
+                        'autor': 'BOT_REMARKETING',
+                        'mensaje': mensaje_remarketing
+                    }).execute()
 
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2) # Respiro anti-spam Meta
 
         except Exception as e:
-            logger.error(f"❌ ERROR RELOJ 24H: {e}")
+            logger.exception("❌ ERROR FATAL EN RELOJ 24H")
 
         await asyncio.sleep(3600)
 
 
 # ==========================================================
-# 🤖 MOTOR PRINCIPAL
+# 🗄️ CAPA DE REPOSITORIO Y SERVICIOS B2B
 # ==========================================================
+async def obtener_contexto_inventario(vendedor_id: str) -> str:
+    """Extrae el catálogo activo del tenant con límites seguros."""
+    res_inv = supabase.table('inventario').select('nombre, precio, precio_sugerido, precio_minimo, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
+    return str(res_inv.data or [])
 
+async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
+    """Extrae el historial limpio desde la tabla mensajes_chat."""
+    res_hist = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', vendedor_id).order('created_at', desc=True).limit(MAX_HISTORIAL).execute()
+    if not res_hist.data:
+        return "Primer mensaje."
+    
+    mensajes = reversed(res_hist.data) # Cronológico
+    return "\n".join([f"{m.get('autor', 'USER')}: {m.get('mensaje', '')}" for m in mensajes])
+
+async def actualizar_estado_crm(telefono: str, vendedor_id: str, columna: str, iluminacion: str, juego: str):
+    """Actualiza estrictamente los metadatos del CRM."""
+    supabase.table('prospectos').update({
+        'columna': columna,
+        'estado_iluminacion': iluminacion,
+        'ultimo_juego_interes': juego,
+        'ultima_interaccion_ia': datetime.now().isoformat()
+    }).eq('telefono', telefono).eq('vendedor_id', vendedor_id).execute()
+
+async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mensaje: str):
+    """Guarda un registro inmutable en el historial."""
+    supabase.table('mensajes_chat').insert({
+        'telefono': telefono,
+        'vendedor_id': vendedor_id,
+        'autor': autor,
+        'mensaje': mensaje
+    }).execute()
+
+
+# ==========================================================
+# 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW)
+# ==========================================================
 async def procesar_respuesta_bot(
     cliente: str,
     telefono: str,
@@ -765,67 +768,22 @@ async def procesar_respuesta_bot(
     columna_actual: str,
     config: dict
 ):
-
     try:
-
         vendedor_id = config.get("vendedor_id", "")
 
-        # ==========================================
         # 🛡️ RATE LIMIT
-        # ==========================================
-
         if not verificar_rate_limit(vendedor_id, telefono):
-
-            logger.warning("⚠️ Mensaje bloqueado por rate limit")
-
+            logger.warning("⚠️ Mensaje bloqueado por rate limit.")
             return
 
         token = config.get("meta_token", "")
         phone_id = config.get("meta_phone_id", "")
 
-        # ==========================================
-        # 📦 INVENTARIO AISLADO POR TENANT
-        # ==========================================
+        # 📦 PREPARACIÓN DE CONTEXTO
+        contexto = await obtener_contexto_inventario(vendedor_id)
+        historial = await obtener_historial_chat(telefono, vendedor_id)
 
-        res_inv = (
-            supabase
-            .table('inventario')
-            .select('nombre, precio, precio_sugerido, precio_minimo, stock, estado_general')
-            .eq('vendedor_id', vendedor_id)
-            .gt('stock', 0)
-            .limit(MAX_CONTEXTO_INV)
-            .execute()
-        )
-
-        contexto = str(res_inv.data or [])
-
-        # ==========================================
-        # 💬 HISTORIAL
-        # ==========================================
-
-        res_hist = (
-            supabase
-            .table('prospectos')
-            .select('mensaje')
-            .eq('telefono', telefono)
-            .eq('vendedor_id', vendedor_id)
-            .order('id', desc=True)
-            .limit(MAX_HISTORIAL)
-            .execute()
-        )
-
-        historial = "Primer mensaje"
-
-        if res_hist.data:
-            historial = "\n".join([
-                str(x.get('mensaje', ''))
-                for x in reversed(res_hist.data)
-            ])
-
-        # ==========================================
-        # 🧠 IA
-        # ==========================================
-
+        # 🧠 DECISIÓN IA
         decision = await analizar_intencion_venta_ia(
             texto_entrante,
             contexto,
@@ -836,232 +794,151 @@ async def procesar_respuesta_bot(
         nueva_columna = columna_actual
         iluminacion = "blanco"
 
+        # 🚦 RUTEO DE ESTADOS
         if decision["intencion"] == "HUMANO":
-
             nueva_columna = "Requiere Asistencia"
             iluminacion = "verde_alerta"
-
-            resumen = await generar_resumen_handoff_ia(
-                cliente,
-                decision["intencion"],
-                historial
-            )
-
-            enviar_alerta_whatsapp_admin(
-                cliente,
-                telefono,
-                decision["intencion"],
-                resumen,
-                config
-            )
+            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
 
         elif decision["intencion"] == "COMPRA":
-
             nueva_columna = "Por Entregar"
             iluminacion = "verde_exito"
-
-            resumen = await generar_resumen_handoff_ia(
-                cliente,
-                decision["intencion"],
-                historial
-            )
-
-            enviar_alerta_whatsapp_admin(
-                cliente,
-                telefono,
-                decision["intencion"],
-                resumen,
-                config
-            )
+            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
 
         elif decision["intencion"] == "COTIZACION":
-
             if columna_actual == "Bandeja Nueva":
                 nueva_columna = "Envios Masivos"
 
         respuesta_final = decision["respuesta"]
 
-        # ==========================================
-        # 💾 UPDATE CARD
-        # ==========================================
+        # 💾 ACTUALIZACIÓN DE ESTADOS AISLADOS
+        await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, decision.get('juego_detectado', ''))
+        await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
-        supabase.table('prospectos').update({
-            'columna': nueva_columna,
-            'estado_iluminacion': iluminacion,
-            'ultimo_juego_interes': decision.get('juego_detectado', ''),
-            'ultima_interaccion_ia': datetime.now().isoformat()
-        }).eq('telefono', telefono).eq('vendedor_id', vendedor_id).execute()
-
-        # ==========================================
-        # 📝 HISTORIAL
-        # ==========================================
-
-        supabase.table('prospectos').insert({
-            'nombre': cliente,
-            'telefono': telefono,
-            'origen': 'WHATSAPP',
-            'mensaje': f'TÚ: [BOT] {respuesta_final}',
-            'columna': nueva_columna,
-            'vendedor_id': vendedor_id
-        }).execute()
-
-        # ==========================================
-        # 🖼️ PORTADA
-        # ==========================================
-
+        # 🖼️ BÚSQUEDA MULTIMEDIA
         juego = decision.get('juego_detectado', '')
         url_imagen = None
 
         if juego:
-
-            res_img = (
-                supabase
-                .table('inventario')
-                .select('url_portada')
-                .ilike('nombre', f'%{juego}%')
-                .eq('vendedor_id', vendedor_id)
-                .neq('url_portada', '')
-                .limit(1)
-                .execute()
-            )
-
+            res_img = supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego}%').eq('vendedor_id', vendedor_id).neq('url_portada', '').limit(1).execute()
             if res_img.data:
                 url_imagen = res_img.data[0].get('url_portada')
 
-        # ==========================================
-        # 📤 ENVÍO
-        # ==========================================
-
+        # 📤 ENVÍO META API
         if url_imagen:
-
-            disparar_whatsapp_imagen(
-                telefono,
-                url_imagen,
-                respuesta_final,
-                token,
-                phone_id
-            )
-
+            await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, token, phone_id)
         else:
-
-            disparar_whatsapp_dinamico(
-                telefono,
-                respuesta_final,
-                token,
-                phone_id
-            )
+            await disparar_whatsapp_dinamico_async(telefono, respuesta_final, token, phone_id)
 
     except Exception as e:
-        logger.error(f"❌ ERROR procesar_respuesta_bot: {e}")
+        logger.exception("❌ ERROR FATAL en procesar_respuesta_bot")
 
 
 # ==========================================================
-# 🌐 WEBHOOK META
+# ⚙️ BACKGROUND WORKER DE ENTRADA
 # ==========================================================
-
-# 🛡️ Control de Memoria para Deduplicación
-procesados_recientemente = deque(maxlen=1000)
-
-@app.get("/webhook")
-def verificar_webhook(request: Request):
-
-    if request.query_params.get("hub.verify_token") == WEBHOOK_SECRET:
-
-        return PlainTextResponse(
-            content=request.query_params.get("hub.challenge"),
-            status_code=200
-        )
-
-    return PlainTextResponse(
-        content="CRM B2B ACTIVO",
-        status_code=200
-    )
-
-
-@app.post(
-    "/webhook",
-    dependencies=[Depends(validar_firma_meta)]
-)
-async def recibir_mensaje_meta(
-    request: Request,
-    background_tasks: BackgroundTasks
-):
-
+async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
     try:
-
-        datos = await request.json()
-
-        if "entry" not in datos:
-            return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
-
-        valor = datos["entry"][0]["changes"][0]["value"]
-
-        if "messages" not in valor:
-            return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
-
-        msg = valor["messages"][0]
-        msg_id = msg.get("id", "")
-
-        # ==========================================
-        # 🛡️ DEDUPLICACIÓN CON MEMORIA PROTEGIDA
-        # ==========================================
-
-        if msg_id in procesados_recientemente:
-
-            logger.info("⚡ Evento duplicado ignorado")
-
-            return PlainTextResponse(
-                content="EVENT_RECEIVED",
-                status_code=200
-            )
-
-        procesados_recientemente.append(msg_id)
-
-        phone_id_receptor = valor["metadata"]["phone_number_id"]
-
-        # ==========================================
-        # 🚀 BACKGROUND
-        # ==========================================
-
-        background_tasks.add_task(
-            gestionar_mensaje_entrante_bg,
-            valor,
-            msg,
-            phone_id_receptor
-        )
-
-        return PlainTextResponse(
-            content="EVENT_RECEIVED",
-            status_code=200
-        )
+        telefono_cliente = msg.get("from", "")
+        
+        # Extracción segura de payload Meta
+        texto_entrante = ""
+        if "text" in msg:
+            texto_entrante = msg["text"]["body"]
+        elif "image" in msg:
+            texto_entrante = "[IMAGEN RECIBIDA]"
+        elif "interactive" in msg:
+            texto_entrante = msg["interactive"].get("button_reply", {}).get("title", "")
+            
+        if not texto_entrante or not telefono_cliente:
+            return
+            
+        # 🔑 Identificar Tenant
+        res_conf = supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1).execute()
+        if not res_conf.data:
+            return
+            
+        config = res_conf.data[0]
+        vendedor_id = config.get("vendedor_id")
+        
+        if not config.get("bot_activo", True):
+            return
+            
+        # 💾 Registrar mensaje de usuario
+        await guardar_mensaje_chat(telefono_cliente, vendedor_id, "USER", texto_entrante)
+        
+        # 🔍 Validar existencia en CRM
+        res_prospecto = supabase.table('prospectos').select('nombre', 'columna').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_id).limit(1).execute()
+        
+        cliente_nombre = "Cliente"
+        columna_actual = "Bandeja Nueva"
+        
+        if res_prospecto.data:
+            cliente_nombre = res_prospecto.data[0].get("nombre", "Cliente")
+            columna_actual = res_prospecto.data[0].get("columna", "Bandeja Nueva")
+        else:
+            nombre_perfil = valor.get("contacts", [{}])[0].get("profile", {}).get("name", "Nuevo Contacto")
+            supabase.table('prospectos').insert({
+                "telefono": telefono_cliente,
+                "nombre": nombre_perfil,
+                "vendedor_id": vendedor_id,
+                "columna": "Bandeja Nueva",
+                "estado_iluminacion": "blanco"
+            }).execute()
+            cliente_nombre = nombre_perfil
+            
+        # 🚀 Despachar a IA
+        await procesar_respuesta_bot(cliente_nombre, telefono_cliente, texto_entrante, columna_actual, config)
 
     except Exception as e:
+        logger.exception("❌ ERROR en gestionar_mensaje_entrante_bg")
 
-        logger.error(f"❌ ERROR WEBHOOK: {e}")
 
-        return PlainTextResponse(
-            content="ERROR",
-            status_code=500
-        )
+# ==========================================================
+# 📦 MODELOS PYDANTIC PARA ENDPOINTS DE GESTIÓN (Auditoría K)
+# ==========================================================
+class ColumnaUpdate(BaseModel):
+    nombre_columna: str
 
-# ==========================================
-# 👁️ MOTORES DE VISIÓN ARTIFICIAL Y AUDITORÍA
-# ==========================================
+class RenombrarColumnaUpdate(BaseModel):
+    viejo_nombre: str
+    nuevo_nombre: str
+
+class TelefonoUpdate(BaseModel):
+    telefono: str
+
+class EstadoUpdate(BaseModel):
+    telefono: str
+    nueva_columna: str
+
+class NotasUpdate(BaseModel):
+    telefono: str
+    notas: str
+    etiquetas: str
+
+# ==========================================================
+# 👁️ MOTORES DE VISIÓN ARTIFICIAL (IA AAA)
+# ==========================================================
 async def descargar_imagen_whatsapp_b64(media_id: str, token_vendedor: str):
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
     headers = {"Authorization": f"Bearer {token_vendedor}"}
-    async with httpx.AsyncClient() as client:
-        res_info = await client.get(url_info, headers=headers)
+    try:
+        res_info = await http_client.get(url_info, headers=headers)
         if res_info.status_code == 200:
-            res_media = await client.get(res_info.json().get("url"), headers=headers)
+            media_url = res_info.json().get("url")
+            res_media = await http_client.get(media_url, headers=headers)
             if res_media.status_code == 200:
                 return base64.b64encode(res_media.content).decode("utf-8"), res_media.headers.get("content-type", "image/jpeg")
+    except Exception as e:
+        logger.exception("❌ Error descargando imagen de WhatsApp B64")
     return None, None
 
 async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: str, historial_chat: str):
     fecha_hoy = datetime.now().strftime("%d de %B de %Y")
     prompt = f"""
-    Eres Auditor de '{nombre_negocio}'. Analiza esta imagen. ¿Es pago válido?
+    Eres Auditor de '{nombre_negocio}'. Analiza esta imagen. ¿Es un pago válido?
     HISTORIAL: {historial_chat}
     REGLAS:
     1. FECHA: Hoy es {fecha_hoy}.
@@ -1077,17 +954,23 @@ async def auditar_comprobante_ia(b64_img: str, mime_type: str, nombre_negocio: s
         "generationConfig": {"temperature": 0.1}
     }
     
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        res = await client.post(url, headers=headers, json=payload)
+    try:
+        res = await http_client.post(url, headers=headers, json=payload)
         if res.status_code == 200:
             texto_sucio = res.json()['candidates'][0]['content']['parts'][0]['text']
             simbolo = chr(96) * 3
             return json.loads(texto_sucio.replace(simbolo + "json", "").replace(simbolo, "").strip())
         raise Exception(f"Fallo IA Visión: {res.status_code}")
+    except Exception as e:
+        logger.exception("❌ ERROR en auditar_comprobante_ia")
+        return {"es_pago": False, "monto_detectado": 0.0, "analisis": "Error interno del sistema de visión."}
 
+# ==========================================================
+# ⚙️ BACKGROUND WORKER DE ENTRADA (TEXTO + VISIÓN)
+# ==========================================================
 async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
     try:
-        res_config = supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).execute()
+        res_config = supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1).execute()
         if not res_config.data: return
             
         config_vendedor = res_config.data[0]
@@ -1097,9 +980,9 @@ async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_recepto
 
         if not config_vendedor.get("bot_activo", True): return
 
-        contact = valor["contacts"][0]
-        nombre = contact["profile"]["name"]
-        tel = msg["from"]
+        contact = valor.get("contacts", [{}])[0]
+        nombre = contact.get("profile", {}).get("name", "Cliente")
+        tel = msg.get("from", "")
         if tel.startswith("521"): tel = "52" + tel[3:]
         
         tipo = msg.get("type", "text")
@@ -1107,22 +990,26 @@ async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_recepto
         elif tipo == "image": texto = "📷 [IMAGEN RECIBIDA: Posible comprobante de pago]"
         else: texto = f"[{tipo.upper()}] recibida."
 
-        res_ex = supabase.table('prospectos').select('columna').eq('nombre', nombre).eq('vendedor_id', vendedor_actual).order('id', desc=True).limit(1).execute()
+        # 🔍 Validar existencia en CRM
+        res_ex = supabase.table('prospectos').select('columna').eq('telefono', tel).eq('vendedor_id', vendedor_actual).limit(1).execute()
         col_destino = res_ex.data[0]['columna'] if res_ex.data else "Bandeja Nueva"
 
-        supabase.table('prospectos').insert({
-            "nombre": nombre, "telefono": tel, "origen": "WHATSAPP", 
-            "mensaje": texto, "columna": col_destino, 
-            "vendedor_id": vendedor_actual, "estado_iluminacion": "oro"
-        }).execute()
+        if not res_ex.data:
+            supabase.table('prospectos').insert({
+                "nombre": nombre, "telefono": tel, "origen": "WHATSAPP", 
+                "columna": col_destino, "vendedor_id": vendedor_actual, "estado_iluminacion": "blanco"
+            }).execute()
+
+        # 💾 Registrar mensaje de usuario en Historial Chat
+        await guardar_mensaje_chat(tel, vendedor_actual, "USER", texto)
         
+        # 🚦 RUTEO DE PROCESAMIENTO
         if tipo == "text" and col_destino != "En Conversacion":
             await procesar_respuesta_bot(nombre, tel, texto, col_destino, config_vendedor)
             
         elif tipo == "image":
             image_id = msg["image"]["id"]
-            res_hist = supabase.table('prospectos').select('mensaje').eq('telefono', tel).eq('vendedor_id', vendedor_actual).order('id', desc=True).limit(5).execute()
-            historial_para_auditor = "\n".join([r['mensaje'] for r in reversed(res_hist.data)]) if res_hist.data else "Sin historial."
+            historial_para_auditor = await obtener_historial_chat(tel, vendedor_actual)
             
             b64_img, mime_type = await descargar_imagen_whatsapp_b64(image_id, token_actual)
             if b64_img:
@@ -1130,41 +1017,44 @@ async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_recepto
                 
                 if auditoria.get("es_pago") == True:
                     monto = auditoria.get('monto_detectado', 0)
-                    supabase.table('prospectos').update({"columna": "Por Entregar", "estado_iluminacion": "verde_exito"}).eq('nombre', nombre).eq('vendedor_id', vendedor_actual).execute()
+                    await actualizar_estado_crm(tel, vendedor_actual, "Por Entregar", "verde_exito", "")
                     msg_exito = f"✅ ¡Pago validado por ${monto}! Hemos recibido tu comprobante."
-                    disparar_whatsapp_dinamico(tel, msg_exito, token_actual, phone_id_receptor)
-                    supabase.table('prospectos').insert({"nombre": nombre, "telefono": tel, "origen": "BOT", "mensaje": msg_exito, "columna": "Por Entregar", "vendedor_id": vendedor_actual, "estado_iluminacion": "verde_exito"}).execute()
+                    await disparar_whatsapp_dinamico_async(tel, msg_exito, token_actual, phone_id_receptor)
+                    await guardar_mensaje_chat(tel, vendedor_actual, "BOT", msg_exito)
                 else:
                     razon = auditoria.get('analisis', 'No se reconoce como comprobante.')
-                    msg_fallo = f"Hmm, mi sistema no validó esa imagen. 🤖\nDetalle: {razon}\n¿Podrías enviarme una foto clara del ticket?"
-                    disparar_whatsapp_dinamico(tel, msg_fallo, token_actual, phone_id_receptor)
-                    supabase.table('prospectos').update({"columna": "Requiere Asistencia", "estado_iluminacion": "verde_alerta"}).eq('nombre', nombre).eq('vendedor_id', vendedor_actual).execute()
-                    supabase.table('prospectos').insert({"nombre": nombre, "telefono": tel, "origen": "BOT", "mensaje": msg_fallo, "columna": "Requiere Asistencia", "vendedor_id": vendedor_actual, "estado_iluminacion": "verde_alerta"}).execute()
+                    msg_fallo = f"Hmm, mi sistema no validó esa imagen. 🤖\nDetalle: {razon}\n¿Podrías enviarme una foto clara del ticket o comprobante?"
+                    await actualizar_estado_crm(tel, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
+                    await disparar_whatsapp_dinamico_async(tel, msg_fallo, token_actual, phone_id_receptor)
+                    await guardar_mensaje_chat(tel, vendedor_actual, "BOT", msg_fallo)
                     
-    except Exception as e: logger.error(f"❌ [BACKGROUND TASK ERROR]: {str(e)}")
+    except Exception as e: 
+        logger.exception("❌ [BACKGROUND TASK ERROR]")
 
 # ==========================================
 # 🟢 ENVIAR MENSAJES DESDE GODOT
 # ==========================================
 @app.post("/api/enviar_mensaje")
-def api_enviar_mensaje(datos: MensajeSaliente, _sesion: str = Depends(verificar_sesion_b2b)):
+async def api_enviar_mensaje(datos: MensajeSaliente, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res_config = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).execute()
+        res_config = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).limit(1).execute()
         if not res_config.data: return {"status": "error", "detalle": "Configuración de bot no encontrada."}
             
         config = res_config.data[0]
-        supabase.table('prospectos').insert({"nombre": datos.cliente, "origen": "WHATSAPP", "mensaje": f"TÚ: {datos.texto}", "columna": "En Conversacion", "vendedor_id": _sesion}).execute()
-        supabase.table('prospectos').update({'columna': 'En Conversacion'}).eq('nombre', datos.cliente).eq('vendedor_id', _sesion).execute()
+        # Nota: Asumimos que datos.cliente ahora contiene el TELEFONO para cumplir con Auditoría B
+        telefono_destino = datos.cliente 
         
-        res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.cliente).eq('vendedor_id', _sesion).neq('telefono', None).limit(1).execute()
-        if res_tel.data:
-            disparar_whatsapp_dinamico(res_tel.data[0]['telefono'], datos.texto, config['meta_token'], config['meta_phone_id'])
-            return {"status": "ok"}
-        return {"status": "error", "detalle": "Cliente sin teléfono"}
-    except Exception as e: return {"status": "error", "detalle": str(e)}
+        await guardar_mensaje_chat(telefono_destino, _sesion, "TÚ (ADMIN)", datos.texto)
+        await actualizar_estado_crm(telefono_destino, _sesion, "En Conversacion", "blanco", "")
+        
+        await disparar_whatsapp_dinamico_async(telefono_destino, datos.texto, config['meta_token'], config['meta_phone_id'])
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("❌ Error api_enviar_mensaje")
+        raise HTTPException(status_code=500, detail="Error interno enviando mensaje")
 
 # ==========================================
-# 🌐 RUTAS DE GESTIÓN CRM (BLINDADAS)
+# 🌐 RUTAS DE GESTIÓN CRM (BLINDADAS AAA)
 # ==========================================
 @app.get("/api/cargar_todo")
 def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
@@ -1177,156 +1067,142 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         if not columnas_custom: columnas_custom = ["+"]
                 
         columnas_finales = columnas_izq + columnas_custom + columnas_der
-        res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('id', desc=False).execute()
+        # Limite preventivo de RAM (Auditoría I)
+        res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('ultima_interaccion_ia', desc=True).limit(500).execute()
         
-        ultimos = {fila['nombre']: fila for fila in res_prospectos.data}
-        return {"columnas": columnas_finales, "prospectos": list(ultimos.values())}
-    except Exception: return {"error": "Error conectando a Nube B2B"}
+        return {"columnas": columnas_finales, "prospectos": res_prospectos.data}
+    except Exception as e:
+        logger.exception("❌ Error cargando CRM")
+        raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
 
 @app.post("/api/crear_columna")
-def crear_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def crear_columna(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').insert({'nombre_columna': datos.get("nombre_columna"), 'vendedor_id': _sesion}).execute()
+        supabase.table('configuracion').insert({'nombre_columna': datos.nombre_columna, 'vendedor_id': _sesion}).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error crear_columna")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/borrar_columna")
-def borrar_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def borrar_columna(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').delete().eq('nombre_columna', datos.get("nombre_columna")).eq('vendedor_id', _sesion).execute()
+        supabase.table('configuracion').delete().eq('nombre_columna', datos.nombre_columna).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error borrar_columna")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/renombrar_columna")
-def renombrar_columna(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def renombrar_columna(datos: RenombrarColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').update({'nombre_columna': datos.get("nuevo_nombre")}).eq('nombre_columna', datos.get("viejo_nombre")).eq('vendedor_id', _sesion).execute()
+        supabase.table('configuracion').update({'nombre_columna': datos.nuevo_nombre}).eq('nombre_columna', datos.viejo_nombre).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error renombrar_columna")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/historial_chat")
-def historial_chat(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
-    res = supabase.table('prospectos').select('mensaje').eq('nombre', datos["nombre"]).eq('vendedor_id', _sesion).order('id', desc=False).execute()
-    historial = []
-    for fila in res.data:
-        texto = fila['mensaje']
-        es_mio = texto.startswith("TÚ: ")
-        if es_mio: texto = texto.replace("TÚ: ", "", 1)
-        historial.append({"texto": texto, "es_mio": es_mio})
-    return {"historial": historial}
+def historial_chat(datos: TelefonoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', datos.telefono).eq('vendedor_id', _sesion).order('created_at', desc=False).limit(50).execute()
+        historial = []
+        for fila in res.data:
+            autor = fila.get('autor', 'USER')
+            es_mio = autor != 'USER'
+            historial.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
+        return {"historial": historial}
+    except Exception as e:
+        logger.exception("❌ Error cargando historial_chat")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/actualizar_estado")
-def actualizar_estado(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'columna': datos.get("nueva_columna")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
+        supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error actualizar_estado")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/actualizar_notas")
-def actualizar_notas(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'notas': datos.get("notas"), 'etiquetas': datos.get("etiquetas")}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
+        supabase.table('prospectos').update({'notas': datos.notas, 'etiquetas': datos.etiquetas}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error actualizar_notas")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/borrar_prospecto")
-def borrar_prospecto(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def borrar_prospecto(datos: TelefonoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').update({'columna': 'Papelera'}).eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
+        supabase.table('prospectos').update({'columna': 'Papelera'}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error borrar_prospecto")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/borrar_permanente")
-def borrar_permanente(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+def borrar_permanente(datos: TelefonoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('prospectos').delete().eq('nombre', datos.get("nombre")).eq('vendedor_id', _sesion).execute()
+        supabase.table('prospectos').delete().eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
+        supabase.table('mensajes_chat').delete().eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error borrar_permanente")
+        raise HTTPException(status_code=500)
 
 @app.get("/api/buscar_maestro")
 def buscar_maestro(q: str):
     try:
         return {"status": "ok", "resultados": supabase.table('catalogo_maestro').select('*').ilike('nombre', f'%{q}%').limit(10).execute().data}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error buscar_maestro")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/inyectar_starter")
 def inyectar_starter(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         maestros = supabase.table('catalogo_maestro').select('*').eq('starter_pack', True).execute()
-        lote = [{"nombre": m["nombre"], "consola": m["consola"], "precio": m["precio_sugerido"], "costo": 0, "stock": 0, "estado_general": "Solo disco (Loose)", "codigo_barras": "", "vendedor_id": _sesion} for m in maestros.data]
+        lote = [{"nombre": m["nombre"], "consola": m["consola"], "precio": m["precio_sugerido"], "costo": 0, "stock": 0, "estado_general": "Solo disco", "codigo_barras": "", "vendedor_id": _sesion} for m in maestros.data]
         if lote: supabase.table('inventario').insert(lote).execute()
         return {"status": "ok", "inyectados": len(lote)}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error inyectar_starter")
+        raise HTTPException(status_code=500)
 
 # ==========================================
-# 📥 GENERADOR DINÁMICO DE PLANTILLAS B2B (VERSIÓN ÉLITE)
+# 📥 GENERADOR DINÁMICO DE PLANTILLAS B2B
 # ==========================================
 @app.get("/api/descargar_plantilla")
 def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
-    """
-    Genera una plantilla de 9 columnas para Veltrix Engine con valores numéricos puros.
-    Elimina el formato de moneda ($) para asegurar la compatibilidad con el importador.
-    """
-    logger.info(f"📥 [SISTEMA] Generando plantilla técnica (Sin $) para: {vendedor_id_real}")
-    
+    logger.info(f"📥 [SISTEMA] Generando plantilla técnica para: {vendedor_id_real}")
     try:
-        # 1. Obtención de datos (Maestro + Inventario Privado)
         res_maestro = supabase.table('catalogo_maestro').select('*').execute()
         items_maestros = res_maestro.data if res_maestro.data else []
         
         res_privado = supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).execute()
         dict_privado = {item['nombre']: item for item in res_privado.data} if res_privado.data else {}
 
-        # 2. Creación del CSV en memoria
         output = io.StringIO()
         writer = csv.writer(output)
         
-        # Fila 1: Instrucciones (Énfasis en números puros)
         instrucciones = 'INSTRUCCIONES: No borrar filas 1 y 2. Datos inician en fila 3. PRECIOS: Solo números (ej: 500.50), NO usar signo $. Rareza: Dejar vacío para autocompletado por IA.'
         writer.writerow([instrucciones])
-        
-        # Fila 2: Cabeceras Oficiales (9 COLUMNAS)
-        # Índices: 0:nom, 1:cons, 2:cost, 3:prec, 4:stk, 5:est, 6:rar, 7:cod, 8:det
         writer.writerow(["nombre", "consola", "costo", "precio", "stock", "estado_general", "rareza", "codigo_barras", "detalles"])
 
-        # 3. Construcción de filas con limpieza de datos
         for m in items_maestros:
-            nombre = m['nombre']
-            consola = m['consola']
-            
+            nombre, consola = m['nombre'], m['consola']
             if nombre in dict_privado:
                 inv = dict_privado[nombre]
-                
-                # Aseguramos que costo y precio sean números sin caracteres de moneda
-                costo_limpio = inv.get('costo', 0)
-                precio_limpio = inv.get('precio', 0)
-                
                 writer.writerow([
-                    nombre, 
-                    consola, 
-                    costo_limpio, 
-                    precio_limpio, 
-                    inv.get('stock', 0), 
-                    inv.get('estado_general', 'Completo'),
-                    inv.get('rareza', ''), # Dejar vacío para que la IA tome la decisión al importar
-                    inv.get('codigo_barras', ''),
-                    inv.get('descripcion_detallada', '')
+                    nombre, consola, inv.get('costo', 0), inv.get('precio', 0), inv.get('stock', 0), 
+                    inv.get('estado_general', 'Completo'), inv.get('rareza', ''), inv.get('codigo_barras', ''), inv.get('descripcion_detallada', '')
                 ])
             else:
-                # Sugerencia para items nuevos con precios en 0 para disparar la IA al cargar
-                writer.writerow([
-                    nombre, 
-                    consola, 
-                    0, 
-                    0, 
-                    0, 
-                    "Completo", 
-                    "", 
-                    "", 
-                    ""
-                ])
+                writer.writerow([nombre, consola, 0, 0, 0, "Completo", "", "", ""])
 
-        # 4. Empaquetado para descarga segura (UTF-8-SIG para Excel)
         contenido_csv = output.getvalue().encode("utf-8-sig")
         output.close()
         
@@ -1335,13 +1211,56 @@ def api_descargar_plantilla(vendedor_id_real: str = Depends(verificar_sesion_b2b
             media_type="text/csv", 
             headers={"Content-Disposition": f"attachment; filename=Plantilla_Veltrix_{vendedor_id_real}.csv"}
         )
-
     except Exception as e:
-        logger.error(f"❌ [ERROR CRÍTICO] Fallo al generar plantilla técnica: {str(e)}")
-        return {"status": "error", "detalle": "Error interno al generar el archivo CSV numérico."}
+        logger.exception("❌ Fallo al generar plantilla técnica")
+        raise HTTPException(status_code=500, detail="Error interno al generar el archivo CSV.")
 
 # ==========================================
-# 📦 INVENTARIO & DB (BLINDADO B2B + FANTASMAS)
+# 🧰 HELPERS CORE
+# ==========================================
+def normalizar(texto: str) -> str:
+    if not texto: return ""
+    t = str(texto).lower().strip()
+    t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+    return " ".join(t.split())
+
+def safe_float(val) -> float:
+    try: return float(str(val).replace("$", "").replace(",", "").strip())
+    except: return 0.0
+
+def safe_int(val, default=0) -> int:
+    try: return int(float(str(val)))
+    except: return default
+
+def generar_sku(vendedor: str, n: str, c: str, e: str) -> str:
+    base = f"{vendedor}|{n}|{c}|{e}"
+    return hashlib.sha1(base.encode()).hexdigest()
+
+# ==========================================
+# 🎮 NORMALIZADORES DE NEGOCIO
+# ==========================================
+def normalizar_consola(raw: str):
+    try:
+        consolas_oficiales = ["PS5","PS4","PS3","PS2","PS1","Xbox One","Xbox 360","Xbox Clasico","Nintendo Switch","Nintendo 3DS","Nintendo DS","Nintendo 64","GameCube","GameBoy Advance","GameBoy Color","Wii","Wii U","SNES","NES","Genesis"]
+        n = normalizar(raw)
+        raw_title = str(raw).strip().title()
+        match = difflib.get_close_matches(raw_title, consolas_oficiales, n=1, cutoff=0.7)
+        if match: return str(match[0]), normalizar(match[0])
+        return raw_title, n
+    except Exception as e:
+        logger.error(f"❌ Error en normalizar_consola: {e}")
+        return "Otro (PC/Varios)", "otro"
+
+def normalizar_estado(raw: str):
+    # Auditoría O: Eliminación estricta de código muerto y redundancias
+    r = normalizar(raw)
+    if any(x in r for x in ["nuevo", "sellado", "new", "sealed"]): return "Nuevo/Sellado"
+    if any(x in r for x in ["sin librito", "no manual", "sin manual", "incomplete"]): return "Sin librito"
+    if any(x in r for x in ["loose", "suelto", "disco", "cartucho", "solo"]): return "Solo disco"
+    return "Completo"
+
+# ==========================================
+# 📦 INVENTARIO & DB (BLINDADO B2B)
 # ==========================================
 @app.post("/api/guardar_inventario")
 def guardar_inventario(datos: InventarioItem, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)): 
@@ -1353,23 +1272,20 @@ def guardar_inventario(datos: InventarioItem, background_tasks: BackgroundTasks,
         paquete_datos = datos.dict()
         paquete_datos["rareza"] = calcular_rareza_ia(nombre_limpio, consola_limpia, datos.precio)
         paquete_datos["vendedor_id"] = _sesion 
-        paquete_datos["sku_b2b"] = f"{nombre_limpio}_{consola_limpia}_{estado}".lower().replace(" ", "-").replace(":", "").replace("/", "")
         
-        res = supabase.table('inventario').select('id').ilike('nombre', nombre_limpio).ilike('consola', consola_limpia).ilike('estado_general', estado).eq('vendedor_id', _sesion).execute()
-        item_id = None
+        # Sku B2B Estricto
+        sku_b2b = generar_sku(_sesion, normalizar(nombre_limpio), normalizar(consola_limpia), normalizar(estado))
+        paquete_datos["sku_b2b"] = sku_b2b
         
-        if res.data and len(res.data) > 0:
-            item_id = res.data[0]['id']
-            supabase.table('inventario').update(paquete_datos).eq('id', item_id).execute()
-        else:
-            insert_res = supabase.table('inventario').insert(paquete_datos).execute()
-            if insert_res.data: item_id = insert_res.data[0]['id']
+        # Upsert transaccional seguro
+        res = supabase.table("inventario").upsert(paquete_datos, on_conflict="sku_b2b").execute()
+        item_id = res.data[0]['id'] if res.data else None
             
-        # 👻 TRABAJO FANTASMA: Mandamos cazar la portada sin detener el panel de Godot
+        # 👻 TRABAJO FANTASMA
         if item_id and not datos.url_portada:
             background_tasks.add_task(cazar_portada_y_guardar_background, str(item_id), nombre_limpio, consola_limpia)
             
-        # 🛡️ FIX AAA: Alerta Radar con Token Dinámico
+        # 🛡️ Alerta Radar B2B Seguro
         res_alertas = supabase.table('alertas_mercado').select('*').ilike('juego', f"%{nombre_limpio}%").eq('activa', True).execute()
         if res_alertas.data:
             res_config = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).execute()
@@ -1378,24 +1294,30 @@ def guardar_inventario(datos: InventarioItem, background_tasks: BackgroundTasks,
                 admin_ph = config.get("admin_phone", ADMIN_PHONE_GLOBAL)
                 for alerta in res_alertas.data:
                     if alerta['precio_maximo'] >= datos.precio and datos.precio > 0:
-                        disparar_whatsapp_dinamico(admin_ph, f"🎯 *RADAR B2B*\nAlta:\n🎮 {datos.nombre}\n💰 ${datos.precio}", config['meta_token'], config['meta_phone_id'])
+                        asyncio.create_task(disparar_whatsapp_dinamico_async(admin_ph, f"🎯 *RADAR B2B*\nAlta:\n🎮 {datos.nombre}\n💰 ${datos.precio}", config['meta_token'], config['meta_phone_id']))
 
         return {"status": "ok"}
     except Exception as e: 
-        return {"status": "error", "detalle": str(e)}
+        logger.exception("❌ Error guardar_inventario")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/borrar_item")
 def borrar_item(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('inventario').delete().eq('vendedor_id', _sesion).eq('nombre', datos.get("nombre", "")).eq('consola', datos.get("consola", "")).execute()
         return {"status": "ok"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error borrar_item")
+        raise HTTPException(status_code=500)
 
 @app.get("/api/cargar_inventario")
 def cargar_inventario(vendedor_id_real: str = Depends(verificar_sesion_b2b)):
     try:
-        return {"status": "ok", "inventario": supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).order('nombre', desc=False).execute().data}
-    except Exception as e: return {"status": "error", "detalle": str(e)}
+        # Límite RAM
+        return {"status": "ok", "inventario": supabase.table('inventario').select('*').eq('vendedor_id', vendedor_id_real).order('nombre', desc=False).limit(2000).execute().data}
+    except Exception as e: 
+        logger.exception("❌ Error cargar_inventario")
+        raise HTTPException(status_code=500)
 
 @app.post("/api/actualizar_stock")
 def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
@@ -1407,15 +1329,19 @@ def actualizar_stock(datos: VentaItem, _sesion: str = Depends(verificar_sesion_b
             supabase.table('registro_ventas').insert({"nombre_juego": datos.nombre, "precio_venta": precio_venta, "costo": costo_compra, "ganancia": precio_venta - costo_compra, "vendedor_id": _sesion}).execute()
             return {"status": "ok"}
         return {"status": "error"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error actualizar_stock")
+        raise HTTPException(status_code=500)
 
 @app.get("/api/buscar_por_codigo")
 def buscar_por_codigo(codigo: str, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).eq('vendedor_id', _sesion).execute()
+        res = supabase.table('inventario').select('*').eq('codigo_barras', codigo).eq('vendedor_id', _sesion).limit(1).execute()
         if res.data: return {"status": "ok", "juego": res.data[0]}
         return {"status": "error"}
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error buscar_por_codigo")
+        raise HTTPException(status_code=500)
 
 @app.get("/api/metricas")
 def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
@@ -1431,156 +1357,44 @@ def obtener_metricas(_sesion: str = Depends(verificar_sesion_b2b)):
             "costo_inv": costo_inventario, "ganancia_potencial": valor_inventario - costo_inventario,
             "ventas_totales": sum(v.get('precio_venta', 0.0) for v in res_ventas.data), "ganancia_real": sum(v.get('ganancia', 0.0) for v in res_ventas.data)
         }
-    except Exception: return {"status": "error"}
+    except Exception as e: 
+        logger.exception("❌ Error obtener_metricas")
+        raise HTTPException(status_code=500)
 
-# ==========================================
-# 🧰 HELPERS CORE
-# ==========================================
-def normalizar(texto: str) -> str:
-    if not texto:
-        return ""
-    t = str(texto).lower().strip()
-    t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
-    return " ".join(t.split())
-
-def safe_float(val) -> float:
+@app.get("/api/radar_b2b")
+def radar_b2b(q: str = ""):
     try:
-        return float(str(val).replace("$", "").replace(",", "").strip())
-    except:
-        return 0.0
+        query = supabase.table('inventario').select('nombre, consola, precio, estado_general, rareza, vendedor_id').gt('stock', 0)
+        if q: query = query.ilike('nombre', f'%{q}%')
+        return {"status": "ok", "resultados": query.limit(50).execute().data}
+    except Exception as e: 
+        logger.exception("❌ Error radar_b2b")
+        raise HTTPException(status_code=500)
 
-def safe_int(val, default=0) -> int:
+@app.get("/api/bot_config")
+def obtener_config_bot(_sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        return int(float(str(val)))
-    except:
-        return default
+        res = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).limit(1).execute()
+        if res.data: return {"status": "ok", "datos": res.data[0]}
+        return {"status": "error", "detalle": "Configuración no encontrada"}
+    except Exception as e: 
+        logger.exception("❌ Error obtener_config_bot")
+        raise HTTPException(status_code=500)
 
-def generar_sku(vendedor: str, n: str, c: str, e: str) -> str:
-    base = f"{vendedor}|{n}|{c}|{e}"
-    return hashlib.sha1(base.encode()).hexdigest()
-
-# ==========================================
-# 🎮 NORMALIZADORES DE NEGOCIO
-# ==========================================
-# ==========================================
-# ⚙️ NORMALIZADORES BLINDADOS V-5.1
-# ==========================================
-
-def normalizar_consola(raw: str):
+@app.post("/api/bot_config")
+def guardar_config_bot(datos: BotConfig, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        consolas_oficiales = ["PS5","PS4","PS3","PS2","PS1","Xbox One","Xbox 360","Xbox Clasico","Nintendo Switch","Nintendo 3DS","Nintendo DS","Nintendo 64","GameCube","GameBoy Advance","GameBoy Color","Wii","Wii U","SNES","NES","Genesis"]
-        
-        # 1. Limpieza básica
-        n = normalizar(raw) # Usa tu función normalizar() ya existente
-        raw_title = str(raw).strip().title()
-        
-        # 2. Intento de coincidencia inteligente
-        match = difflib.get_close_matches(raw_title, consolas_oficiales, n=1, cutoff=0.7)
-        
-        if match:
-            return str(match[0]), normalizar(match[0])
-            
-        # 3. Si no hay match, devolvemos lo que puso el usuario pero limpio
-        return raw_title, n
-    except Exception as e:
-        logger.error(f"❌ Error crítico en normalizar_consola: {e}")
-        return "Otro (PC/Varios)", "otro"
-
-def normalizar_estado(raw: str):
-    r = normalizar(raw)
-    if any(x in r for x in ["nuevo", "sellado", "new", "sealed"]): 
-        return "Nuevo/Sellado"
-    # 🎯 Nueva detección específica para Sin Librito
-    if any(x in r for x in ["sin librito", "no manual", "sin manual", "incomplete"]): 
-        return "Sin librito"
-    if any(x in r for x in ["loose", "suelto", "disco", "cartucho", "solo"]): 
-        return "Solo disco"
-    # Fallback si no es ninguna de las anteriores
-    return "Completo"
-    # ==========================================
-    # 🔧 NORMALIZACIÓN BASE
-    # ==========================================
-    n = normalizar(raw)
-
-    # ==========================================
-    # 🎯 MAPA DE ALIAS (PRIORIDAD ALTA)
-    # ==========================================
-    alias = {
-        "ps5": "PS5",
-        "ps 5": "PS5",
-
-        "ps4": "PS4",
-        "ps 4": "PS4",
-        "playstation 4": "PS4",
-        "play 4": "PS4",
-
-        "ps3": "PS3",
-        "playstation 3": "PS3",
-
-        "ps2": "PS2",
-        "playstation 2": "PS2",
-
-        "ps1": "PS1",
-        "psone": "PS1",
-        "playstation 1": "PS1",
-
-        "xbox one": "Xbox One",
-        "xone": "Xbox One",
-
-        "xbox 360": "Xbox 360",
-
-        "xbox": "Xbox Clasico",
-        "xbox clasico": "Xbox Clasico",
-        "xbox classic": "Xbox Clasico",
-
-        "switch": "Nintendo Switch",
-        "nintendo switch": "Nintendo Switch",
-
-        "n64": "Nintendo 64",
-        "nintendo64": "Nintendo 64",
-
-        "gamecube": "GameCube",
-
-        "gba": "GameBoy Advance",
-        "gameboy advance": "GameBoy Advance",
-
-        "gbc": "GameBoy Color",
-
-        "super nintendo": "SNES",
-        "snes": "SNES",
-
-        "nes": "NES",
-
-        "genesis": "Genesis",
-        "sega genesis": "Genesis"
-    }
-
-    if n in alias:
-        oficial = alias[n]
-        return oficial, normalizar(oficial)
-
-    # ==========================================
-    # 🧠 FUZZY MATCH (FALLBACK CONTROLADO)
-    # ==========================================
-    raw_title = raw.strip().title()
-
-    match = difflib.get_close_matches(
-        raw_title,
-        consolas_oficiales,
-        n=1,
-        cutoff=0.82  # 🔥 más estricto
-    )
-
-    if match:
-        return match[0], normalizar(match[0])
-
-    # ==========================================
-    # ⚠️ FALLBACK FINAL (NO CONFIABLE)
-    # ==========================================
-    return raw_title, n
+        paquete = {"vendedor_id": _sesion, "link_pago": datos.link_pago, "texto_entrega": datos.texto_entrega, "admin_phone": datos.admin_phone, "bot_activo": datos.bot_activo}
+        res_ex = supabase.table('configuracion_bot').select('vendedor_id').eq('vendedor_id', _sesion).execute()
+        if res_ex.data: supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', _sesion).execute()
+        else: supabase.table('configuracion_bot').insert(paquete).execute()
+        return {"status": "ok"}
+    except Exception as e: 
+        logger.exception("❌ Error guardar_config_bot")
+        raise HTTPException(status_code=500)
 
 # ==========================================
-# 🚀 ENDPOINT PRINCIPAL
+# 🚀 ENDPOINT DE IMPORTACIÓN MASIVA
 # ==========================================
 @router.post("/api/importar_inventario")
 async def api_importar_inventario(
@@ -1596,45 +1410,31 @@ async def api_importar_inventario(
 
     logger.info(f"🚀 IMPORT START | vendedor={_sesion} | items={len(lote)}")
 
-    # ==========================================
-    # 📚 CARGA CATÁLOGO MAESTRO (CACHE)
-    # ==========================================
     mapa_maestro = {}
-
     try:
-        res = supabase.table("catalogo_maestro") \
-            .select("nombre, consola, precio_sugerido") \
-            .execute()
-
+        res = supabase.table("catalogo_maestro").select("nombre, consola, precio_sugerido").execute()
         for i in (res.data or []):
             key = f"{normalizar(i['nombre'])}|{normalizar(i['consola'])}"
             mapa_maestro[key] = i["precio_sugerido"]
-
     except Exception as e:
-        logger.error(f"❌ maestro preload error: {e}")
+        logger.exception("❌ Error precargando catálogo maestro")
 
-    # ==========================================
-    # 🧠 PROCESAMIENTO EN MEMORIA (DEDUP)
-    # ==========================================
     dict_inv = {}
     dict_maestro = {}
 
     for item in lote:
         try:
             nombre_raw = str(item.get("nombre", "")).strip()
-            if not nombre_raw:
-                continue
+            if not nombre_raw: continue
 
             n_norm = normalizar(nombre_raw)
             n_disp = nombre_raw.title()
-
             c_disp, c_norm = normalizar_consola(item.get("consola", ""))
             e_disp = normalizar_estado(item.get("estado_general", ""))
             e_norm = normalizar(e_disp)
 
             sku = generar_sku(_sesion, n_norm, c_norm, e_norm)
 
-            # 🔁 FUSIÓN EN RAM
             if sku in dict_inv:
                 dict_inv[sku]["stock"] += safe_int(item.get("stock", 1), 1)
                 continue
@@ -1646,111 +1446,91 @@ async def api_importar_inventario(
                 precio = mapa_maestro.get(key_m, PRECIO_FALLBACK)
 
             obj = {
-                "vendedor_id": _sesion,
-                "sku_b2b": sku,
-                "nombre": n_disp,
-                "consola": c_disp,
-                "estado_general": e_disp,
-                "precio": precio,
-                "costo": safe_float(item.get("costo", 0)),
-                "stock": max(0, safe_int(item.get("stock", 1), 1)),
-                "rareza": str(item.get("rareza", "Comun")),
-                "codigo_barras": str(item.get("codigo_barras", "")),
-                "descripcion_detallada": str(item.get("detalles", ""))
+                "vendedor_id": _sesion, "sku_b2b": sku, "nombre": n_disp, "consola": c_disp,
+                "estado_general": e_disp, "precio": precio, "costo": safe_float(item.get("costo", 0)),
+                "stock": max(0, safe_int(item.get("stock", 1), 1)), "rareza": str(item.get("rareza", "Comun")),
+                "codigo_barras": str(item.get("codigo_barras", "")), "descripcion_detallada": str(item.get("detalles", ""))
             }
-
             dict_inv[sku] = obj
 
-            # 🌐 MAESTRO GLOBAL
             if key_m not in mapa_maestro:
                 dict_maestro[key_m] = {
-                    "nombre": n_disp,
-                    "consola": c_disp,
-                    "precio_sugerido": precio,
-                    "rareza": obj["rareza"]
+                    "nombre": n_disp, "consola": c_disp, "precio_sugerido": precio, "rareza": obj["rareza"]
                 }
-
         except Exception as e:
-            logger.warning(f"⚠️ item error: {e}")
             continue
 
-    # ==========================================
-    # 💾 UPSERT SEGURO POR BLOQUES
-    # ==========================================
     try:
         lista_inv = list(dict_inv.values())
         lista_maestro = list(dict_maestro.values())
-
         total_bg = 0
 
         for i in range(0, len(lista_inv), BATCH_SIZE):
             chunk = lista_inv[i:i + BATCH_SIZE]
+            res = supabase.table("inventario").upsert(chunk, on_conflict="sku_b2b").execute()
 
-            res = supabase.table("inventario") \
-                .upsert(chunk, on_conflict="sku_b2b") \
-                .execute()
-
-            # 🧵 BACKGROUND CONTROLADO
             if res.data:
                 for row in res.data:
-                    if total_bg >= MAX_BG_TASKS:
-                        break
-                    background_tasks.add_task(
-                        cazar_portada_y_guardar_background,
-                        str(row["id"]),
-                        row["nombre"],
-                        row["consola"]
-                    )
+                    if total_bg >= MAX_BG_TASKS: break
+                    background_tasks.add_task(cazar_portada_y_guardar_background, str(row["id"]), row["nombre"], row["consola"])
                     total_bg += 1
 
-        # 🌐 CATÁLOGO GLOBAL
         for i in range(0, len(lista_maestro), BATCH_SIZE):
             chunk = lista_maestro[i:i + BATCH_SIZE]
-            supabase.table("catalogo_maestro") \
-                .upsert(chunk, on_conflict="nombre,consola") \
-                .execute()
+            supabase.table("catalogo_maestro").upsert(chunk, on_conflict="nombre,consola").execute()
 
         duracion = round(time.time() - inicio, 2)
-
         logger.info(f"✅ IMPORT OK | items={len(lista_inv)} | time={duracion}s")
 
-        return {
-            "status": "ok",
-            "procesados": len(lista_inv),
-            "nuevos_maestro": len(lista_maestro),
-            "tiempo": f"{duracion}s"
-        }
+        return {"status": "ok", "procesados": len(lista_inv), "nuevos_maestro": len(lista_maestro), "tiempo": f"{duracion}s"}
 
     except Exception as e:
-        logger.error(f"❌ UPSERT ERROR: {e}")
-        return {"status": "error", "detalle": str(e)}
+        logger.exception("❌ UPSERT ERROR")
+        raise HTTPException(status_code=500, detail="Error interno durante el volcado de inventario")
 
-@app.get("/api/radar_b2b")
-def radar_b2b(q: str = ""):
+# ==========================================
+# 🌐 WEBHOOK META & RUNNER FINAL
+# ==========================================
+@app.get("/webhook")
+def verificar_webhook(request: Request):
+    if request.query_params.get("hub.verify_token") == WEBHOOK_SECRET:
+        return PlainTextResponse(content=request.query_params.get("hub.challenge"), status_code=200)
+    return PlainTextResponse(content="CRM B2B ACTIVO", status_code=200)
+
+@app.post("/webhook", dependencies=[Depends(validar_firma_meta)])
+async def recibir_mensaje_meta(request: Request, background_tasks: BackgroundTasks):
     try:
-        query = supabase.table('inventario').select('nombre, consola, precio, estado_general, rareza, vendedor_id').gt('stock', 0)
-        if q: query = query.ilike('nombre', f'%{q}%')
-        return {"status": "ok", "resultados": query.limit(50).execute().data}
-    except Exception: return {"status": "error", "detalle": "Falla en el Radar B2B"}
+        datos = await request.json()
+        if not isinstance(datos, dict) or "entry" not in datos or not datos["entry"]:
+            return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
-@app.get("/api/bot_config")
-def obtener_config_bot(_sesion: str = Depends(verificar_sesion_b2b)):
-    try:
-        res = supabase.table('configuracion_bot').select('*').eq('vendedor_id', _sesion).execute()
-        if res.data: return {"status": "ok", "datos": res.data[0]}
-        return {"status": "error", "detalle": "Configuración no encontrada"}
-    except Exception: return {"status": "error"}
+        cambios = datos["entry"][0].get("changes", [])
+        if not cambios: return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
-@app.post("/api/bot_config")
-def guardar_config_bot(datos: BotConfig, _sesion: str = Depends(verificar_sesion_b2b)):
-    try:
-        paquete = {"vendedor_id": _sesion, "link_pago": datos.link_pago, "texto_entrega": datos.texto_entrega, "admin_phone": datos.admin_phone, "bot_activo": datos.bot_activo}
-        res_ex = supabase.table('configuracion_bot').select('vendedor_id').eq('vendedor_id', _sesion).execute()
-        if res_ex.data: supabase.table('configuracion_bot').update(paquete).eq('vendedor_id', _sesion).execute()
-        else: supabase.table('configuracion_bot').insert(paquete).execute()
-        return {"status": "ok"}
-    except Exception: return {"status": "error"}
+        valor = cambios[0].get("value", {})
+        mensajes = valor.get("messages", [])
+        if not mensajes: return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
+        msg = mensajes[0]
+        msg_id = msg.get("id", "")
+
+        if msg_id in procesados_recientemente:
+            logger.info("⚡ Evento duplicado de Meta ignorado.")
+            return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+        procesados_recientemente.append(msg_id)
+        phone_id_receptor = valor.get("metadata", {}).get("phone_number_id", "")
+
+        background_tasks.add_task(gestionar_mensaje_entrante_bg, valor, msg, phone_id_receptor)
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    except Exception as e:
+        logger.exception("❌ ERROR CRÍTICO WEBHOOK")
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+# ==========================================
+# 🏁 ANCLAJE FINAL
+# ==========================================
 app.include_router(router)
 
 if __name__ == "__main__":
