@@ -955,6 +955,240 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         logger.exception("❌ ERROR FATAL en procesar_respuesta_bot")
 
 # ==========================================================
+# 🔐 AUTENTICACIÓN Y LOGIN B2B (FALTANTE RESTAURADO)
+# ==========================================================
+@app.post("/api/login")
+def login_b2b(datos: Credenciales):
+    try:
+        res = supabase.table('usuarios_veltrix').select('*').eq('email', datos.email.lower()).execute()
+        
+        if not res.data or len(res.data) == 0:
+            return {"status": "error", "detalle": "Usuario no registrado."}
+            
+        usuario = res.data[0]
+        hash_guardado = usuario['password'].encode('utf-8')
+        
+        password_valida = False
+        if hash_guardado.startswith(b'$2b$'):
+            password_valida = bcrypt.checkpw(datos.password.encode('utf-8'), hash_guardado)
+        else:
+            password_valida = (datos.password == usuario['password'])
+            
+        if not password_valida:
+            return {"status": "error", "detalle": "Contraseña incorrecta."}
+            
+        # Validación de Suscripción
+        fecha_pago_str = usuario.get('fecha_proximo_pago')
+        suscripcion_valida = True
+        
+        if fecha_pago_str:
+            try:
+                fecha_pago = date.fromisoformat(fecha_pago_str)
+                if date.today() > fecha_pago:
+                    suscripcion_valida = False
+                    supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id']).execute()
+            except ValueError:
+                pass # Formato de fecha inválido
+
+        token_jwt = crear_token_jwt(usuario['vendedor_id'], usuario['email'])
+
+        paquete_seguro = {
+            "vendedor_id": usuario['vendedor_id'],
+            "email": usuario['email'],
+            "estado": usuario.get('estado', 'Activo'),
+            "pais": usuario.get('pais', 'México'),
+            "suscripcion_activa": suscripcion_valida,
+            "token": token_jwt 
+        }
+        
+        return {"status": "ok", "datos": paquete_seguro}
+
+    except Exception as e:
+        logger.exception("❌ [LOGIN ERROR]")
+        raise HTTPException(status_code=500, detail="Error interno en servidor B2B.")
+
+# ==========================================================
+# 📈 MOTOR DE PRECIOS PRO (FALTANTE RESTAURADO)
+# ==========================================================
+@app.get("/api/consultar_precio")
+async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo"):
+    # 🛡️ Rate limit específico para consultas manuales
+    if vendedor_id != "ADMIN_VELTRIX":
+        tiempo_actual = now_ts()
+        llave_spam = f"precio_{vendedor_id}"
+        estado = registro_actividad_b2b.get(llave_spam, {"strikes": 0, "last": 0, "ban": 0})
+        
+        if tiempo_actual < estado["ban"]:
+            restante = int((estado["ban"] - tiempo_actual) / 60)
+            return {"status": "error", "detalle": f"🚫 BAN ACTIVO: Espera {restante} minutos.", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        if tiempo_actual - estado["last"] < 10:
+            estado["strikes"] += 1
+            estado["last"] = tiempo_actual
+            if estado["strikes"] >= 3:
+                estado["ban"] = tiempo_actual + (30 * 60) 
+                estado["strikes"] = 0
+                registro_actividad_b2b[llave_spam] = estado
+                return {"status": "error", "detalle": "🚫 BANEADO: Múltiples intentos rápidos.", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+            registro_actividad_b2b[llave_spam] = estado
+            return {"status": "error", "detalle": f"⚠️ Espera 10 segundos. (Strike {estado['strikes']}/3)", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        estado["strikes"] = 0
+        estado["last"] = tiempo_actual
+        registro_actividad_b2b[llave_spam] = estado
+
+    tipo_cambio = await obtener_dolar_hoy_async()
+    nombre_busqueda = nombre.lower().strip()
+    
+    # 🧠 Buscar en Caché Nube primero
+    try:
+        res_cache = supabase.table('cache_precios').select('*').eq('juego', nombre_busqueda).eq('consola', consola).execute()
+        if res_cache.data and len(res_cache.data) > 0:
+            datos_cache = res_cache.data[0]
+            fecha_str = datos_cache['created_at'].split('+')[0].split('.')[0] 
+            fecha_cache = datetime.fromisoformat(fecha_str)
+            
+            if (datetime.now() - fecha_cache).days < 30:
+                rareza_calc = calcular_rareza_ia(nombre, consola, round(datos_cache['cib'] * tipo_cambio, 2))
+                return {
+                    "status": "ok",
+                    "mxn": {"loose": round(datos_cache['loose'] * tipo_cambio, 2), "cib": round(datos_cache['cib'] * tipo_cambio, 2), "new": round(datos_cache['new'] * tipo_cambio, 2)},
+                    "usd": {"loose": datos_cache['loose'], "cib": datos_cache['cib'], "new": datos_cache['new']},
+                    "tipo_cambio": tipo_cambio,
+                    "url_pc": datos_cache['url_pc'],
+                    "rareza": rareza_calc
+                }
+    except Exception: 
+        pass
+
+    # 🕸️ Scraping en Vivo
+    slugs_pc = {
+        "PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3", "PS2": "playstation-2", "PS1": "playstation",
+        "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox",
+        "Nintendo Switch": "nintendo-switch", "Nintendo 3DS": "nintendo-3ds", "Nintendo DS": "nintendo-ds", "Nintendo 64": "nintendo-64",
+        "GameCube": "gamecube", "GameBoy Advance": "gameboy-advance", "GameBoy Color": "gameboy-color", "Wii": "wii", "Wii U": "wii-u", 
+        "SNES": "super-nintendo", "NES": "nes", "Genesis": "sega-genesis"
+    }
+    
+    consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
+    query = f"{nombre} {consola_web}".replace(" ", "+")
+    url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
+    
+    html_search = await obtener_html_escalonado_async(url_search)
+    if not html_search:
+        return {"status": "error", "detalle": "Error Radar de Precios", "url_pc": "https://www.pricecharting.com", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+        
+    soup = BeautifulSoup(html_search, 'html.parser')
+    link_juego = None
+    slug_esperado = slugs_pc.get(consola, consola_web.lower().replace(' ', '-'))
+    etiqueta_busqueda = f"/game/{slug_esperado}/"
+    palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
+    
+    tabla_resultados = soup.find(id="games_table")
+    nodos_a_buscar = tabla_resultados.find_all('a', href=True) if tabla_resultados else soup.find_all('a', href=True)
+    
+    for a in nodos_a_buscar:
+        href = a['href'].lower()
+        if '/game/' in href and not any(b in href for b in palabras_prohibidas):
+            if etiqueta_busqueda in href:
+                link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
+                break
+    
+    if not link_juego:
+        for a in nodos_a_buscar:
+            href = a['href'].lower()
+            if '/game/' in href and not any(b in href for b in palabras_prohibidas):
+                link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
+                break
+
+    if link_juego:
+        html_juego = await obtener_html_escalonado_async(link_juego)
+        if html_juego: soup = BeautifulSoup(html_juego, 'html.parser')
+
+    def extraer_numero_puro(id_css):
+        nodo = soup.find(id=id_css)
+        if nodo:
+            texto_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
+            try:
+                if texto_limpio: return float(texto_limpio)
+            except: pass
+        return 0.0
+
+    p_loose = extraer_numero_puro("used_price")
+    p_cib = extraer_numero_puro("cib_price")
+    p_new = extraer_numero_puro("new_price")
+
+    url_final_pc = link_juego if link_juego else url_search
+
+    if p_loose > 0 or p_cib > 0:
+        try:
+            datos_cache = {
+                "juego": nombre_busqueda,
+                "consola": consola,
+                "loose": p_loose, "cib": p_cib, "new": p_new,
+                "url_pc": url_final_pc,
+                "created_at": datetime.now().isoformat()
+            }
+            res_ex = supabase.table('cache_precios').select('id').eq('juego', nombre_busqueda).eq('consola', consola).execute()
+            if res_ex.data:
+                supabase.table('cache_precios').update(datos_cache).eq('id', res_ex.data[0]['id']).execute()
+            else:
+                supabase.table('cache_precios').insert(datos_cache).execute()
+        except Exception: pass
+
+    rareza_calc = calcular_rareza_ia(nombre, consola, round(p_cib * tipo_cambio, 2))
+    mxn_loose_real = round(p_loose * tipo_cambio, 2)
+    mxn_cib_real = round(p_cib * tipo_cambio, 2)
+    mxn_new_real = round(p_new * tipo_cambio, 2)
+
+    return {
+        "status": "ok",
+        "mxn_mercado": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": mxn_new_real},
+        "mxn_venta": {
+            "loose": calcular_precio_venta_inteligente(mxn_loose_real), 
+            "cib": calcular_precio_venta_inteligente(mxn_cib_real), 
+            "new": calcular_precio_venta_inteligente(mxn_new_real)
+        },
+        "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
+        "tipo_cambio": tipo_cambio,
+        "url_pc": url_final_pc,
+        "rareza": rareza_calc
+    }
+
+# ==========================================================
+# 🌐 RUTAS DE GESTIÓN CRM (CON EL FIX PARA CURAR A GODOT)
+# ==========================================================
+@app.get("/api/cargar_todo")
+def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        columnas_izq = ["Bandeja Nueva", "Envios Masivos", "Con Descuento", "Requiere Asistencia"]
+        columnas_der = ["Por Entregar", "Vendidos", "Papelera"]
+        res_cols = supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', _sesion).execute()
+        
+        columnas_custom = [r['nombre_columna'] for r in res_cols.data if r['nombre_columna'].upper() not in [c.upper() for c in (columnas_izq + columnas_der)] and r['nombre_columna'].upper() != "EN ATENCION"]
+        if not columnas_custom: columnas_custom = ["+"]
+                
+        columnas_finales = columnas_izq + columnas_custom + columnas_der
+        
+        # 🩹 FIX PARA GODOT: Traemos los datos pero usamos el filtro dict para que no colapse
+        # con la basura de la base de datos vieja.
+        res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('ultima_interaccion_ia', desc=True).limit(500).execute()
+        
+        # Filtro de Deduplicación en Memoria (Por si tienes historial viejo en Supabase)
+        ultimos = {}
+        for fila in res_prospectos.data:
+            # Godot no soporta que le mandes 20 tarjetas del mismo cliente
+            clave_unica = fila.get('telefono') or fila.get('nombre')
+            if clave_unica and clave_unica not in ultimos:
+                ultimos[clave_unica] = fila
+                
+        return {"columnas": columnas_finales, "prospectos": list(ultimos.values())}
+    except Exception as e:
+        logger.exception("❌ Error cargando CRM")
+        raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
+
+# ==========================================================
 # ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA)
 # ==========================================================
 async def gestionar_mensaje_entrante_bg(
