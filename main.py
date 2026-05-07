@@ -265,61 +265,7 @@ class BotConfig(BaseModel):
     admin_phone: str = Field(default="", max_length=40)
     bot_activo: bool = True
 
-# ==========================================================
-# 📦 MODELOS PYDANTIC PARA GESTIÓN (Con soporte de Teléfono)
-# ==========================================================
-class EstadoUpdate(BaseModel):
-    nombre: str
-    telefono: str = "" # Hacemos que lo acepte, venga o no
-    nueva_columna: str
 
-class ClienteIdentificador(BaseModel):
-    nombre: str
-    telefono: str = ""
-
-# ==========================================================
-# 🌐 RUTAS DE GESTIÓN CRM Y CHAT (Adiós Error 404)
-# ==========================================================
-@app.post("/api/actualizar_estado")
-def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
-    try:
-        # Actualizamos usando el teléfono si lo tenemos, si no, caemos al nombre
-        query = supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('vendedor_id', _sesion)
-        if datos.telefono and datos.telefono != "Sin registrar":
-            query = query.eq('telefono', datos.telefono)
-        else:
-            query = query.eq('nombre', datos.nombre)
-        
-        query.execute()
-        return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error actualizando tarjeta")
-
-@app.post("/api/historial_chat")
-def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
-    try:
-        query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', _sesion)
-        
-        if datos.telefono and datos.telefono != "Sin registrar":
-            query = query.eq('telefono', datos.telefono)
-        else:
-            # Si solo mandan nombre, buscamos el teléfono en prospectos primero
-            res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).limit(1).execute()
-            if res_tel.data and res_tel.data[0].get('telefono'):
-                query = query.eq('telefono', res_tel.data[0]['telefono'])
-            else:
-                return {"historial": [{"texto": "Sin historial previo o cliente sin teléfono.", "es_mio": False}]}
-                
-        res = query.order('created_at', desc=False).limit(50).execute()
-        
-        historial_formateado = []
-        for fila in res.data:
-            es_mio = (fila.get('autor', 'USER') != 'USER')
-            historial_formateado.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
-            
-        return {"historial": historial_formateado}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error cargando chat")
 
 # ==========================================
 # 🔐 AUTENTICACIÓN JWT
@@ -1814,6 +1760,62 @@ RESPONDE EXCLUSIVAMENTE JSON:
             "monto_detectado": 0.0,
             "analisis": "Error interno del sistema IA."
         }
+
+# ==========================================================
+# 📦 MODELOS PYDANTIC PARA GESTIÓN (Con soporte de Teléfono)
+# ==========================================================
+class EstadoUpdate(BaseModel):
+    nombre: str
+    telefono: str = "" # Hacemos que lo acepte, venga o no
+    nueva_columna: str
+
+class ClienteIdentificador(BaseModel):
+    nombre: str
+    telefono: str = ""
+
+# ==========================================================
+# 🌐 RUTAS DE GESTIÓN CRM Y CHAT (Adiós Error 404)
+# ==========================================================
+@app.post("/api/actualizar_estado")
+def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        # Actualizamos usando el teléfono si lo tenemos, si no, caemos al nombre
+        query = supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('vendedor_id', _sesion)
+        if datos.telefono and datos.telefono != "Sin registrar":
+            query = query.eq('telefono', datos.telefono)
+        else:
+            query = query.eq('nombre', datos.nombre)
+        
+        query.execute()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error actualizando tarjeta")
+
+@app.post("/api/historial_chat")
+def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', _sesion)
+        
+        if datos.telefono and datos.telefono != "Sin registrar":
+            query = query.eq('telefono', datos.telefono)
+        else:
+            # Si solo mandan nombre, buscamos el teléfono en prospectos primero
+            res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).limit(1).execute()
+            if res_tel.data and res_tel.data[0].get('telefono'):
+                query = query.eq('telefono', res_tel.data[0]['telefono'])
+            else:
+                return {"historial": [{"texto": "Sin historial previo o cliente sin teléfono.", "es_mio": False}]}
+                
+        res = query.order('created_at', desc=False).limit(50).execute()
+        
+        historial_formateado = []
+        for fila in res.data:
+            es_mio = (fila.get('autor', 'USER') != 'USER')
+            historial_formateado.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
+            
+        return {"historial": historial_formateado}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error cargando chat")
 
 # ==========================================================
 # 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
