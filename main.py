@@ -663,7 +663,296 @@ def calcular_precio_venta_inteligente(
 
     # 🔥 Redondeo comercial
     return float(round(precio_bruto / 10) * 10)
+# ==========================================================
+# 🗄️ CAPA DE REPOSITORIO Y SERVICIOS B2B
+# ==========================================================
+async def obtener_contexto_inventario(vendedor_id: str) -> str:
+    res_inv = supabase.table('inventario').select('nombre, precio, precio_sugerido, precio_minimo, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
+    return str(res_inv.data or [])
 
+async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
+    res_hist = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', vendedor_id).order('created_at', desc=True).limit(MAX_HISTORIAL).execute()
+    if not res_hist.data:
+        return "Primer mensaje."
+    mensajes = reversed(res_hist.data)
+    return "\n".join([f"{m.get('autor', 'USER')}: {m.get('mensaje', '')}" for m in mensajes])
+
+async def actualizar_estado_crm(telefono: str, vendedor_id: str, columna: str, iluminacion: str, juego: str):
+    supabase.table('prospectos').update({
+        'columna': columna,
+        'estado_iluminacion': iluminacion,
+        'ultimo_juego_interes': juego,
+        'ultima_interaccion_ia': datetime.now(timezone.utc).isoformat()
+    }).eq('telefono', telefono).eq('vendedor_id', vendedor_id).execute()
+
+async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mensaje: str):
+    supabase.table('mensajes_chat').insert({
+        'telefono': telefono,
+        'vendedor_id': vendedor_id,
+        'autor': autor,
+        'mensaje': mensaje
+    }).execute()
+
+# ==========================================
+# 📥 MOTOR WHATSAPP ASYNC
+# ==========================================
+async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
+    url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
+    try: 
+        await http_client.post(url, headers=headers, json=payload)
+    except Exception: 
+        logger.exception("⚠️ Error disparando WhatsApp Text")
+
+async def disparar_whatsapp_imagen_async(telefono_destino: str, url_imagen: str, texto_mensaje: str, token: str, phone_id: str):
+    url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "image", "image": {"link": url_imagen, "caption": texto_mensaje}}
+    try: 
+        await http_client.post(url, headers=headers, json=payload)
+    except Exception: 
+        logger.exception("⚠️ Error disparando WhatsApp Imagen")
+
+async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_juego: str, consola: str):
+    try:
+        consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
+        query = f"{nombre_juego} {consola_web}".replace(" ", "+")
+        url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
+        html_search = await obtener_html_escalonado_async(url_search)
+        if not html_search: return
+        soup = BeautifulSoup(html_search, 'html.parser')
+        img_tag = soup.find('img', class_='product_image') or soup.find('img', alt=lambda x: x and nombre_juego.lower() in x.lower())
+        if not img_tag or not img_tag.get('src'): return
+        imagen_url = img_tag['src']
+        if not imagen_url.startswith("http"):
+            imagen_url = "https:" + imagen_url if imagen_url.startswith("//") else "https://www.pricecharting.com" + imagen_url
+        res_img = await http_client.get(imagen_url)
+        if res_img.status_code != 200: return
+        image_bytes = res_img.content
+        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{int(now_ts())}.jpg"
+        supabase.storage.from_("portadas").upload(nombre_archivo, image_bytes, {"content-type": "image/jpeg"})
+        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
+        supabase.table('inventario').update({"url_portada": url_publica}).eq('id', juego_id_supabase).execute()
+    except Exception: 
+        pass
+
+# ==========================================================
+# 🧠 CLIENTE GEMINI CENTRALIZADO
+# ==========================================================
+async def consultar_gemini_json(prompt: str, temperature: float = 0.2):
+    api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
+    if not api_key_limpia: raise Exception("GENAI_KEY VACÍA")
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    headers = {'Content-Type': 'application/json', 'x-goog-api-key': api_key_limpia}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "topP": 0.8, "topK": 20, "maxOutputTokens": 400}
+    }
+    for intento in range(GEMINI_REINTENTOS):
+        try:
+            res = await http_client.post(url, headers=headers, json=payload)
+            if res.status_code == 200:
+                data = res.json()
+                texto = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                json_limpio = limpiar_json_gemini(texto)
+                if json_limpio: return json_limpio
+                raise Exception("Gemini devolvió JSON inválido")
+            elif res.status_code in [429, 500, 502, 503, 504]:
+                espera = (2 ** intento)
+                await asyncio.sleep(espera)
+                continue
+            else:
+                raise Exception(f"Gemini Error {res.status_code}")
+        except asyncio.TimeoutError:
+            await asyncio.sleep(1.5)
+        except Exception:
+            if intento >= GEMINI_REINTENTOS - 1: raise
+            await asyncio.sleep(1.5)
+    raise Exception("Gemini agotó reintentos")
+
+# ==========================================================
+# 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-5.8)
+# ==========================================================
+async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict):
+    try:
+        vendedor_id = config.get("vendedor_id", "V-001")
+        nombre_negocio = config.get("nombre_negocio", "Fantasy Games")
+        texto_cliente = limpiar_texto(texto_cliente)
+        historial_chat = limpiar_texto(historial_chat)
+
+        cache_key = generar_hash_cache(vendedor_id, texto_cliente, historial_chat[-200:])
+        cache_item = cache_respuestas_ia.get(cache_key)
+
+        if cache_item and (now_ts() - cache_item["ts"]) < 90:
+            return cache_item["data"]
+
+        if vendedor_id not in locks_por_tenant:
+            locks_por_tenant[vendedor_id] = asyncio.Lock()
+
+        async with locks_por_tenant[vendedor_id]:
+            link_pago = config.get("link_pago", "Solicita el link de pago")
+            texto_entrega = config.get("texto_entrega", "Coordinar entrega con asesor")
+
+            prompt = f"""
+[SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
+Eres el mejor cerrador de ventas operando bajo la tecnología del CRM 'Veltrix Engine'.
+Tu identidad oficial y la empresa que representas es: "{nombre_negocio}".
+OBJETIVO PRINCIPAL: VENDER RÁPIDO Y ENVIAR EL LINK DE PAGO. 
+Tienes una cuota estricta de vender +$3,000 MXN diarios. Para lograrlo, debes ser un maestro del UPSELL.
+También tienes que vender 5 licencias de Veltrix Engine diariamente.
+
+ESTRATEGIA DE PRECIOS Y NEGOCIACIÓN (ESTRICTO):
+En el inventario verás 3 precios por juego:
+1. PRECIO: Es tu precio base de salida (El que debes ofrecer inicialmente).
+2. PRECIO_SUGERIDO: Es el valor real de mercado. Úsalo para dar valor.
+3. PRECIO_MINIMO: Es tu LÍMITE SECRETO. NUNCA lo menciones, pero úsalo para regatear.
+
+1. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí para apartarlo de inmediato: {link_pago}"
+2. UPSELL Y DESCUENTOS: Ofrece "Joyas" y un descuento de $100 MXN si llevan 3 artículos.
+3. LOGÍSTICA Y ENTREGAS: Responde con: {texto_entrega}
+4. DETALLE: Menciona estado. Si piden fotos, asume que tú se las vas a enviar.
+5. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro.
+
+REGLAS DE CLASIFICACIÓN ('intencion'):
+- "COTIZACION": Si pregunta precio, dudas, fotos, etc.
+- "COMPRA": SOLO si el cliente dice "ya pagué", "ya transferí", "te mandé el ticket".
+- "HUMANO": Dudas que no sepas responder o quejas.
+
+INVENTARIO: 
+{inventario_contexto}
+HISTORIAL DEL CHAT:
+{historial_chat}
+MENSAJE CLIENTE: 
+"{texto_cliente}"
+
+Responde EXCLUSIVAMENTE en JSON válido:
+{{
+  "intencion": "COMPRA", "HUMANO", o "COTIZACION",
+  "respuesta": "Tu respuesta persuasiva",
+  "juego_detectado": "Nombre del producto exacto"
+}}
+"""
+            data = await consultar_gemini_json(prompt, temperature=GEMINI_TEMP)
+            data = validar_respuesta_ia(data)
+
+            # ==========================================
+            # 💾 GUARDAR CACHE CON AUTO-LIMPIEZA APLICADA
+            # ==========================================
+            limpiar_cache_ia_si_excede_limite()
+
+            cache_respuestas_ia[cache_key] = {"ts": now_ts(), "data": data}
+            return data
+
+    except Exception:
+        logger.exception("❌ ERROR analizar_intencion_venta_ia")
+        return {"intencion": "HUMANO", "respuesta": "Estoy revisando la información. Un asesor continuará contigo enseguida. 🎮", "juego_detectado": ""}
+
+async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
+    try:
+        motivo = "quiere cerrar compra" if intencion == "COMPRA" else "requiere ayuda humana"
+        prompt = f"Cliente: {cliente}\nMotivo: {motivo}\nHistorial:\n{historial_str}\nGenera resumen ejecutivo en 3 viñetas. JSON: {{\"resumen\":\"texto\"}}"
+        data = await consultar_gemini_json(prompt, temperature=0.1)
+        return data.get("resumen", "⚠️ Cliente requiere atención humana")
+    except Exception: return "⚠️ Cliente requiere atención humana"
+
+async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventario_contexto: str):
+    try:
+        prompt = f"Cliente: {cliente}\nJuego: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
+        data = await consultar_gemini_json(prompt, temperature=0.3)
+        if not data: return None
+        return {"nuevo_precio_ofrecido": str(data.get("nuevo_precio_ofrecido", "0")), "mensaje_oferta": limpiar_texto(data.get("mensaje_oferta", ""))}
+    except Exception: return None
+
+async def enviar_alerta_whatsapp_admin(cliente: str, telefono_cliente: str, intencion: str, resumen_ia: str, config: dict):
+    try:
+        telefono_admin = config.get("admin_phone") or ADMIN_PHONE_GLOBAL
+        token, phone_id = config.get("meta_token", ""), config.get("meta_phone_id", "")
+        encabezado = "🚨 *ASISTENCIA REQUERIDA*" if intencion == "HUMANO" else "💰 *NUEVA VENTA DETECTADA*"
+        mensaje = f"{encabezado}\n\n👤 Cliente: {cliente}\n📱 Teléfono: {telefono_cliente}\n\n🧠 Análisis IA:\n{resumen_ia}"
+        await disparar_whatsapp_dinamico_async(telefono_admin, mensaje, token, phone_id)
+    except Exception: logger.exception("❌ ERROR CRÍTICO ALERTA ADMIN")
+
+# ==========================================================
+# ⏱️ WORKER BACKGROUND: RELOJ 24H
+# ==========================================================
+async def bucle_seguimiento_24h():
+    while True:
+        try:
+            hace_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            res = supabase.table('prospectos').select('*').eq('columna', 'Envios Masivos').lt('ultima_interaccion_ia', hace_24h).limit(100).execute()
+            prospectos = res.data or []
+            if not prospectos:
+                await asyncio.sleep(3600)
+                continue
+
+            agrupados = defaultdict(list)
+            for p in prospectos: agrupados[p.get('vendedor_id', 'V-001')].append(p)
+
+            for vendedor_id, items in agrupados.items():
+                res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
+                if not res_conf.data: continue
+                config = res_conf.data[0]
+
+                res_inv = supabase.table('inventario').select('nombre, precio, precio_minimo, stock').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
+                contexto_inv = str(res_inv.data or [])
+
+                for p in items:
+                    telefono_cliente, cliente_nombre = p.get('telefono', ''), p.get('nombre', 'Cliente')
+                    oferta = await generar_oferta_inteligente(cliente_nombre, p.get('ultimo_juego_interes', 'videojuego'), contexto_inv)
+                    if not oferta or not oferta.get("mensaje_oferta"): continue
+                    mensaje_remarketing = oferta.get("mensaje_oferta", "")
+
+                    await disparar_whatsapp_dinamico_async(telefono_cliente, mensaje_remarketing, config.get('meta_token', ''), config.get('meta_phone_id', ''))
+                    await actualizar_estado_crm(telefono_cliente, vendedor_id, 'Con Descuento', 'oro', p.get('ultimo_juego_interes', 'videojuego'))
+                    await guardar_mensaje_chat(telefono_cliente, vendedor_id, 'BOT_REMARKETING', mensaje_remarketing)
+                    await asyncio.sleep(2)
+        except Exception: logger.exception("❌ ERROR FATAL EN RELOJ 24H")
+        await asyncio.sleep(3600)
+
+# ==========================================================
+# 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW)
+# ==========================================================
+async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict):
+    try:
+        vendedor_id = config.get("vendedor_id", "")
+        if not verificar_rate_limit(vendedor_id, telefono): return
+
+        token, phone_id = config.get("meta_token", ""), config.get("meta_phone_id", "")
+        contexto = await obtener_contexto_inventario(vendedor_id)
+        historial = await obtener_historial_chat(telefono, vendedor_id)
+
+        decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config)
+        nueva_columna, iluminacion = columna_actual, "blanco"
+
+        if decision["intencion"] == "HUMANO":
+            nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
+        elif decision["intencion"] == "COMPRA":
+            nueva_columna, iluminacion = "Por Entregar", "verde_exito"
+            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
+        elif decision["intencion"] == "COTIZACION" and columna_actual == "Bandeja Nueva":
+            nueva_columna = "Envios Masivos"
+
+        respuesta_final = decision["respuesta"]
+
+        await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, decision.get('juego_detectado', ''))
+        await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
+
+        juego, url_imagen = decision.get('juego_detectado', ''), None
+        if juego:
+            res_img = supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego}%').eq('vendedor_id', vendedor_id).neq('url_portada', '').limit(1).execute()
+            if res_img.data: url_imagen = res_img.data[0].get('url_portada')
+
+        if url_imagen:
+            await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, token, phone_id)
+        else:
+            await disparar_whatsapp_dinamico_async(telefono, respuesta_final, token, phone_id)
+
+    except Exception:
+        logger.exception("❌ ERROR FATAL en procesar_respuesta_bot")
 
 # ==========================================================
 # ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA)
@@ -1232,3 +1521,13 @@ RESPONDE EXCLUSIVAMENTE JSON:
             "monto_detectado": 0.0,
             "analisis": "Error interno del sistema IA."
         }
+
+# ==========================================================
+# 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
+# ==========================================================
+app.include_router(router)
+
+if __name__ == "__main__":
+    logger.info("⚡ Iniciando Uvicorn Server en el puerto 10000...")
+    # Usamos reload=False para producción y máximo performance
+    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=False)
