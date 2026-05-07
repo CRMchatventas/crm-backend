@@ -1357,15 +1357,15 @@ def normalizar_consola(raw: str):
         return "Otro (PC/Varios)", "otro"
 
 def normalizar_estado(raw: str):
-    try:
-        r = normalizar(raw)
-        if any(x in r for x in ["nuevo", "sellado"]): 
-            return "Nuevo/Sellado"
-        if any(x in r for x in ["loose", "suelto", "disco", "cartucho"]): 
-            return "Solo disco"
-        return "Completo"
-    except:
-        return "Completo"
+    r = normalizar(raw)
+    if any(x in r for x in ["nuevo", "sellado", "new", "sealed"]): 
+        return "Nuevo/Sellado"
+    if any(x in r for x in ["sin librito", "no manual", "sin manual", "incomplete"]): 
+        return "Sin librito"
+    if any(x in r for x in ["loose", "suelto", "disco", "cartucho", "solo"]): 
+        return "Solo disco"
+    # Si no es ninguna de las anteriores, es Completo (CIB)
+    return "Completo"
     # ==========================================
     # 🔧 NORMALIZACIÓN BASE
     # ==========================================
