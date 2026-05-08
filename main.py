@@ -894,42 +894,58 @@ async def enviar_alerta_whatsapp_admin(cliente: str, telefono_cliente: str, inte
         await disparar_whatsapp_dinamico_async(telefono_admin, mensaje, token, phone_id)
     except Exception: logger.exception("❌ ERROR CRÍTICO ALERTA ADMIN")
 
-# ==========================================================
-# ⏱️ WORKER BACKGROUND: RELOJ 24H
-# ==========================================================
 async def bucle_seguimiento_24h():
     while True:
         try:
             hace_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            res = supabase.table('prospectos').select('*').eq('columna', 'Envios Masivos').lt('ultima_interaccion_ia', hace_24h).limit(100).execute()
+            # 📉 FIX: Bajamos de 100 a 20 para no saturar a Gemini
+            res = supabase.table('prospectos').select('*').eq('columna', 'Envios Masivos').lt('ultima_interaccion_ia', hace_24h).limit(20).execute()
             prospectos = res.data or []
+            
             if not prospectos:
-                await asyncio.sleep(3600)
+                await asyncio.sleep(1800) # Si no hay nada, descansa 30 min
                 continue
 
-            agrupados = defaultdict(list)
-            for p in prospectos: agrupados[p.get('vendedor_id', 'V-001')].append(p)
-
-            for vendedor_id, items in agrupados.items():
+            for p in prospectos:
+                vendedor_id = p.get('vendedor_id', 'V-001')
+                
+                # 📡 1. Buscamos config y el token de respaldo
                 res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
                 if not res_conf.data: continue
                 config = res_conf.data[0]
 
-                res_inv = supabase.table('inventario').select('nombre, precio, precio_minimo, stock').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
-                contexto_inv = str(res_inv.data or [])
+                # 🔑 FIX B2B: Si el token de la DB falla, intentamos usar el de Render (Global)
+                tk_final = config.get('meta_token') or WHATSAPP_TOKEN
+                ph_final = config.get('meta_phone_id') or WHATSAPP_PHONE_ID
 
-                for p in items:
-                    telefono_cliente, cliente_nombre = p.get('telefono', ''), p.get('nombre', 'Cliente')
-                    oferta = await generar_oferta_inteligente(cliente_nombre, p.get('ultimo_juego_interes', 'videojuego'), contexto_inv)
-                    if not oferta or not oferta.get("mensaje_oferta"): continue
-                    mensaje_remarketing = oferta.get("mensaje_oferta", "")
+                # 🧠 2. Gemini con "Pausa Respiratoria"
+                try:
+                    res_inv = supabase.table('inventario').select('nombre, precio, precio_minimo, stock').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(10).execute()
+                    contexto_inv = str(res_inv.data or [])
 
-                    await disparar_whatsapp_dinamico_async(telefono_cliente, mensaje_remarketing, config.get('meta_token', ''), config.get('meta_phone_id', ''))
-                    await actualizar_estado_crm(telefono_cliente, vendedor_id, 'Con Descuento', 'oro', p.get('ultimo_juego_interes', 'videojuego'))
-                    await guardar_mensaje_chat(telefono_cliente, vendedor_id, 'BOT_REMARKETING', mensaje_remarketing)
-                    await asyncio.sleep(2)
-        except Exception: logger.exception("❌ ERROR FATAL EN RELOJ 24H")
-        await asyncio.sleep(3600)
+                    oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), p.get('ultimo_juego_interes', 'videojuego'), contexto_inv)
+                    
+                    if oferta and oferta.get("mensaje_oferta"):
+                        mensaje = oferta.get("mensaje_oferta")
+                        # 📤 Envío a WhatsApp
+                        await disparar_whatsapp_dinamico_async(p.get('telefono'), mensaje, tk_final, ph_final)
+                        await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', p.get('ultimo_juego_interes'))
+                        await guardar_mensaje_chat(p.get('telefono'), vendedor_id, 'BOT_REMARKETING', mensaje)
+                        
+                        # ⏳ Pausa obligatoria para no ser detectado como SPAM
+                        await asyncio.sleep(5) 
+
+                except Exception as e:
+                    if "429" in str(e):
+                        logger.warning("⚠️ [GEMINI] Límite alcanzado. Durmiendo 60 seg...")
+                        await asyncio.sleep(60) # Pausa de emergencia
+                    else:
+                        logger.error(f"❌ Error procesando prospecto {p.get('telefono')}: {e}")
+
+        except Exception:
+            logger.exception("❌ ERROR FATAL EN RELOJ 24H")
+        
+        await asyncio.sleep(600) # Revisión cada 10 minutos
 
 # ==========================================================
 # 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW)
