@@ -1246,8 +1246,9 @@ async def gestionar_mensaje_entrante_bg(
             return
 
         # ==========================================================
-        # 🔑 IDENTIFICAR TENANT
+        # 🔑 IDENTIFICAR TENANT (CON SALVAVIDAS GLOBAL)
         # ==========================================================
+        # 1. Intentamos buscar en la tabla configuracion_bot de Supabase
         res_config = (
             supabase
             .table('configuracion_bot')
@@ -1257,20 +1258,33 @@ async def gestionar_mensaje_entrante_bg(
             .execute()
         )
 
-        if not res_config.data:
-            logger.warning(f"⚠️ No existe configuración para phone_id={phone_id_receptor}")
-            return
+        if res_config.data:
+            # Si encuentra la configuración en Supabase, la usa (Multi-Tenant)
+            config_vendedor = res_config.data[0]
+            vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001")).strip()
+            
+            # Si meta_token está vacío en la DB, rescata el de Render
+            token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
+            nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games")).strip()
+        else:
+            # 2. SALVAVIDAS: Si Supabase está vacío, usamos Render directamente
+            logger.info(f"⚠️ Base de datos vacía para {phone_id_receptor}. Usando Entorno Render (V-001).")
+            
+            vendedor_actual = "V-001"
+            token_actual = WHATSAPP_TOKEN
+            nombre_negocio = "Fantasy Games"
+            
+            # Simulamos el diccionario config_vendedor para que el resto del código no falle
+            config_vendedor = {
+                "vendedor_id": vendedor_actual,
+                "meta_token": token_actual,
+                "meta_phone_id": WHATSAPP_PHONE_ID,
+                "nombre_negocio": nombre_negocio,
+                "bot_activo": True
+            }
 
-        config_vendedor = res_config.data[0]
-
-        vendedor_actual = str(config_vendedor.get("vendedor_id", "")).strip()
-        token_actual = str(config_vendedor.get("meta_token", "")).strip()
-        nombre_negocio = str(
-            config_vendedor.get("nombre_negocio", "Fantasy Games")
-        ).strip()
-
-        if not vendedor_actual:
-            logger.warning("⚠️ vendedor_id vacío")
+        if not token_actual:
+            logger.warning("❌ FATAL: Token de WhatsApp vacío en Supabase y en Render.")
             return
 
         # ==========================================================
