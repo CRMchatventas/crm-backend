@@ -763,19 +763,24 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
 # 🧠 CLIENTE GEMINI CENTRALIZADO
 # ==========================================================
 async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: int = 3) -> dict:
-    import google.generativeai as genai # ⬅️ Lo declaramos aquí para evitar el "not defined"
+    # 🛡️ Doble verificación de configuración
+    api_key = os.getenv("GENAI_KEY")
+    if not api_key:
+        raise Exception("Falta GENAI_KEY en las variables de entorno")
     
-    # Configuramos la llave que ya tienes en Render
-    genai.configure(api_key=os.getenv("GENAI_KEY")) 
+    genai.configure(api_key=api_key)
     
     for intento in range(retries):
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash') # O la versión que estés usando
-            response = await asyncio.to_thread(model.generate_content, prompt) # Versión segura para async
+            # Usamos gemini-1.5-flash (asegúrate de que el nombre sea correcto para la versión)
+            model = genai.GenerativeModel('gemini-1.5-flash') 
+            
+            # Ejecutamos en un hilo para no bloquear FastAPI
+            response = await asyncio.to_thread(model.generate_content, prompt)
             
             texto_crudo = response.text
             
-            # 🥷 FILTRO NINJA: Limpiamos basura de formato
+            # 🥷 Filtro Ninja para limpiar el JSON
             texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
             
             inicio = texto_limpio.find('{')
@@ -783,14 +788,15 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: 
             
             if inicio != -1 and fin != -1:
                 texto_limpio = texto_limpio[inicio:fin+1]
+                return json.loads(texto_limpio)
             
-            return json.loads(texto_limpio)
+            print(f"⚠️ [GEMINI] Intento {intento+1}: No se detectó estructura JSON.")
             
         except Exception as e:
-            print(f"⚠️ [GEMINI JSON] Fallo en intento {intento + 1}: {str(e)}")
+            print(f"⚠️ [GEMINI JSON] Error en intento {intento + 1}: {str(e)}")
             await asyncio.sleep(2)
             
-    raise Exception("Gemini devolvió JSON inválido tras múltiples intentos")
+    raise Exception("Gemini devolvió JSON inválido o agotó reintentos")
 
 # ==========================================================
 # 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-5.8)
