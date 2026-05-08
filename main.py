@@ -772,8 +772,8 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: 
     
     for intento in range(retries):
         try:
-            # Usamos gemini-1.5-flash (asegúrate de que el nombre sea correcto para la versión)
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            # Usamos gemini-2.5-flash (asegúrate de que el nombre sea correcto para la versión)
+            model = genai.GenerativeModel('gemini-2.5-flash') 
             
             # Ejecutamos en un hilo para no bloquear FastAPI
             response = await asyncio.to_thread(model.generate_content, prompt)
