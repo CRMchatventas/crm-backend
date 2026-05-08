@@ -74,15 +74,21 @@ HTTP_READ_TIMEOUT = 35.0
 HTTP_WRITE_TIMEOUT = 20.0
 HTTP_POOL_TIMEOUT = 10.0
 
-# --- 🔑 CREDENCIALES BASE ---
+# --- 🔑 CREDENCIALES BASE AAA ---
 GENAI_KEY = os.getenv("GENAI_KEY", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "").strip()
-WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "").strip()
+WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "").strip() # <- ESTE ES EL VERIFY_TOKEN
 ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598")
-JWT_SECRET = os.getenv("JWT_SECRET", "")
+JWT_SECRET = os.getenv("JWT_SECRET", "mi_secreto_por_defecto").strip()
 ALGORITHM = "HS256"
+PORT = int(os.getenv("PORT", 10000))
+META_API_VERSION = os.getenv("META_API_VERSION", "v18.0").strip()
+
+# --- 📞 CREDENCIALES WHATSAPP ---
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "").strip()
 
 # ==========================================================
 # 🤖 MÓDULO DE WEBHOOK: EL CEREBRO DEL BOT (Vendedor Humano)
@@ -1855,6 +1861,94 @@ def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
             status_code=500, 
             detail="Error interno al acceder a la tabla de inventario"
         )
+
+# ==========================================================
+# 🤖 MÓDULO DE WEBHOOK: EL CEREBRO DEL BOT (Vendedor Humano)
+# ==========================================================
+
+# --- 🟢 1. VERIFICACIÓN DEL WEBHOOK (GET) ---
+@app.get("/webhook")
+def verificar_webhook(request: Request):
+    """ Meta usa esta ruta para validar que tu servidor es real. """
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    # ✨ FIX: Usamos WEBHOOK_SECRET que viene de tu .env
+    if mode == "subscribe" and token == WEBHOOK_SECRET:
+        print("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
+        # Meta espera que devolvamos el challenge como un entero
+        try:
+            return int(challenge)
+        except:
+            return challenge
+    
+    print(f"❌ [WEBHOOK] Intento de validación fallido. Token recibido: {token}")
+    raise HTTPException(status_code=403, detail="Token de verificación inválido")
+
+# --- 📩 2. RECEPCIÓN DE MENSAJES (POST) ---
+@app.post("/webhook")
+async def recibir_mensajes(request: Request):
+    """ Aquí llegan todos los mensajes de WhatsApp en tiempo real. """
+    try:
+        body = await request.json()
+        
+        # 🛡️ Filtro de seguridad: Ignorar notificaciones que no sean mensajes (como 'delivered' o 'read')
+        if not body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages"):
+            return {"status": "ignored_update"}
+
+        print("\n--- 📥 [NUEVO MENSAJE RECIBIDO] ---")
+        
+        # 🔍 Extracción de datos maestros
+        value = body["entry"][0]["changes"][0]["value"]
+        contact = value.get("contacts", [{}])[0]
+        message = value.get("messages", [{}])[0]
+
+        telefono_cliente = message.get("from")
+        texto_recibido = message.get("text", {}).get("body", "")
+        nombre_cliente = contact.get("profile", {}).get("name", "Cliente Nuevo")
+
+        print(f"👤 Cliente: {nombre_cliente} ({telefono_cliente})")
+        print(f"💬 Dice: {texto_recibido}")
+
+        # --- 🧠 AQUÍ SE CONECTARÁ TU LÓGICA DE GEMINI Y SUPABASE ---
+        # Por ahora, una respuesta de cortesía para confirmar que funciona:
+        respuesta_ia = f"¡Hola {nombre_cliente}! Recibí tu mensaje: '{texto_recibido}'. En un momento te atiendo personalmente."
+        
+        _enviar_respuesta_whatsapp(telefono_cliente, respuesta_ia)
+
+        print(f"🤖 Bot respondió: {respuesta_ia}")
+        print("----------------------------------\n")
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        print(f"⚠️ [WEBHOOK ERROR] Fallo al procesar mensaje: {str(e)}")
+        return {"status": "error", "reason": str(e)}
+
+# --- 📤 3. FUNCIÓN AUXILIAR DE ENVÍO (VOZ DEL BOT) ---
+def _enviar_respuesta_whatsapp(telefono, texto):
+    """ Envía texto de vuelta al cliente usando la API de Graph de Meta. """
+    # ✨ FIX: Usamos META_API_VERSION y WHATSAPP_PHONE_ID para que conecte perfecto
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono,
+        "type": "text",
+        "text": {"body": texto}
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
+    
+    if response.status_code == 200:
+        print(f"🚀 [WHATSAPP] Mensaje enviado a {telefono}")
+    else:
+        print(f"❌ [WHATSAPP ERROR] Falló el envío. Status: {response.status_code} Resp: {response.text}")
 
 # ==========================================================
 # 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
