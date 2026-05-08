@@ -84,7 +84,7 @@ ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598")
 JWT_SECRET = os.getenv("JWT_SECRET", "mi_secreto_por_defecto").strip()
 ALGORITHM = "HS256"
 PORT = int(os.getenv("PORT", 10000))
-META_API_VERSION = os.getenv("META_API_VERSION", "v18.0").strip()
+META_API_VERSION = os.getenv("META_API_VERSION", "v21.0").strip()
 
 # --- 📞 CREDENCIALES WHATSAPP ---
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
