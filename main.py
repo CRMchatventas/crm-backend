@@ -21,6 +21,7 @@ import difflib
 import base64
 import io
 import csv
+import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -82,6 +83,15 @@ WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "").strip()
 ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598")
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 ALGORITHM = "HS256"
+
+# ==========================================================
+# 🤖 MÓDULO DE WEBHOOK: EL CEREBRO DEL BOT (Vendedor Humano)
+# ==========================================================
+
+# 🔑 CONFIGURACIÓN: Estos valores deben coincidir con tu panel de Meta Developers
+WHATSAPP_TOKEN = "TU_ACCESS_TOKEN_DE_META"
+VERIFY_TOKEN = "TU_TOKEN_DE_VERIFICACION_INVENTADO" # El que pusiste en 'Verify Token' en Meta
+PHONE_NUMBER_ID = "ID_DE_TELEFONO_DE_META"
 
 # ==========================================
 # 🛡️ VALIDACIONES CRÍTICAS DE ENTORNO
