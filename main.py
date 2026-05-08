@@ -1863,22 +1863,22 @@ def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
         )
 
 # ==========================================================
-# 📊 RUTAS DE GESTIÓN DE COLUMNAS B2B
+# 📊 RUTAS DE GESTIÓN DE COLUMNAS B2B (CORREGIDAS 422)
 # ==========================================================
 class ColumnaAction(BaseModel):
     nombre_columna: str
-    vendedor_id: str
+    # 🛡️ Ya no pedimos el vendedor_id aquí, lo sacamos del Token
 
 class RenombrarColumnaAction(BaseModel):
     viejo_nombre: str
     nuevo_nombre: str
-    vendedor_id: str
+    # 🛡️ Igual aquí
 
 @app.post("/api/crear_columna")
 def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('configuracion').insert({
-            'vendedor_id': _sesion,
+            'vendedor_id': _sesion, # Usamos el ID del Token B2B
             'nombre_columna': datos.nombre_columna
         }).execute()
         return {"status": "ok"}
@@ -1888,9 +1888,7 @@ def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_
 @app.post("/api/borrar_columna")
 def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Borra la columna de la configuración
         supabase.table('configuracion').delete().eq('vendedor_id', _sesion).eq('nombre_columna', datos.nombre_columna).execute()
-        # Mueve a los clientes de esa columna a la papelera o bandeja (opcional/depende de tu regla de negocio)
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error al borrar columna")
@@ -1899,7 +1897,6 @@ def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion
 def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         supabase.table('configuracion').update({'nombre_columna': datos.nuevo_nombre}).eq('vendedor_id', _sesion).eq('nombre_columna', datos.viejo_nombre).execute()
-        # Actualizar a los prospectos que estaban en la vieja
         supabase.table('prospectos').update({'columna': datos.nuevo_nombre}).eq('vendedor_id', _sesion).eq('columna', datos.viejo_nombre).execute()
         return {"status": "ok"}
     except Exception as e:
