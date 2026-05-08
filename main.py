@@ -763,22 +763,21 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
 # 🧠 CLIENTE GEMINI CENTRALIZADO
 # ==========================================================
 async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: int = 3) -> dict:
+    import google.generativeai as genai # ⬅️ Lo declaramos aquí para evitar el "not defined"
+    
+    # Configuramos la llave que ya tienes en Render
+    genai.configure(api_key=os.getenv("GENAI_KEY")) 
+    
     for intento in range(retries):
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=temperature,
-                )
-            )
+            model = genai.GenerativeModel('gemini-2.0-flash') # O la versión que estés usando
+            response = await asyncio.to_thread(model.generate_content, prompt) # Versión segura para async
             
             texto_crudo = response.text
             
-            # 🥷 FILTRO NINJA: Limpiamos la "basura" de formato que a veces pone Gemini
+            # 🥷 FILTRO NINJA: Limpiamos basura de formato
             texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
             
-            # Buscamos el primer '{' y el último '}' por si Gemini agregó texto antes o después
             inicio = texto_limpio.find('{')
             fin = texto_limpio.rfind('}')
             
@@ -788,7 +787,7 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: 
             return json.loads(texto_limpio)
             
         except Exception as e:
-            logger.warning(f"⚠️ [GEMINI JSON] Fallo en intento {intento + 1}: {str(e)}")
+            print(f"⚠️ [GEMINI JSON] Fallo en intento {intento + 1}: {str(e)}")
             await asyncio.sleep(2)
             
     raise Exception("Gemini devolvió JSON inválido tras múltiples intentos")
