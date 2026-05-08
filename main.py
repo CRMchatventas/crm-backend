@@ -1933,7 +1933,7 @@ def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(veri
         raise HTTPException(status_code=500, detail="Error al renombrar columna")
 
 # ==========================================================
-# 🤖 MÓDULO DE WEBHOOK: EL CEREBRO DEL BOT (Vendedor Humano)
+# 🤖 MÓDULO DE WEBHOOK: CONEXIÓN AL MOTOR IA VELTRIX
 # ==========================================================
 
 # --- 🟢 1. VERIFICACIÓN DEL WEBHOOK (GET) ---
@@ -1945,10 +1945,8 @@ def verificar_webhook(request: Request):
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
 
-    # ✨ FIX: Usamos WEBHOOK_SECRET que viene de tu .env
     if mode == "subscribe" and token == WEBHOOK_SECRET:
         print("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
-        # Meta espera que devolvamos el challenge como un entero
         try:
             return int(challenge)
         except:
@@ -1957,38 +1955,30 @@ def verificar_webhook(request: Request):
     print(f"❌ [WEBHOOK] Intento de validación fallido. Token recibido: {token}")
     raise HTTPException(status_code=403, detail="Token de verificación inválido")
 
-# --- 📩 2. RECEPCIÓN DE MENSAJES (POST) ---
+# --- 📩 2. RECEPCIÓN DE MENSAJES Y TRASPASO A IA (POST) ---
 @app.post("/webhook")
-async def recibir_mensajes(request: Request):
-    """ Aquí llegan todos los mensajes de WhatsApp en tiempo real. """
+async def recibir_mensajes(request: Request, background_tasks: BackgroundTasks):
+    """ Escucha los mensajes y los envía al Motor de IA en segundo plano """
     try:
         body = await request.json()
         
-        # 🛡️ Filtro de seguridad: Ignorar notificaciones que no sean mensajes (como 'delivered' o 'read')
+        # 🛡️ Filtro de seguridad: Ignorar notificaciones de "leído" o "entregado"
         if not body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages"):
             return {"status": "ignored_update"}
 
         print("\n--- 📥 [NUEVO MENSAJE RECIBIDO] ---")
         
-        # 🔍 Extracción de datos maestros
+        # 🔍 Extracción limpia de datos
         value = body["entry"][0]["changes"][0]["value"]
-        contact = value.get("contacts", [{}])[0]
         message = value.get("messages", [{}])[0]
-
-        telefono_cliente = message.get("from")
-        texto_recibido = message.get("text", {}).get("body", "")
-        nombre_cliente = contact.get("profile", {}).get("name", "Cliente Nuevo")
-
-        print(f"👤 Cliente: {nombre_cliente} ({telefono_cliente})")
-        print(f"💬 Dice: {texto_recibido}")
-
-        # --- 🧠 AQUÍ SE CONECTARÁ TU LÓGICA DE GEMINI Y SUPABASE ---
-        # Por ahora, una respuesta de cortesía para confirmar que funciona:
-        respuesta_ia = f"¡Hola {nombre_cliente}! Recibí tu mensaje: '{texto_recibido}'. En un momento te atiendo personalmente."
         
-        _enviar_respuesta_whatsapp(telefono_cliente, respuesta_ia)
+        # Obtenemos el ID del teléfono al que el cliente le escribió
+        phone_id_receptor = value.get("metadata", {}).get("phone_number_id", WHATSAPP_PHONE_ID)
 
-        print(f"🤖 Bot respondió: {respuesta_ia}")
+        # 🚀 CONEXIÓN AAA: Mandamos todo el paquete a tu función de IA
+        background_tasks.add_task(gestionar_mensaje_entrante_bg, value, message, phone_id_receptor)
+        
+        print("✅ [WEBHOOK] Mensaje transferido al Motor de IA Veltrix con éxito.")
         print("----------------------------------\n")
 
         return {"status": "ok"}
@@ -1996,29 +1986,6 @@ async def recibir_mensajes(request: Request):
     except Exception as e:
         print(f"⚠️ [WEBHOOK ERROR] Fallo al procesar mensaje: {str(e)}")
         return {"status": "error", "reason": str(e)}
-
-# --- 📤 3. FUNCIÓN AUXILIAR DE ENVÍO (VOZ DEL BOT) ---
-def _enviar_respuesta_whatsapp(telefono, texto):
-    """ Envía texto de vuelta al cliente usando la API de Graph de Meta. """
-    # ✨ FIX: Usamos META_API_VERSION y WHATSAPP_PHONE_ID para que conecte perfecto
-    url = f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": telefono,
-        "type": "text",
-        "text": {"body": texto}
-    }
-    
-    response = requests.post(url, json=payload, headers=headers)
-    
-    if response.status_code == 200:
-        print(f"🚀 [WHATSAPP] Mensaje enviado a {telefono}")
-    else:
-        print(f"❌ [WHATSAPP ERROR] Falló el envío. Status: {response.status_code} Resp: {response.text}")
 
 # ==========================================================
 # 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
