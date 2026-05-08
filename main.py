@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 from collections import defaultdict, deque
 import uvicorn
+import google.generativeai as genai
 
 # ==========================================
 # 📝 CONFIGURACIÓN DE LOGGING PROFESIONAL
