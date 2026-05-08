@@ -761,36 +761,36 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
 # ==========================================================
 # 🧠 CLIENTE GEMINI CENTRALIZADO
 # ==========================================================
-async def consultar_gemini_json(prompt: str, temperature: float = 0.2):
-    api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-    if not api_key_limpia: raise Exception("GENAI_KEY VACÍA")
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-    headers = {'Content-Type': 'application/json', 'x-goog-api-key': api_key_limpia}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": temperature, "topP": 0.8, "topK": 20, "maxOutputTokens": 400}
-    }
-    for intento in range(GEMINI_REINTENTOS):
+async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: int = 3) -> dict:
+    for intento in range(retries):
         try:
-            res = await http_client.post(url, headers=headers, json=payload)
-            if res.status_code == 200:
-                data = res.json()
-                texto = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                json_limpio = limpiar_json_gemini(texto)
-                if json_limpio: return json_limpio
-                raise Exception("Gemini devolvió JSON inválido")
-            elif res.status_code in [429, 500, 502, 503, 504]:
-                espera = (2 ** intento)
-                await asyncio.sleep(espera)
-                continue
-            else:
-                raise Exception(f"Gemini Error {res.status_code}")
-        except asyncio.TimeoutError:
-            await asyncio.sleep(1.5)
-        except Exception:
-            if intento >= GEMINI_REINTENTOS - 1: raise
-            await asyncio.sleep(1.5)
-    raise Exception("Gemini agotó reintentos")
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=temperature,
+                )
+            )
+            
+            texto_crudo = response.text
+            
+            # 🥷 FILTRO NINJA: Limpiamos la "basura" de formato que a veces pone Gemini
+            texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
+            
+            # Buscamos el primer '{' y el último '}' por si Gemini agregó texto antes o después
+            inicio = texto_limpio.find('{')
+            fin = texto_limpio.rfind('}')
+            
+            if inicio != -1 and fin != -1:
+                texto_limpio = texto_limpio[inicio:fin+1]
+            
+            return json.loads(texto_limpio)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ [GEMINI JSON] Fallo en intento {intento + 1}: {str(e)}")
+            await asyncio.sleep(2)
+            
+    raise Exception("Gemini devolvió JSON inválido tras múltiples intentos")
 
 # ==========================================================
 # 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-5.8)
