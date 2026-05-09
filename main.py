@@ -805,8 +805,7 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
             texto_crudo = response.text
             
             # 🥷 Filtro Ninja para limpiar el JSON
-            texto_limpio = texto_crudo.replace("```json", "").replace("
-```", "").strip()
+            texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
             
             inicio = texto_limpio.find('{')
             fin = texto_limpio.rfind('}')
