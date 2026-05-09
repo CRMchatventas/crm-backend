@@ -1716,7 +1716,7 @@ async def descargar_imagen_whatsapp_b64(
         return None, None
         
 # ==========================================================
-# 🔍 AUDITOR DE COMPROBANTES V13 (CON GEMINI 2.5 FLASH)
+# 🔍 AUDITOR DE COMPROBANTES V13 (AISLADO Y BLINDADO)
 # ==========================================================
 async def auditar_comprobante_ia(
     b64_img: str,
@@ -1724,6 +1724,15 @@ async def auditar_comprobante_ia(
     nombre_negocio: str,
     historial_chat: str
 ):
+    # 🛠️ HELPER LOCAL: Al estar adentro, es IMPOSIBLE que marque NameError
+    def safe_float_local(valor):
+        try:
+            if valor is None: return 0.0
+            limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
+            return float(limpio)
+        except (ValueError, TypeError):
+            return 0.0
+
     try:
         from datetime import datetime
         import json
@@ -1792,7 +1801,6 @@ RESPONDE EXCLUSIVAMENTE CON ESTE JSON (SIN MARKDOWN EXTRA):
             }
         }
 
-        # Asegúrate de tener http_client (httpx.AsyncClient) disponible globalmente
         res = await http_client.post(url, headers=headers, json=payload)
 
         # ==========================================================
@@ -1822,7 +1830,7 @@ RESPONDE EXCLUSIVAMENTE CON ESTE JSON (SIN MARKDOWN EXTRA):
         # ==========================================================
         return {
             "es_pago": bool(resultado.get("es_pago", False)),
-            "monto_detectado": safe_float(resultado.get("monto_detectado", 0)),
+            "monto_detectado": safe_float_local(resultado.get("monto_detectado", 0)),
             "analisis": str(resultado.get("analisis", "Sin análisis detallado."))
         }
 
