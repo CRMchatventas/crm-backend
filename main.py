@@ -760,9 +760,9 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
         pass
 
 # ==========================================================
-# 🧠 CLIENTE GEMINI CENTRALIZADO
+# 🧠 CLIENTE GEMINI CENTRALIZADO (V13 MULTIMODAL + BLINDADO)
 # ==========================================================
-async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: int = 3) -> dict:
+async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperature: float = 0.2, retries: int = 3) -> dict:
     # 🛡️ Doble verificación de configuración
     api_key = os.getenv("GENAI_KEY")
     if not api_key:
@@ -772,16 +772,32 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: 
     
     for intento in range(retries):
         try:
-            # Usamos gemini-2.5-flash (asegúrate de que el nombre sea correcto para la versión)
+            # 🚀 Usamos el motor 2.5-flash
             model = genai.GenerativeModel('gemini-2.5-flash') 
             
+            # 📦 Preparar contenido (Texto base + Imagen/Audio si existe)
+            contenido = [prompt]
+            if media_dict:
+                contenido.append({
+                    "mime_type": media_dict["mime_type"],
+                    "data": media_dict["data"]
+                })
+
+            # 🌡️ Configuración estricta (0.2 por defecto para CERO Alucinaciones)
+            config_ia = genai.types.GenerationConfig(temperature=temperature)
+            
             # Ejecutamos en un hilo para no bloquear FastAPI
-            response = await asyncio.to_thread(model.generate_content, prompt)
+            response = await asyncio.to_thread(
+                model.generate_content, 
+                contenido,
+                generation_config=config_ia
+            )
             
             texto_crudo = response.text
             
             # 🥷 Filtro Ninja para limpiar el JSON
-            texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
+            texto_limpio = texto_crudo.replace("```json", "").replace("
+```", "").strip()
             
             inicio = texto_limpio.find('{')
             fin = texto_limpio.rfind('}')
@@ -796,10 +812,15 @@ async def consultar_gemini_json(prompt: str, temperature: float = 0.7, retries: 
             print(f"⚠️ [GEMINI JSON] Error en intento {intento + 1}: {str(e)}")
             await asyncio.sleep(2)
             
-    raise Exception("Gemini devolvió JSON inválido o agotó reintentos")
+    # 🛟 Salvavidas: En lugar de crashear FastAPI, devolvemos un JSON de emergencia
+    print("❌ [FATAL] Gemini falló procesando el mensaje tras 3 intentos.")
+    return {
+        "respuesta_whatsapp": "Tuve un micro-corte en el sistema. ¿Me repites tu mensaje por favor?", 
+        "intencion": "error"
+    }
 
 # ==========================================================
-# 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-5.8)
+# 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-13.0)
 # ==========================================================
 async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict):
     try:
@@ -821,6 +842,7 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
             link_pago = config.get("link_pago", "Solicita el link de pago")
             texto_entrega = config.get("texto_entrega", "Coordinar entrega con asesor")
 
+            # 🧠 SUPER-PROMPT V13: Blindado contra alucinaciones y estructurado para B2B
             prompt = f"""
 [SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
 Eres el mejor cerrador de ventas operando bajo la tecnología del CRM 'Veltrix Engine'.
@@ -835,32 +857,40 @@ En el inventario verás 3 precios por juego:
 2. PRECIO_SUGERIDO: Es el valor real de mercado. Úsalo para dar valor.
 3. PRECIO_MINIMO: Es tu LÍMITE SECRETO. NUNCA lo menciones, pero úsalo para regatear.
 
-1. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí para apartarlo de inmediato: {link_pago}"
-2. UPSELL Y DESCUENTOS: Ofrece "Joyas" y un descuento de $100 MXN si llevan 3 artículos.
-3. LOGÍSTICA Y ENTREGAS: Responde con: {texto_entrega}
-4. DETALLE: Menciona estado. Si piden fotos, asume que tú se las vas a enviar.
-5. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro
+NUEVAS DIRECTRICES V13 (ESTRICTAS):
+1. CERO ALUCINACIONES: Solo vende o confirma disponibilidad si el juego está EXACTAMENTE en el INVENTARIO ACTUAL.
+2. FILTRO POR CONSOLA/GÉNERO: Si el cliente pide recomendaciones (ej. "tienes de peleas"), NO mandes todo el inventario. Sugiere solo un Top 5 y SIEMPRE pregunta: "¿Para qué consola lo buscas?".
+3. CATÁLOGO COMPLETO: Si el cliente quiere ver toda la lista de juegos, envíale este enlace: https://veltrixengine.pro/catalogo
+4. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí para apartarlo de inmediato: {link_pago}"
+5. UPSELL Y DESCUENTOS: Ofrece "Joyas" y un descuento de $100 MXN si llevan 3 artículos.
+6. LOGÍSTICA Y ENTREGAS: Responde con: {texto_entrega}
+7. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro
 
 REGLAS DE CLASIFICACIÓN ('intencion'):
-- "COTIZACION": Si pregunta precio, dudas, fotos, etc.
+- "COTIZACION": Si pregunta precio, dudas, fotos, busca recomendaciones o pide el catálogo.
 - "COMPRA": SOLO si el cliente dice "ya pagué", "ya transferí", "te mandé el ticket".
+- "PEDIDO_ESPECIAL": Si pide un juego que NO TENEMOS en el inventario. Dile que no lo tienes pero se lo consigues y pregunta la consola.
 - "HUMANO": Dudas que no sepas responder o quejas.
 
 INVENTARIO: 
 {inventario_contexto}
+
 HISTORIAL DEL CHAT:
 {historial_chat}
+
 MENSAJE CLIENTE: 
 "{texto_cliente}"
 
 Responde EXCLUSIVAMENTE en JSON válido:
 {{
-  "intencion": "COMPRA", "HUMANO", o "COTIZACION",
-  "respuesta": "Tu respuesta persuasiva",
-  "juego_detectado": "Nombre del producto exacto"
+  "intencion": "COMPRA", "HUMANO", "COTIZACION" o "PEDIDO_ESPECIAL",
+  "respuesta": "Tu respuesta persuasiva aquí",
+  "juego_detectado": "Nombre del producto exacto (si lo tenemos)",
+  "pedido_especial_juego": "Nombre del juego si NO lo tenemos (o vacío)",
+  "pedido_especial_consola": "Consola del juego si NO lo tenemos (o vacío)"
 }}
 """
-            data = await consultar_gemini_json(prompt, temperature=GEMINI_TEMP)
+            data = await consultar_gemini_json(prompt) # temperature=0.2 ya está por defecto en la función unificada
             data = validar_respuesta_ia(data)
 
             # ==========================================
@@ -877,16 +907,23 @@ Responde EXCLUSIVAMENTE en JSON válido:
 
 async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
     try:
-        motivo = "quiere cerrar compra" if intencion == "COMPRA" else "requiere ayuda humana"
+        # [MEGA-PARCHE V13] Entendiendo el Pedido Especial
+        if intencion == "COMPRA":
+            motivo = "quiere cerrar compra"
+        elif intencion == "PEDIDO_ESPECIAL":
+            motivo = "busca un juego que NO tenemos en stock (Pedido Especial)"
+        else:
+            motivo = "requiere ayuda humana"
+            
         prompt = f"Cliente: {cliente}\nMotivo: {motivo}\nHistorial:\n{historial_str}\nGenera resumen ejecutivo en 3 viñetas. JSON: {{\"resumen\":\"texto\"}}"
-        data = await consultar_gemini_json(prompt, temperature=0.1)
+        data = await consultar_gemini_json(prompt) # temperature baja heredada
         return data.get("resumen", "⚠️ Cliente requiere atención humana")
     except Exception: return "⚠️ Cliente requiere atención humana"
 
 async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventario_contexto: str):
     try:
         prompt = f"Cliente: {cliente}\nJuego: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
-        data = await consultar_gemini_json(prompt, temperature=0.3)
+        data = await consultar_gemini_json(prompt)
         if not data: return None
         return {"nuevo_precio_ofrecido": str(data.get("nuevo_precio_ofrecido", "0")), "mensaje_oferta": limpiar_texto(data.get("mensaje_oferta", ""))}
     except Exception: return None
@@ -895,7 +932,15 @@ async def enviar_alerta_whatsapp_admin(cliente: str, telefono_cliente: str, inte
     try:
         telefono_admin = config.get("admin_phone") or ADMIN_PHONE_GLOBAL
         token, phone_id = config.get("meta_token", ""), config.get("meta_phone_id", "")
-        encabezado = "🚨 *ASISTENCIA REQUERIDA*" if intencion == "HUMANO" else "💰 *NUEVA VENTA DETECTADA*"
+        
+        # [MEGA-PARCHE V13] Ruteo visual de alertas
+        if intencion == "COMPRA":
+            encabezado = "💰 *NUEVA VENTA DETECTADA*"
+        elif intencion == "PEDIDO_ESPECIAL":
+            encabezado = "⚠️ *NUEVO PEDIDO ESPECIAL*"
+        else:
+            encabezado = "🚨 *ASISTENCIA REQUERIDA*"
+            
         mensaje = f"{encabezado}\n\n👤 Cliente: {cliente}\n📱 Teléfono: {telefono_cliente}\n\n🧠 Análisis IA:\n{resumen_ia}"
         await disparar_whatsapp_dinamico_async(telefono_admin, mensaje, token, phone_id)
     except Exception: logger.exception("❌ ERROR CRÍTICO ALERTA ADMIN")
@@ -904,7 +949,6 @@ async def bucle_seguimiento_24h():
     while True:
         try:
             hace_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            # 📉 FIX: Bajamos de 100 a 20 para no saturar a Gemini
             res = supabase.table('prospectos').select('*').eq('columna', 'Envios Masivos').lt('ultima_interaccion_ia', hace_24h).limit(20).execute()
             prospectos = res.data or []
             
@@ -954,48 +998,95 @@ async def bucle_seguimiento_24h():
         await asyncio.sleep(600) # Revisión cada 10 minutos
 
 # ==========================================================
-# 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW)
+# 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW V13)
 # ==========================================================
 async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict):
     try:
         vendedor_id = config.get("vendedor_id", "")
-        if not verificar_rate_limit(vendedor_id, telefono): return
+        if not verificar_rate_limit(vendedor_id, telefono): 
+            logger.warning(f"⚠️ Rate limit excedido para {telefono}")
+            return
 
-        token, phone_id = config.get("meta_token", ""), config.get("meta_phone_id", "")
+        token = config.get("meta_token", "")
+        phone_id = config.get("meta_phone_id", "")
+        
+        # 1. Recopilar munición para la IA
         contexto = await obtener_contexto_inventario(vendedor_id)
         historial = await obtener_historial_chat(telefono, vendedor_id)
 
+        # 2. Consultar al Cerebro IA (Aquí vive tu Super-Prompt)
         decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config)
-        nueva_columna, iluminacion = columna_actual, "blanco"
+        
+        # Valores por defecto
+        nueva_columna = columna_actual
+        iluminacion = "blanco"
+        intencion_ia = str(decision.get("intencion", "CONSULTA")).upper()
+        respuesta_final = decision.get("respuesta", "Tuve un contratiempo, en un momento te atiendo.")
+        juego_detectado = decision.get("juego_detectado", "")
 
-        if decision["intencion"] == "HUMANO":
+        # ==========================================================
+        # 🚦 RUTEO DE INTENCIONES V13
+        # ==========================================================
+        if intencion_ia == "HUMANO":
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
-            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
-            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
-        elif decision["intencion"] == "COMPRA":
+            resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
+
+        elif intencion_ia == "COMPRA":
+            # [Ledger-Check]: Preparando el terreno para cuando se consolide la venta marque "VENDIDA" en Godot
             nueva_columna, iluminacion = "Por Entregar", "verde_exito"
-            resumen = await generar_resumen_handoff_ia(cliente, decision["intencion"], historial)
-            await enviar_alerta_whatsapp_admin(cliente, telefono, decision["intencion"], resumen, config)
-        elif decision["intencion"] == "COTIZACION" and columna_actual == "Bandeja Nueva":
+            resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
+            await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
+
+        elif intencion_ia == "COTIZACION" and columna_actual == "Bandeja Nueva":
             nueva_columna = "Envios Masivos"
+            
+        elif intencion_ia == "PEDIDO_ESPECIAL":
+            # 🚨 [MEGA-PARCHE V13] Alerta automática por juego sin stock
+            nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+            juego_buscado = decision.get("pedido_especial_juego", "Juego no especificado")
+            consola_buscada = decision.get("pedido_especial_consola", "Consola no especificada")
+            
+            resumen_alerta = f"🚨 *NUEVO PEDIDO ESPECIAL*\n👤 Cliente: {cliente}\n🎮 Busca: {juego_buscado}\n🕹️ Consola: {consola_buscada}\n¡Revisa tu proveedor!"
+            await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", resumen_alerta, config)
 
-        respuesta_final = decision["respuesta"]
-
-        await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, decision.get('juego_detectado', ''))
+        # ==========================================================
+        # 💾 ACTUALIZAR CRM Y CHAT
+        # ==========================================================
+        await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, juego_detectado)
         await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
-        juego, url_imagen = decision.get('juego_detectado', ''), None
-        if juego:
-            res_img = supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego}%').eq('vendedor_id', vendedor_id).neq('url_portada', '').limit(1).execute()
-            if res_img.data: url_imagen = res_img.data[0].get('url_portada')
+        # ==========================================================
+        # 🖼️ BÚSQUEDA DE PORTADA DE JUEGO
+        # ==========================================================
+        url_imagen = None
+        if juego_detectado:
+            try:
+                res_img = (
+                    supabase
+                    .table('inventario')
+                    .select('url_portada')
+                    .ilike('nombre', f'%{juego_detectado}%')
+                    .eq('vendedor_id', vendedor_id)
+                    .neq('url_portada', '')
+                    .limit(1)
+                    .execute()
+                )
+                if res_img.data: 
+                    url_imagen = res_img.data[0].get('url_portada')
+            except Exception as e:
+                logger.error(f"⚠️ Error buscando imagen en Supabase: {e}")
 
+        # ==========================================================
+        # 🚀 DISPARO FINAL DE WHATSAPP
+        # ==========================================================
         if url_imagen:
             await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, token, phone_id)
         else:
             await disparar_whatsapp_dinamico_async(telefono, respuesta_final, token, phone_id)
 
-    except Exception:
-        logger.exception("❌ ERROR FATAL en procesar_respuesta_bot")
+    except Exception as e:
+        logger.exception(f"❌ ERROR FATAL en procesar_respuesta_bot: {e}")
 
 # ==========================================================
 # 🔐 AUTENTICACIÓN Y LOGIN B2B (FALTANTE RESTAURADO)
@@ -1230,6 +1321,38 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
     except Exception as e:
         logger.exception("❌ Error cargando CRM")
         raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
+
+# --- 1. DESCARGA DE MEDIA DE META (FOTOS Y AUDIOS V13) ---
+async def descargar_media_whatsapp(media_id: str, token: str) -> dict:
+    """ 🌉 Puente Seguro: Descarga imágenes/audios desde los servidores de Meta """
+    url_info = f"https://graph.facebook.com/v18.0/{media_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            # 1. Pedir la URL temporal (con timeout para evitar cuellos de botella)
+            res_info = await client.get(url_info, headers=headers, timeout=10.0)
+            if res_info.status_code != 200: 
+                logger.error(f"❌ [META] Error obteniendo URL del archivo: {res_info.text}")
+                return None
+            
+            media_url = res_info.json().get("url")
+            
+            # 2. Descargar los bytes
+            res_media = await client.get(media_url, headers=headers, timeout=15.0)
+            if res_media.status_code != 200: 
+                logger.error("❌ [META] Error descargando los bytes del archivo")
+                return None
+            
+            mime_type = res_media.headers.get("content-type")
+            data_base64 = base64.b64encode(res_media.content).decode("utf-8")
+            
+            logger.info(f"✅ [META] Archivo descargado y empaquetado ({mime_type})")
+            return {"mime_type": mime_type, "data": data_base64}
+            
+    except Exception as e:
+        logger.exception(f"🚨 [FATAL] Colapso en descarga de Meta: {str(e)}")
+        return None
 
 # ==========================================================
 # ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA - V13)
