@@ -36,6 +36,15 @@ from collections import defaultdict, deque
 import uvicorn
 import google.generativeai as genai
 
+def safe_float(valor):
+    """Limpia la basura de los precios ($, MXN, comas) y devuelve un número"""
+    try:
+        if valor is None: return 0.0
+        limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
+        return float(limpio)
+    except (ValueError, TypeError):
+        return 0.0
+
 # ==========================================
 # 📝 CONFIGURACIÓN DE LOGGING PROFESIONAL
 # ==========================================
