@@ -1715,7 +1715,7 @@ async def descargar_imagen_whatsapp_b64(
         return None, None
         
 # ==========================================================
-# 🔍 AUDITOR DE COMPROBANTES V13 (AISLADO Y BLINDADO)
+# 🔍 AUDITOR DE COMPROBANTES V14 (EL DÓBERMAN - ANTI-FRAUDE)
 # ==========================================================
 async def auditar_comprobante_ia(
     b64_img: str,
@@ -1723,7 +1723,7 @@ async def auditar_comprobante_ia(
     nombre_negocio: str,
     historial_chat: str
 ):
-    # 🛠️ HELPER LOCAL: Al estar adentro, es IMPOSIBLE que marque NameError
+    # 🛠️ HELPER LOCAL (Blindado contra NameError)
     def safe_float_local(valor):
         try:
             if valor is None: return 0.0
@@ -1736,101 +1736,69 @@ async def auditar_comprobante_ia(
         from datetime import datetime
         import json
         
-        # ==========================================================
-        # 📅 FECHA ACTUAL (Referencia estricta)
-        # ==========================================================
+        # 📅 FECHA ACTUAL (Referencia para vigencia)
         fecha_hoy = datetime.now().strftime("%d de %B de %Y")
 
-        # ==========================================================
-        # 🧠 PROMPT AUDITOR ROTTWEILER (ANTI-FRAUDE)
-        # ==========================================================
+        # 🧠 PROMPT CON SENTIDO COMÚN Y RUGIDO
         prompt = f"""
-Eres el auditor financiero en jefe de '{nombre_negocio}'. Tu trabajo es detectar fraudes, imágenes falsas (como fotos de refrescos, vidrios, selfies) y validar comprobantes de transferencia reales.
+Eres el auditor financiero jefe de '{nombre_negocio}'. Tu misión es detectar estafas y pagos que no nos pertenecen.
 
-HISTORIAL DEL CHAT CON EL CLIENTE:
+HISTORIAL DEL CHAT:
 {historial_chat}
 
 HOY ES: {fecha_hoy}
 
-REGLAS DE VALIDACIÓN ESTRICTA (SI FALLA UNA, RECHAZA EL PAGO):
-1. NATURALEZA: La imagen DEBE ser una captura de pantalla o foto de un recibo bancario/transferencia. Si es un objeto (vaso, mesa, persona), pon "es_pago": false.
-2. FECHA: La fecha en el comprobante DEBE ser reciente (hoy {fecha_hoy} o máximo ayer). Fechas futuras o de meses anteriores son FRAUDE.
-3. CONCEPTO/MONTO: El pago debe tener sentido con los videojuegos discutidos en el historial. Extrae el monto EXACTO en números.
-4. ESTADO: Debe decir "Exitoso", "Completado" o similar. Si dice "Pendiente" o "Cancelado", recházalo.
+REGLAS DE RECHAZO RADICAL (Si ocurre UNA, "es_pago": false):
+1. NATURALEZA: La imagen debe ser un recibo bancario real. No aceptes fotos de objetos, personas o capturas borrosas.
+2. DESTINATARIO (CRÍTICO): Lee a quién se envió el dinero. Si el beneficiario es un "Colegio", "A.C.", "CFE", "Telmex", o cualquier entidad que indique una colegiatura o pago de servicios ajenos, RECHÁZALO. 
+3. VIGENCIA: La transferencia debe ser de hoy ({fecha_hoy}) o ayer. Si es de meses pasados, es fraude.
+4. COHERENCIA: Si el monto es muy alto (ej. $2,000) y en el chat solo se habló de un juego barato, sospecha y pide validación manual.
 
-RESPONDE EXCLUSIVAMENTE CON ESTE JSON (SIN MARKDOWN EXTRA):
+RESPONDE EXCLUSIVAMENTE EN JSON:
 {{
     "es_pago": true,
-    "monto_detectado": 1500.50,
-    "analisis": "Motivo detallado de aprobación o rechazo (ej. 'La imagen es un vaso, no un recibo' o 'Fecha inválida')."
+    "monto_detectado": 0.0,
+    "destinatario": "Nombre detectado",
+    "analisis": "Breve explicación del por qué se aprobó o rechazó (menciona si detectaste que es una colegiatura o servicio)."
 }}
 """
 
-        # ==========================================================
-        # 🔑 API KEY LIMPIA
-        # ==========================================================
+        # 🔑 LLAVE Y MOTOR (GEMINI 2.5 FLASH 🚀)
         api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        if not api_key_limpia:
-            raise Exception("GENAI_KEY vacía")
+        if not api_key_limpia: raise Exception("GENAI_KEY vacía")
 
-        # ==========================================================
-        # 🌐 REQUEST GEMINI (MOTOR 2.5-FLASH ACTIVADO 🚀)
-        # ==========================================================
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key_limpia
-        }
+        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key_limpia}
 
         payload = {
             "contents": [{
                 "parts": [
                     {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": b64_img
-                        }
-                    }
+                    {"inline_data": {"mime_type": mime_type, "data": b64_img}}
                 ]
             }],
-            "generationConfig": {
-                "temperature": 0.0 # Temperatura ZERO absoluta para precisión financiera
-            }
+            "generationConfig": {"temperature": 0.0} # Cero creatividad, pura lógica
         }
 
         res = await http_client.post(url, headers=headers, json=payload)
 
-        # ==========================================================
-        # ❌ ERROR HTTP
-        # ==========================================================
         if res.status_code != 200:
             raise Exception(f"Gemini HTTP {res.status_code}: {res.text}")
 
-        # ==========================================================
-        # 🧹 LIMPIEZA RESPUESTA (FILTRO NINJA)
-        # ==========================================================
+        # 🧹 FILTRO NINJA PARA JSON
         texto_sucio = res.json()['candidates'][0]['content']['parts'][0]['text']
-        
-        # Filtro infalible para extraer solo el bloque JSON
-        inicio = texto_sucio.find('{')
-        fin = texto_sucio.rfind('}')
+        inicio, fin = texto_sucio.find('{'), texto_sucio.rfind('}')
         
         if inicio != -1 and fin != -1:
-            texto_limpio = texto_sucio[inicio:fin+1]
+            resultado = json.loads(texto_sucio[inicio:fin+1])
         else:
-            raise Exception("Gemini no devolvió una estructura JSON válida.")
+            raise Exception("Estructura JSON no encontrada")
 
-        resultado = json.loads(texto_limpio)
-
-        # ==========================================================
-        # 🛡️ VALIDACIÓN FINAL Y RETORNO
-        # ==========================================================
+        # 🛡️ RETORNO AL SISTEMA B2B
         return {
             "es_pago": bool(resultado.get("es_pago", False)),
             "monto_detectado": safe_float_local(resultado.get("monto_detectado", 0)),
-            "analisis": str(resultado.get("analisis", "Sin análisis detallado."))
+            "analisis": str(resultado.get("analisis", "Análisis no disponible."))
         }
 
     except Exception as e:
