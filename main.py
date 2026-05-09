@@ -1232,7 +1232,7 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
 
 # ==========================================================
-# ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA)
+# ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA - V13)
 # ==========================================================
 async def gestionar_mensaje_entrante_bg(
     valor: dict,
@@ -1241,40 +1241,45 @@ async def gestionar_mensaje_entrante_bg(
 ):
     try:
         # ==========================================================
-        # 📥 VALIDACIONES BASE
+        # 📥 VALIDACIONES BASE (Filtro Anti-Basura)
         # ==========================================================
         if not isinstance(valor, dict):
-            logger.warning("⚠️ valor inválido en webhook")
+            logger.warning("⚠️ [RECHAZADO] 'valor' inválido en webhook")
             return
 
         if not isinstance(msg, dict):
-            logger.warning("⚠️ msg inválido en webhook")
+            logger.warning("⚠️ [RECHAZADO] 'msg' inválido en webhook")
             return
 
         # ==========================================================
         # 🔑 IDENTIFICAR TENANT (CON SALVAVIDAS GLOBAL)
         # ==========================================================
-        # 1. Intentamos buscar en la tabla configuracion_bot de Supabase
-        res_config = (
-            supabase
-            .table('configuracion_bot')
-            .select('*')
-            .eq('meta_phone_id', phone_id_receptor)
-            .limit(1)
-            .execute()
-        )
+        try:
+            # 1. Intentamos buscar en la tabla configuracion_bot de Supabase
+            res_config = (
+                supabase
+                .table('configuracion_bot')
+                .select('*')
+                .eq('meta_phone_id', phone_id_receptor)
+                .limit(1)
+                .execute()
+            )
+            data_config = res_config.data
+        except Exception as db_err:
+            logger.error(f"🚨 Error conectando a Supabase (Config): {db_err}")
+            data_config = [] # Forzamos el salvavidas si falla la DB
 
-        if res_config.data:
+        if data_config:
             # Si encuentra la configuración en Supabase, la usa (Multi-Tenant)
-            config_vendedor = res_config.data[0]
+            config_vendedor = data_config[0]
             vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001")).strip()
             
             # Si meta_token está vacío en la DB, rescata el de Render
             token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
             nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games")).strip()
         else:
-            # 2. SALVAVIDAS: Si Supabase está vacío, usamos Render directamente
-            logger.info(f"⚠️ Base de datos vacía para {phone_id_receptor}. Usando Entorno Render (V-001).")
+            # 2. SALVAVIDAS: Si Supabase está vacío o falla, usamos Render directamente
+            logger.info(f"⚠️ Base de datos vacía o caída para {phone_id_receptor}. Usando Entorno Render (V-001).")
             
             vendedor_actual = "V-001"
             token_actual = WHATSAPP_TOKEN
@@ -1290,116 +1295,101 @@ async def gestionar_mensaje_entrante_bg(
             }
 
         if not token_actual:
-            logger.warning("❌ FATAL: Token de WhatsApp vacío en Supabase y en Render.")
+            logger.error("❌ FATAL: Token de WhatsApp vacío en Supabase y en Render. Abortando.")
             return
 
         # ==========================================================
         # 🛑 BOT DESACTIVADO
         # ==========================================================
         if not config_vendedor.get("bot_activo", True):
-            logger.info(f"⛔ Bot desactivado para vendedor={vendedor_actual}")
+            logger.info(f"⛔ Bot desactivado para vendedor={vendedor_actual}. Ignorando mensaje.")
             return
 
         # ==========================================================
-        # 👤 DATOS DE CONTACTO
+        # 👤 EXTRACCIÓN DE DATOS DE CONTACTO
         # ==========================================================
         contact = valor.get("contacts", [{}])[0]
-
         nombre_cliente = (
             contact
             .get("profile", {})
             .get("name", "Cliente")
         ).strip()
-
         telefono_cliente = str(msg.get("from", "")).strip()
 
         # ==========================================================
-        # ☎️ NORMALIZACIÓN TELÉFONO MX
+        # ☎️ NORMALIZACIÓN TELÉFONO MX (Evita duplicados)
         # ==========================================================
         if telefono_cliente.startswith("521"):
             telefono_cliente = "52" + telefono_cliente[3:]
 
         if not telefono_cliente:
-            logger.warning("⚠️ Mensaje sin teléfono")
+            logger.warning("⚠️ Mensaje recibido sin número de teléfono. Abortando.")
             return
 
         # ==========================================================
-        # 🧠 DETECTAR TIPO MENSAJE
+        # 🧠 DETECTAR TIPO MENSAJE (PREPARACIÓN MULTIMODAL V13)
         # ==========================================================
         tipo_mensaje = str(msg.get("type", "text")).lower()
-
         texto_entrante = ""
 
         if tipo_mensaje == "text":
-            texto_entrante = (
-                msg
-                .get("text", {})
-                .get("body", "")
-                .strip()
-            )
+            texto_entrante = msg.get("text", {}).get("body", "").strip()
 
         elif tipo_mensaje == "image":
-            texto_entrante = "📷 [IMAGEN RECIBIDA: Posible comprobante de pago]"
+            texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago con Gemini...]"
+            
+        elif tipo_mensaje == "audio":
+            # [MEGA-PARCHE V13] Preparando el terreno para notas de voz
+            texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA: Pendiente de transcripción/análisis]"
 
         elif tipo_mensaje == "interactive":
-            texto_entrante = (
-                msg
-                .get("interactive", {})
-                .get("button_reply", {})
-                .get("title", "")
-                .strip()
-            )
+            texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
 
         else:
-            texto_entrante = f"[{tipo_mensaje.upper()}] recibido."
+            texto_entrante = f"[{tipo_mensaje.upper()}] no soportado por el momento."
 
         if not texto_entrante:
-            logger.warning("⚠️ Mensaje vacío")
+            logger.warning(f"⚠️ Mensaje {tipo_mensaje} vacío o indescifrable.")
             return
 
         # ==========================================================
-        # 🔍 VALIDAR EXISTENCIA EN CRM
+        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase)
         # ==========================================================
-        res_prospecto = (
-            supabase
-            .table('prospectos')
-            .select('nombre, columna')
-            .eq('telefono', telefono_cliente)
-            .eq('vendedor_id', vendedor_actual)
-            .limit(1)
-            .execute()
-        )
-
-        columna_actual = "Bandeja Nueva"
-
-        if res_prospecto.data:
-            prospecto = res_prospecto.data[0]
-
-            nombre_cliente = prospecto.get("nombre", nombre_cliente)
-            columna_actual = prospecto.get(
-                "columna",
-                "Bandeja Nueva"
+        try:
+            res_prospecto = (
+                supabase
+                .table('prospectos')
+                .select('nombre, columna')
+                .eq('telefono', telefono_cliente)
+                .eq('vendedor_id', vendedor_actual)
+                .limit(1)
+                .execute()
             )
+            
+            columna_actual = "Bandeja Nueva"
 
-        else:
-            # ==========================================================
-            # ➕ CREAR PROSPECTO NUEVO
-            # ==========================================================
-            supabase.table('prospectos').insert({
-                "nombre": nombre_cliente,
-                "telefono": telefono_cliente,
-                "origen": "WHATSAPP",
-                "columna": "Bandeja Nueva",
-                "vendedor_id": vendedor_actual,
-                "estado_iluminacion": "blanco"
-            }).execute()
-
-            logger.info(
-                f"🆕 Prospecto creado: {telefono_cliente}"
-            )
+            if res_prospecto.data:
+                prospecto = res_prospecto.data[0]
+                nombre_cliente = prospecto.get("nombre", nombre_cliente)
+                columna_actual = prospecto.get("columna", "Bandeja Nueva")
+            else:
+                # ➕ CREAR PROSPECTO NUEVO
+                supabase.table('prospectos').insert({
+                    "nombre": nombre_cliente,
+                    "telefono": telefono_cliente,
+                    "origen": "WHATSAPP",
+                    "columna": "Bandeja Nueva",
+                    "vendedor_id": vendedor_actual,
+                    "estado_iluminacion": "blanco"
+                }).execute()
+                logger.info(f"🆕 Prospecto creado en CRM: {telefono_cliente}")
+                
+        except Exception as db_crm_err:
+            logger.error(f"🚨 Error en CRM Supabase (Lectura/Escritura): {db_crm_err}")
+            columna_actual = "Bandeja Nueva" # Fallback para que el bot siga respondiendo
 
         # ==========================================================
-        # 💾 GUARDAR MENSAJE EN CHAT
+        # 💾 GUARDAR MENSAJE EN CHAT (Historial)
         # ==========================================================
         await guardar_mensaje_chat(
             telefono_cliente,
@@ -1409,15 +1399,12 @@ async def gestionar_mensaje_entrante_bg(
         )
 
         # ==========================================================
-        # 🚦 RUTEO DE PROCESAMIENTO
+        # 🚦 RUTEO DE PROCESAMIENTO (Cerebro IA)
         # ==========================================================
-        if (
-            tipo_mensaje == "text"
-            and columna_actual != "En Conversacion"
-        ):
-            # ==========================================================
-            # 🤖 IA TEXTO
-            # ==========================================================
+        # 🟢 RUTA 1: TEXTO (Y preparativo para audios transcritos)
+        if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
+            # -> Aquí procesar_respuesta_bot debe aplicar el "Cero Alucinaciones"
+            # -> y disparar la "Alerta de Administrador" si no hay stock
             await procesar_respuesta_bot(
                 nombre_cliente,
                 telefono_cliente,
@@ -1426,44 +1413,24 @@ async def gestionar_mensaje_entrante_bg(
                 config_vendedor
             )
 
+        # 🔵 RUTA 2: IMÁGENES (Comprobantes)
         elif tipo_mensaje == "image":
-
-            # ==========================================================
-            # 🖼️ VALIDAR IMAGE ID
-            # ==========================================================
-            image_id = (
-                msg
-                .get("image", {})
-                .get("id", "")
-            ).strip()
+            image_id = msg.get("image", {}).get("id", "").strip()
 
             if not image_id:
-                logger.warning("⚠️ Imagen sin ID")
+                logger.warning("⚠️ Imagen recibida pero sin ID de Meta.")
                 return
 
-            # ==========================================================
-            # 📜 OBTENER HISTORIAL
-            # ==========================================================
-            historial_para_auditor = await obtener_historial_chat(
-                telefono_cliente,
-                vendedor_actual
-            )
+            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
 
-            # ==========================================================
-            # ⬇️ DESCARGAR IMAGEN
-            # ==========================================================
-            b64_img, mime_type = await descargar_imagen_whatsapp_b64(
-                image_id,
-                token_actual
-            )
+            # ⬇️ DESCARGAR IMAGEN DESDE META
+            b64_img, mime_type = await descargar_imagen_whatsapp_b64(image_id, token_actual)
 
             if not b64_img:
-                logger.warning("⚠️ No se pudo descargar imagen")
+                logger.warning("⚠️ Falla al descargar la imagen de los servidores de Meta.")
                 return
 
-            # ==========================================================
-            # 🤖 AUDITORÍA IA
-            # ==========================================================
+            # 🤖 AUDITORÍA IA CON GEMINI MULTIMODAL
             auditoria = await auditar_comprobante_ia(
                 b64_img,
                 mime_type,
@@ -1472,92 +1439,46 @@ async def gestionar_mensaje_entrante_bg(
             )
 
             es_pago = auditoria.get("es_pago", False)
-            monto = safe_float(
-                auditoria.get("monto_detectado", 0)
-            )
+            monto = float(auditoria.get("monto_detectado", 0.0)) # safe_float integrado
 
-            # ==========================================================
             # ✅ PAGO APROBADO
-            # ==========================================================
             if es_pago:
-
                 await actualizar_estado_crm(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "Por Entregar",
-                    "verde_exito",
-                    ""
+                    telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", ""
                 )
 
                 msg_exito = (
                     f"✅ ¡Pago validado por ${monto:.2f} MXN!\n"
-                    f"Hemos recibido correctamente tu comprobante."
+                    f"Hemos recibido correctamente tu comprobante. Procesando tu entrega..."
                 )
 
                 await disparar_whatsapp_dinamico_async(
-                    telefono_cliente,
-                    msg_exito,
-                    token_actual,
-                    phone_id_receptor
+                    telefono_cliente, msg_exito, token_actual, phone_id_receptor
                 )
+                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
+                logger.info(f"💰 PAGO EXITOSO | {telefono_cliente} | ${monto}")
 
-                await guardar_mensaje_chat(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "BOT",
-                    msg_exito
-                )
-
-                logger.info(
-                    f"✅ Pago validado | {telefono_cliente} | ${monto}"
-                )
-
-            # ==========================================================
             # ❌ PAGO RECHAZADO
-            # ==========================================================
             else:
-
-                razon = auditoria.get(
-                    "analisis",
-                    "No se reconoce como comprobante."
-                )
-
+                razon = auditoria.get("analisis", "No se reconoce como comprobante válido.")
                 msg_fallo = (
                     "🤖 Mi sistema no pudo validar la imagen.\n\n"
-                    f"Detalle:\n{razon}\n\n"
-                    "Por favor envía una foto clara del ticket o comprobante."
+                    f"Detalle: {razon}\n\n"
+                    "Por favor envía una foto clara del ticket o comprobante de transferencia."
                 )
 
                 await actualizar_estado_crm(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "Requiere Asistencia",
-                    "verde_alerta",
-                    ""
+                    telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", ""
                 )
 
                 await disparar_whatsapp_dinamico_async(
-                    telefono_cliente,
-                    msg_fallo,
-                    token_actual,
-                    phone_id_receptor
+                    telefono_cliente, msg_fallo, token_actual, phone_id_receptor
                 )
-
-                await guardar_mensaje_chat(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "BOT",
-                    msg_fallo
-                )
-
-                logger.warning(
-                    f"⚠️ Pago rechazado | {telefono_cliente}"
-                )
+                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
+                logger.warning(f"⚠️ PAGO RECHAZADO | {telefono_cliente} | Razón: {razon}")
 
     except Exception as e:
-        logger.exception(
-            f"❌ [BACKGROUND TASK ERROR] {str(e)}"
-        )
+        logger.exception(f"❌ [FATAL BACKGROUND TASK ERROR] Colapso en el Worker: {str(e)}")
 
 
 # ==========================================================
