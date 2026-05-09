@@ -2052,6 +2052,13 @@ async def recibir_mensajes(request: Request, background_tasks: BackgroundTasks):
 app.include_router(router)
 
 if __name__ == "__main__":
-    logger.info("⚡ Iniciando Uvicorn Server en el puerto 10000...")
-    # Usamos reload=False para producción y máximo performance
-    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=False)
+    import uvicorn
+    import os
+    
+    # 🔓 Leemos el puerto dinámico de Render
+    puerto_render = int(os.environ.get("PORT", 10000))
+    
+    logger.info(f"⚡ Iniciando Uvicorn Server en el puerto {puerto_render}...")
+    
+    # Usamos el puerto dinámico en lugar de 10000
+    uvicorn.run("main:app", host="0.0.0.0", port=puerto_render, reload=False)
