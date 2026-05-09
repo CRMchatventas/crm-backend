@@ -1714,8 +1714,10 @@ async def descargar_imagen_whatsapp_b64(
             f"❌ Error descargando imagen WhatsApp: {str(e)}"
         )
         return None, None
-
-
+        
+# ==========================================================
+# 🔍 AUDITOR DE COMPROBANTES V13 (CON GEMINI 2.5 FLASH)
+# ==========================================================
 async def auditar_comprobante_ia(
     b64_img: str,
     mime_type: str,
