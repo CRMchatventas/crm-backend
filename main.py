@@ -839,7 +839,7 @@ En el inventario verás 3 precios por juego:
 2. UPSELL Y DESCUENTOS: Ofrece "Joyas" y un descuento de $100 MXN si llevan 3 artículos.
 3. LOGÍSTICA Y ENTREGAS: Responde con: {texto_entrega}
 4. DETALLE: Menciona estado. Si piden fotos, asume que tú se las vas a enviar.
-5. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro.
+5. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro
 
 REGLAS DE CLASIFICACIÓN ('intencion'):
 - "COTIZACION": Si pregunta precio, dudas, fotos, etc.
