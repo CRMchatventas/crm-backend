@@ -1723,62 +1723,50 @@ async def auditar_comprobante_ia(
     historial_chat: str
 ):
     try:
+        from datetime import datetime
+        import json
+        
         # ==========================================================
-        # 📅 FECHA ACTUAL
+        # 📅 FECHA ACTUAL (Referencia estricta)
         # ==========================================================
-        fecha_hoy = datetime.now().strftime(
-            "%d de %B de %Y"
-        )
+        fecha_hoy = datetime.now().strftime("%d de %B de %Y")
 
         # ==========================================================
-        # 🧠 PROMPT AUDITOR
+        # 🧠 PROMPT AUDITOR ROTTWEILER (ANTI-FRAUDE)
         # ==========================================================
         prompt = f"""
-Eres auditor financiero automatizado de '{nombre_negocio}'.
+Eres el auditor financiero en jefe de '{nombre_negocio}'. Tu trabajo es detectar fraudes, imágenes falsas (como fotos de refrescos, vidrios, selfies) y validar comprobantes de transferencia reales.
 
-Analiza la imagen enviada y determina si es un comprobante
-de pago válido relacionado con videojuegos.
-
-HISTORIAL DEL CHAT:
+HISTORIAL DEL CHAT CON EL CLIENTE:
 {historial_chat}
 
-REGLAS:
-1. FECHA válida y reciente.
-2. MONTO coherente con conversación.
-3. CONCEPTO relacionado con videojuegos.
-4. Rechazar pagos ambiguos o sospechosos.
+HOY ES: {fecha_hoy}
 
-Hoy es:
-{fecha_hoy}
+REGLAS DE VALIDACIÓN ESTRICTA (SI FALLA UNA, RECHAZA EL PAGO):
+1. NATURALEZA: La imagen DEBE ser una captura de pantalla o foto de un recibo bancario/transferencia. Si es un objeto (vaso, mesa, persona), pon "es_pago": false.
+2. FECHA: La fecha en el comprobante DEBE ser reciente (hoy {fecha_hoy} o máximo ayer). Fechas futuras o de meses anteriores son FRAUDE.
+3. CONCEPTO/MONTO: El pago debe tener sentido con los videojuegos discutidos en el historial. Extrae el monto EXACTO en números.
+4. ESTADO: Debe decir "Exitoso", "Completado" o similar. Si dice "Pendiente" o "Cancelado", recházalo.
 
-RESPONDE EXCLUSIVAMENTE JSON:
-
+RESPONDE EXCLUSIVAMENTE CON ESTE JSON (SIN MARKDOWN EXTRA):
 {{
     "es_pago": true,
-    "monto_detectado": 0.0,
-    "analisis": "texto"
+    "monto_detectado": 1500.50,
+    "analisis": "Motivo detallado de aprobación o rechazo (ej. 'La imagen es un vaso, no un recibo' o 'Fecha inválida')."
 }}
 """
 
         # ==========================================================
         # 🔑 API KEY LIMPIA
         # ==========================================================
-        api_key_limpia = (
-            GENAI_KEY.strip()
-            if GENAI_KEY
-            else ""
-        )
-
+        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
         if not api_key_limpia:
             raise Exception("GENAI_KEY vacía")
 
         # ==========================================================
-        # 🌐 REQUEST GEMINI
+        # 🌐 REQUEST GEMINI (MOTOR 2.5-FLASH ACTIVADO 🚀)
         # ==========================================================
-        url = (
-            "https://generativelanguage.googleapis.com/"
-            "v1beta/models/gemini-2.5-flash:generateContent"
-        )
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
         headers = {
             "Content-Type": "application/json",
@@ -1798,72 +1786,50 @@ RESPONDE EXCLUSIVAMENTE JSON:
                 ]
             }],
             "generationConfig": {
-                "temperature": 0.1
+                "temperature": 0.0 # Temperatura ZERO absoluta para precisión financiera
             }
         }
 
-        res = await http_client.post(
-            url,
-            headers=headers,
-            json=payload
-        )
+        # Asegúrate de tener http_client (httpx.AsyncClient) disponible globalmente
+        res = await http_client.post(url, headers=headers, json=payload)
 
         # ==========================================================
         # ❌ ERROR HTTP
         # ==========================================================
         if res.status_code != 200:
-            raise Exception(
-                f"Gemini HTTP {res.status_code}"
-            )
+            raise Exception(f"Gemini HTTP {res.status_code}: {res.text}")
 
         # ==========================================================
-        # 🧹 LIMPIEZA RESPUESTA
+        # 🧹 LIMPIEZA RESPUESTA (FILTRO NINJA)
         # ==========================================================
-        texto_sucio = (
-            res.json()
-            ['candidates'][0]
-            ['content']['parts'][0]
-            ['text']
-        )
-
-        simbolo = chr(96) * 3
-
-        texto_limpio = (
-            texto_sucio
-            .replace(simbolo + "json", "")
-            .replace(simbolo, "")
-            .strip()
-        )
+        texto_sucio = res.json()['candidates'][0]['content']['parts'][0]['text']
+        
+        # Filtro infalible para extraer solo el bloque JSON
+        inicio = texto_sucio.find('{')
+        fin = texto_sucio.rfind('}')
+        
+        if inicio != -1 and fin != -1:
+            texto_limpio = texto_sucio[inicio:fin+1]
+        else:
+            raise Exception("Gemini no devolvió una estructura JSON válida.")
 
         resultado = json.loads(texto_limpio)
 
         # ==========================================================
-        # 🛡️ VALIDACIÓN FINAL
+        # 🛡️ VALIDACIÓN FINAL Y RETORNO
         # ==========================================================
         return {
-            "es_pago": bool(
-                resultado.get("es_pago", False)
-            ),
-            "monto_detectado": safe_float(
-                resultado.get("monto_detectado", 0)
-            ),
-            "analisis": str(
-                resultado.get(
-                    "analisis",
-                    "Sin análisis."
-                )
-            )
+            "es_pago": bool(resultado.get("es_pago", False)),
+            "monto_detectado": safe_float(resultado.get("monto_detectado", 0)),
+            "analisis": str(resultado.get("analisis", "Sin análisis detallado."))
         }
 
     except Exception as e:
-        logger.exception(
-            f"❌ ERROR auditar_comprobante_ia: {str(e)}"
-        )
-
+        logger.exception(f"❌ ERROR auditar_comprobante_ia: {str(e)}")
         return {
             "es_pago": False,
             "monto_detectado": 0.0,
-            "analisis": "Error interno del sistema IA."
+            "analisis": "Error interno del sistema IA al auditar."
         }
 
 # ==========================================================
