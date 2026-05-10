@@ -1,5 +1,5 @@
 # ==========================================================
-# 🚀 SISTEMA BACKEND: VELTRIX ENGINE V10.1 (HARDENED)
+# 🚀 SISTEMA BACKEND: VELTRIX ENGINE V15.0 (HARDENED)
 # Multi-Tenant • Anti-Abuso • Anti-429 • Escalable • Seguro
 # ==========================================================
 
@@ -36,6 +36,27 @@ from collections import defaultdict, deque
 import uvicorn
 import google.generativeai as genai
 
+load_dotenv()
+
+app = FastAPI(title="Veltrix Engine API", version="15.0")
+
+# ==========================================================
+# 🛡️ REGLAS DE SEGURIDAD (AUDITORÍA AAA)
+# ==========================================================
+# 1. JWT Estricto (Sin fallbacks inseguros)
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("❌ FATAL: JWT_SECRET no configurada en las variables de entorno de Render.")
+
+# 2. CORS Seguro
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Abierto temporalmente para Godot Mobile
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 def safe_float(valor):
     """Limpia la basura de los precios ($, MXN, comas) y devuelve un número"""
     try:
@@ -53,9 +74,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
 logger = logging.getLogger("VeltrixEngine")
-load_dotenv()
 
 # ==========================================================
 # 🔧 CONFIG GLOBAL & LÍMITES OPERATIVOS
@@ -84,30 +103,22 @@ HTTP_READ_TIMEOUT = 35.0
 HTTP_WRITE_TIMEOUT = 20.0
 HTTP_POOL_TIMEOUT = 10.0
 
-# --- 🔑 CREDENCIALES BASE AAA ---
+# ==========================================================
+# 🔑 CREDENCIALES BASE AAA (CARGADAS ESTRICTAMENTE DEL ENTORNO)
+# ==========================================================
 GENAI_KEY = os.getenv("GENAI_KEY", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "").strip()
-WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "").strip() # <- ESTE ES EL VERIFY_TOKEN
-ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598")
-JWT_SECRET = os.getenv("JWT_SECRET", "mi_secreto_por_defecto").strip()
+VERIFY_TOKEN = os.getenv("META_WEBHOOK_SECRET", "").strip() # Token de verificación Meta
+ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598").strip()
 ALGORITHM = "HS256"
 PORT = int(os.getenv("PORT", 10000))
 META_API_VERSION = os.getenv("META_API_VERSION", "v21.0").strip()
 
-# --- 📞 CREDENCIALES WHATSAPP ---
+# --- 📞 CREDENCIALES WHATSAPP (SALVAVIDAS GLOBAL) ---
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "").strip()
-
-# ==========================================================
-# 🤖 MÓDULO DE WEBHOOK: EL CEREBRO DEL BOT (Vendedor Humano)
-# ==========================================================
-
-# 🔑 CONFIGURACIÓN: Estos valores deben coincidir con tu panel de Meta Developers
-WHATSAPP_TOKEN = "TU_ACCESS_TOKEN_DE_META"
-VERIFY_TOKEN = "TU_TOKEN_DE_VERIFICACION_INVENTADO" # El que pusiste en 'Verify Token' en Meta
-PHONE_NUMBER_ID = "ID_DE_TELEFONO_DE_META"
 
 # ==========================================
 # 🛡️ VALIDACIONES CRÍTICAS DE ENTORNO
