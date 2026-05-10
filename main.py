@@ -307,6 +307,14 @@ class LoginUpdate(BaseModel):
     email: str
     password: str
 
+# --- MOLDES EXCLUSIVOS PARA MOBILE HUB ---
+class MobileMessageRequest(BaseModel):
+    to: str = Field(..., min_length=1, max_length=40)
+    msg: str = Field(..., min_length=1, max_length=2000)
+
+class MobileChatRequest(BaseModel):
+    telefono: str = Field(..., min_length=1, max_length=40)
+
 
 
 # ==========================================
@@ -1111,6 +1119,70 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 
     except Exception as e:
         logger.exception(f"❌ ERROR FATAL en procesar_respuesta_bot: {e}")
+
+# ==========================================================
+# 📱 HUB DE INTERACCIÓN MÓVIL: LECTURA Y ENVÍO REAL
+# ==========================================================
+
+@app.get("/api/mobile/chat_history")
+async def get_mobile_chat_history(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """El celular llama aquí para ver los mensajes de un cliente específico"""
+    try:
+        # Consultamos el historial real que ya usa tu bot y tu PC
+        res = (
+            supabase.table("historial_chat")
+            .select("*")
+            .eq("prospecto_id", telefono)
+            .eq("vendedor_id", vendedor_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        
+        # Formateamos para que Godot Mobile lo entienda fácil
+        historial_formateado = []
+        for m in res.data:
+            # Si el autor es 'BOT' o 'ASESOR'/'HUMANO', el celular lo marca como "Mío"
+            es_mio = m.get("autor") in ["BOT", "ASESOR", "HUMANO", "BOT_REMARKETING"]
+            historial_formateado.append({
+                "contenido": m.get("contenido", ""),
+                "es_mio": es_mio,
+                "fecha": m.get("created_at")
+            })
+            
+        return {"status": "ok", "historial": historial_formateado}
+        
+    except Exception as e:
+        logger.error(f"❌ Error en chat_history móvil: {e}")
+        raise HTTPException(status_code=500, detail="Error al obtener historial")
+
+@app.post("/api/mobile/send_message")
+async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """El celular llama aquí cuando tú escribes y das clic en 'Enviar'"""
+    try:
+        # 1. Obtenemos las credenciales de Meta de este vendedor
+        res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
+        if not res_conf.data:
+            raise HTTPException(status_code=404, detail="Configuración de WhatsApp no encontrada")
+        
+        config = res_conf.data[0]
+        tk_final = config.get('meta_token') or WHATSAPP_TOKEN
+        ph_final = config.get('meta_phone_id') or WHATSAPP_PHONE_ID
+
+        # 2. Disparamos el WhatsApp real usando TU motor existente
+        await disparar_whatsapp_dinamico_async(data.to, data.msg, tk_final, ph_final)
+
+        # 3. Guardamos en el historial para que aparezca en la PC y en el celular
+        # Usamos tu función existente 'guardar_mensaje_chat'
+        await guardar_mensaje_chat(data.to, vendedor_id, 'ASESOR', data.msg)
+        
+        # 4. Actualizamos el estado del CRM para saber que ya respondiste
+        await actualizar_estado_crm(data.to, vendedor_id, "En Seguimiento", "azul", "")
+
+        return {"status": "ok", "message": "Mensaje enviado y registrado"}
+
+    except Exception as e:
+        logger.error(f"❌ Error enviando desde móvil: {e}")
+        raise HTTPException(status_code=500, detail="Error al enviar mensaje de WhatsApp")
 
 # ==========================================================
 # 🔐 AUTENTICACIÓN Y LOGIN B2B (FALTANTE RESTAURADO)
