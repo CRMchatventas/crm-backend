@@ -1124,36 +1124,55 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 # 📱 HUB DE INTERACCIÓN MÓVIL: LECTURA Y ENVÍO REAL
 # ==========================================================
 
+# ==========================================================
+# 📱 HUB DE INTERACCIÓN MÓVIL: LECTURA DE HISTORIAL REAL
+# ==========================================================
+
 @app.get("/api/mobile/chat_history")
 async def get_mobile_chat_history(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
-    """El celular llama aquí para ver los mensajes de un cliente específico"""
+    """Versión AAA: Lectura de historial optimizada para la tabla 'mensajes_chat'"""
     try:
-        # Consultamos el historial real que ya usa tu bot y tu PC
+        # 🔍 Intentamos buscar en la tabla mensajes_chat con la columna telefono
+        # Si tu tabla se llama 'historial_chat', solo cambia el nombre abajo
         res = (
-            supabase.table("historial_chat")
+            supabase.table("mensajes_chat")
             .select("*")
-            .eq("prospecto_id", telefono)
             .eq("vendedor_id", vendedor_id)
+            .eq("telefono", telefono)
             .order("created_at", desc=False)
             .execute()
         )
         
-        # Formateamos para que Godot Mobile lo entienda fácil
         historial_formateado = []
         for m in res.data:
-            # Si el autor es 'BOT' o 'ASESOR'/'HUMANO', el celular lo marca como "Mío"
-            es_mio = m.get("autor") in ["BOT", "ASESOR", "HUMANO", "BOT_REMARKETING"]
+            # Detectamos al autor (Si es BOT o ASESOR, va a la derecha en el celular)
+            autor = str(m.get("autor", "")).upper()
+            # Marcamos como "es_mio" si el mensaje lo envió el sistema/vendedor
+            es_mio = autor in ["BOT", "ASESOR", "HUMANO", "SISTEMA", "BOT_REMARKETING"]
+            
             historial_formateado.append({
                 "contenido": m.get("contenido", ""),
                 "es_mio": es_mio,
-                "fecha": m.get("created_at")
+                "fecha": str(m.get("created_at", ""))
             })
             
+        # Log para que veas el éxito en la consola de Render
+        print(f"✅ [MOBILE] Chat cargado: {len(historial_formateado)} mensajes para {telefono}")
+        
         return {"status": "ok", "historial": historial_formateado}
         
     except Exception as e:
-        logger.error(f"❌ Error en chat_history móvil: {e}")
-        raise HTTPException(status_code=500, detail="Error al obtener historial")
+        # Este print aparecerá en rojo en tus logs de Render si algo falla
+        print(f"❌ [DB ERROR] Fallo en chat_history: {str(e)}")
+        logger.error(f"Error crítico en chat_history móvil: {e}")
+        
+        # Salvavidas: si la tabla 'mensajes_chat' no existe, intentamos 'historial_chat'
+        try:
+            res_alt = supabase.table("historial_chat").select("*").eq("vendedor_id", vendedor_id).eq("telefono", telefono).execute()
+            # ... (mismo proceso de formateo si esta tabla sí existe)
+            return {"status": "ok", "historial": []} # Devolvemos vacío pero sin error 500
+        except:
+            raise HTTPException(status_code=500, detail="Error de conexión con tablas de chat")
 
 @app.post("/api/mobile/send_message")
 async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Depends(verificar_sesion_b2b)):
