@@ -302,6 +302,10 @@ class BotConfig(BaseModel):
     texto_entrega: str = Field(default="", max_length=2000)
     admin_phone: str = Field(default="", max_length=40)
     bot_activo: bool = True
+    
+class LoginUpdate(BaseModel):
+    email: str
+    password: str
 
 
 
