@@ -1113,6 +1113,33 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         logger.exception(f"❌ ERROR FATAL en procesar_respuesta_bot: {e}")
 
 # ==========================================================
+# 📱 ENDPOINT LIGERO PARA EL DASHBOARD MÓVIL
+# ==========================================================
+@app.get("/api/mobile/dashboard")
+async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """Punto de entrada ultra ligero para la App Móvil (Solo 50 prospectos)"""
+    try:
+        # Solo traemos los campos vitales
+        prospectos_res = (
+            supabase.table("prospectos")
+            .select("nombre, telefono, columna, ultima_interaccion_ia")
+            .eq("vendedor_id", vendedor_id)
+            .order("ultima_interaccion_ia", desc=True)
+            .limit(50)
+            .execute()
+        )
+        
+        return {
+            "status": "ok",
+            "vendedor": vendedor_id,
+            "prospectos": prospectos_res.data if prospectos_res.data else []
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en mobile_dashboard: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al cargar dashboard móvil")
+
+# ==========================================================
 # 🔐 AUTENTICACIÓN Y LOGIN B2B (FALTANTE RESTAURADO)
 # ==========================================================
 @app.post("/api/login")
