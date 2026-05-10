@@ -1341,6 +1341,65 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         logger.exception("❌ Error cargando CRM")
         raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
 
+# ==========================================================
+# 📱 ENDPOINTS EXCLUSIVOS PARA VELTRIX MOBILE
+# ==========================================================
+
+@app.get("/api/mobile/dashboard")
+async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """Punto de entrada ultra ligero para la App Móvil (Solo 50 prospectos)"""
+    try:
+        # Solo traemos los campos vitales, nada de historiales pesados
+        prospectos_res = (
+            supabase.table("prospectos")
+            .select("nombre, telefono, columna, ultima_interaccion_ia")
+            .eq("vendedor_id", vendedor_id)
+            .order("ultima_interaccion_ia", desc=True) # Los más recientes primero
+            .limit(50)
+            .execute()
+        )
+        
+        return {
+            "status": "ok",
+            "vendedor": vendedor_id,
+            "prospectos": prospectos_res.data if prospectos_res.data else []
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en mobile_dashboard: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al cargar dashboard móvil")
+
+# Verifica tu endpoint de login actual. Debe verse similar a este, 
+# lo IMPORTANTE es que retorne "vendedor_id" en el JSON final:
+# (Si ya lo tienes, solo verifica el return. Si no, usa este)
+@app.post("/api/login")
+async def login_b2b(datos: LoginUpdate):
+    try:
+        res = supabase.table('usuarios_b2b').select('*').eq('email', datos.email).execute()
+        if not res.data:
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+            
+        usuario = res.data[0]
+        # Aquí asumo que usas tu validación de password normal
+        if datos.password != usuario.get('password'):
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+            
+        # Generar Token
+        token_data = {"sub": usuario['vendedor_id'], "rol": usuario.get('rol', 'vendedor')}
+        token = jwt.encode(token_data, JWT_SECRET, algorithm="HS256")
+        
+        # 🔑 RETORNO VITAL PARA EL CELULAR
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "vendedor_id": usuario['vendedor_id'] # ¡Esta línea es la que necesita la app móvil!
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en login: {e}")
+        raise HTTPException(status_code=500, detail="Error de servidor")
+
 # --- 1. DESCARGA DE MEDIA DE META (FOTOS Y AUDIOS V13) ---
 async def descargar_media_whatsapp(media_id: str, token: str) -> dict:
     """ 🌉 Puente Seguro: Descarga imágenes/audios desde los servidores de Meta """
