@@ -1659,40 +1659,42 @@ async def gestionar_mensaje_entrante_bg(
             return
 
         # ==========================================================
-        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase)
+        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase) - AAA FIX
         # ==========================================================
         try:
-            res_prospecto = (
+            # 1. Definimos el objeto con los datos básicos
+            datos_prospecto = {
+                "nombre": nombre_cliente,
+                "telefono": telefono_cliente,
+                "origen": "WHATSAPP",
+                "columna": "Bandeja Nueva",
+                "vendedor_id": vendedor_actual,
+                "estado_iluminacion": "blanco",
+                "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
+            }
+
+            # 2. USAMOS UPSERT: Si el teléfono+vendedor ya existe, lo actualiza (sin crear duplicados)
+            # Si no existe, lo crea. Esto es 100% seguro contra duplicados.
+            # Nota: Requiere que en Supabase 'telefono' y 'vendedor_id' sean únicos (te explico abajo).
+            res_upsert = (
                 supabase
                 .table('prospectos')
-                .select('nombre, columna')
-                .eq('telefono', telefono_cliente)
-                .eq('vendedor_id', vendedor_actual)
-                .limit(1)
+                .upsert(datos_prospecto, on_conflict="telefono, vendedor_id")
                 .execute()
             )
             
-            columna_actual = "Bandeja Nueva"
-
-            if res_prospecto.data:
-                prospecto = res_prospecto.data[0]
-                nombre_cliente = prospecto.get("nombre", nombre_cliente)
-                columna_actual = prospecto.get("columna", "Bandeja Nueva")
+            # Recuperamos la columna actual para saber si el bot debe responder
+            if res_upsert.data:
+                columna_actual = res_upsert.data[0].get("columna", "Bandeja Nueva")
+                nombre_cliente = res_upsert.data[0].get("nombre", nombre_cliente)
             else:
-                # ➕ CREAR PROSPECTO NUEVO
-                supabase.table('prospectos').insert({
-                    "nombre": nombre_cliente,
-                    "telefono": telefono_cliente,
-                    "origen": "WHATSAPP",
-                    "columna": "Bandeja Nueva",
-                    "vendedor_id": vendedor_actual,
-                    "estado_iluminacion": "blanco"
-                }).execute()
-                logger.info(f"🆕 Prospecto creado en CRM: {telefono_cliente}")
+                columna_actual = "Bandeja Nueva"
+
+            logger.info(f"✨ [CRM] Prospecto sincronizado: {nombre_cliente} ({telefono_cliente})")
                 
         except Exception as db_crm_err:
-            logger.error(f"🚨 Error en CRM Supabase (Lectura/Escritura): {db_crm_err}")
-            columna_actual = "Bandeja Nueva" # Fallback para que el bot siga respondiendo
+            logger.error(f"🚨 Error en Upsert CRM: {db_crm_err}")
+            columna_actual = "Bandeja Nueva"
 
         # ==========================================================
         # 💾 GUARDAR MENSAJE EN CHAT (Historial)
@@ -2075,40 +2077,36 @@ def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesio
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        print(f"\n--- 🕵️ AUDITORÍA BACKEND ---")
-        print(f"📥 Recibido: {datos}")
-        print(f"👤 Vendedor: {_sesion}")
-
-        dict_update = {
+        print(f"📝 Recibida petición de notas para: {datos.nombre} | Tel: {datos.telefono}")
+        
+        update_data = {
             "notas": datos.notas,
             "etiquetas": datos.etiquetas,
-            "nombre": datos.nombre
+            "nombre": datos.nombre # Actualizamos el nombre por si se corrigió
         }
 
-        # 1. INTENTO POR TELÉFONO
+        # 1. Intentamos actualizar por Teléfono (El método seguro)
+        tel = str(datos.telefono).strip()
         res = None
-        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null"]:
-            print(f"🔎 Buscando por teléfono: {datos.telefono}")
-            res = supabase.table('prospectos').update(dict_update).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         
-        # 2. FALLBACK POR NOMBRE (Si el teléfono falló o no existía)
-        # Si 'res' es None o si no afectó a ninguna fila (res.data es vacío)
+        if tel and tel.lower() not in ["", "null", "sin registrar"]:
+            res = supabase.table('prospectos').update(update_data).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
+
+        # 2. Fallback: Si no hay teléfono o el update no afectó a nadie, intentamos por Nombre
         if not res or len(res.data) == 0:
-            print(f"⚠️ No se encontró por teléfono. Reintentando por nombre: {datos.nombre}")
-            res = supabase.table('prospectos').update(dict_update).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+            print(f"⚠️ No se encontró por teléfono. Intentando por nombre: {datos.nombre}")
+            res = supabase.table('prospectos').update(update_data).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
 
-        print(f"✅ Resultado Supabase: {res.data}")
-        print(f"📊 Filas afectadas: {len(res.data)}")
-        print(f"---------------------------\n")
-
-        if len(res.data) == 0:
-            return {"status": "error", "mensaje": "Cliente no encontrado en la base de datos"}
-
-        return {"status": "ok", "mensaje": "Sincronización exitosa"}
+        if res.data:
+            print(f"✅ Notas guardadas con éxito. Filas afectadas: {len(res.data)}")
+            return {"status": "ok", "mensaje": "Sincronización completa"}
+        else:
+            print(f"❌ No se encontró al prospecto para actualizar notas.")
+            return {"status": "error", "mensaje": "No se encontró el registro"}
 
     except Exception as e:
-        print(f"💥 ERROR: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"💥 Error crítico en actualizar_notas: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
