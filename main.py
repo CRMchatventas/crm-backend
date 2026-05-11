@@ -1796,9 +1796,11 @@ class EstadoUpdate(BaseModel):
 
 
 class NotasUpdate(BaseModel):
-    telefono: str
-    notas: str
-    etiquetas: str
+    nombre: str = Field(..., min_length=1, max_length=120)
+    telefono: Optional[str] = None
+    notas: str = Field(default="", max_length=4000)
+    etiquetas: str = Field(default="", max_length=500)
+    vendedor_id: str = Field(..., min_length=1, max_length=80)
 
 
 # ==========================================================
@@ -2041,6 +2043,23 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Error en historial")
+
+@app.post("/api/actualizar_notas")
+def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        dict_update = {"notas": datos.notas, "etiquetas": datos.etiquetas}
+        
+        # 🛡️ Guardado de alta precisión: Priorizamos el teléfono si existe
+        if datos.telefono and str(datos.telefono).lower() not in ["", "sin registrar", "null", "none"]:
+            supabase.table('prospectos').update(dict_update).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
+        else:
+            # Fallback por si en algún caso extremo solo tenemos el nombre
+            supabase.table('prospectos').update(dict_update).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+            
+        return {"status": "ok", "mensaje": "Perfil guardado correctamente"}
+    except Exception as e:
+        print(f"❌ Error actualizando perfil: {e}")
+        raise HTTPException(status_code=500, detail="Error en base de datos")
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
