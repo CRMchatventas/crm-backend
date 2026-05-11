@@ -2075,17 +2075,24 @@ def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesio
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        dict_update = {"notas": datos.notas, "etiquetas": datos.etiquetas}
+        # 🛡️ VALIDACIÓN DE SEGURIDAD: Sin teléfono no hay update
+        tel = str(datos.telefono).strip()
+        if not tel or tel.lower() in ["sin registrar", "null", "none"]:
+            return {"status": "error", "mensaje": "Se requiere un número de teléfono válido para identificar al prospecto"}
+
+        dict_update = {
+            "notas": datos.notas, 
+            "etiquetas": datos.etiquetas,
+            "nombre": datos.nombre # Aprovechamos para actualizar el nombre por si cambió
+        }
         
-        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
-            supabase.table('prospectos').update(dict_update).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
-        else:
-            supabase.table('prospectos').update(dict_update).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+        # Filtramos estrictamente por teléfono Y por vendedor (Multi-tenant)
+        resultado = supabase.table('prospectos').update(dict_update).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
             
-        return {"status": "ok", "mensaje": "Notas guardadas correctamente"}
+        return {"status": "ok", "mensaje": "Sincronización exitosa por ID telefónico"}
     except Exception as e:
-        print(f"❌ Error actualizando notas: {e}")
-        raise HTTPException(status_code=500, detail="Error en base de datos")
+        print(f"❌ Error crítico en BD: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
