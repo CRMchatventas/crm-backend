@@ -1417,20 +1417,28 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         
         columnas_custom = [r['nombre_columna'] for r in res_cols.data if r['nombre_columna'].upper() not in [c.upper() for c in (columnas_izq + columnas_der)] and r['nombre_columna'].upper() != "EN ATENCION"]
         if not columnas_custom: columnas_custom = ["+"]
-                
+        
         columnas_finales = columnas_izq + columnas_custom + columnas_der
         
-        # 🩹 FIX PARA GODOT: Traemos los datos pero usamos el filtro dict para que no colapse
-        # con la basura de la base de datos vieja.
+        # Traemos prospectos
         res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('ultima_interaccion_ia', desc=True).limit(500).execute()
         
-        # Filtro de Deduplicación en Memoria (Por si tienes historial viejo en Supabase)
+        # 🧠 DEDUPLICACIÓN INTELIGENTE: Priorizamos siempre el registro que SÍ tenga teléfono
         ultimos = {}
-        for fila in res_prospectos.data:
-            # Godot no soporta que le mandes 20 tarjetas del mismo cliente
-            clave_unica = fila.get('telefono') or fila.get('nombre')
-            if clave_unica and clave_unica not in ultimos:
-                ultimos[clave_unica] = fila
+        # Primero procesamos los que tienen teléfono (para que ganen la posición)
+        prospectos_ordenados = sorted(res_prospectos.data, key=lambda x: (x.get('telefono') is None or x.get('telefono') == ""))
+        
+        for fila in prospectos_ordenados:
+            nombre = fila.get('nombre', 'Desconocido')
+            tel = fila.get('telefono')
+            
+            # Usamos el nombre como clave para no repetir tarjetas visuales
+            if nombre not in ultimos:
+                ultimos[nombre] = fila
+            else:
+                # Si ya existe pero el nuevo tiene teléfono y el viejo no, lo sobreescribimos
+                if tel and not ultimos[nombre].get('telefono'):
+                    ultimos[nombre] = fila
                 
         return {"columnas": columnas_finales, "prospectos": list(ultimos.values())}
     except Exception as e:
@@ -2010,16 +2018,23 @@ def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesi
 def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', _sesion)
+        telefono_encontrado = datos.telefono
         
-        if datos.telefono and datos.telefono != "Sin registrar":
-            query = query.eq('telefono', datos.telefono)
-        else:
-            # Si solo mandan nombre, buscamos el teléfono en prospectos primero
-            res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).limit(1).execute()
+        # 🩹 CURACIÓN DE IDENTIDAD: Si Godot manda "Sin registrar", buscamos el número real
+        if not datos.telefono or datos.telefono == "Sin registrar":
+            res_tel = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).not_.is_('telefono', 'null').limit(1).execute()
+            
             if res_tel.data and res_tel.data[0].get('telefono'):
-                query = query.eq('telefono', res_tel.data[0]['telefono'])
+                telefono_encontrado = res_tel.data[0]['telefono']
+                query = query.eq('telefono', telefono_encontrado)
             else:
-                return {"historial": [{"texto": "Sin historial previo o cliente sin teléfono.", "es_mio": False}]}
+                # Si de plano no hay teléfono en ninguna tabla
+                return {
+                    "historial": [{"texto": "⚠️ Este cliente no tiene teléfono registrado en el sistema.", "es_mio": False}],
+                    "telefono_oficial": "" 
+                }
+        else:
+            query = query.eq('telefono', datos.telefono)
                 
         res = query.order('created_at', desc=False).limit(50).execute()
         
@@ -2028,8 +2043,13 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
             es_mio = (fila.get('autor', 'USER') != 'USER')
             historial_formateado.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
             
-        return {"historial": historial_formateado}
+        # 🚀 CLAVE: Devolvemos el 'telefono_oficial' para que Godot se actualice
+        return {
+            "historial": historial_formateado, 
+            "telefono_oficial": telefono_encontrado 
+        }
     except Exception as e:
+        print(f"Error en historial: {e}")
         raise HTTPException(status_code=500, detail="Error cargando chat")
 
 # ==========================================================
