@@ -2075,24 +2075,30 @@ def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesio
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🛡️ VALIDACIÓN DE SEGURIDAD: Sin teléfono no hay update
+        # 🛡️ LOG DE AUDITORÍA (Para ver en Render qué llega)
+        print(f"📝 Intento de guardado para: {datos.telefono} por {_sesion}")
+        
         tel = str(datos.telefono).strip()
-        if not tel or tel.lower() in ["sin registrar", "null", "none"]:
-            return {"status": "error", "mensaje": "Se requiere un número de teléfono válido para identificar al prospecto"}
+        if not tel or tel.lower() in ["sin registrar", "null", "none", ""]:
+            return {"status": "error", "mensaje": "ID de teléfono inválido"}
 
-        dict_update = {
-            "notas": datos.notas, 
-            "etiquetas": datos.etiquetas,
-            "nombre": datos.nombre # Aprovechamos para actualizar el nombre por si cambió
+        # Diccionario de actualización
+        update_data = {
+            "notas": datos.notas if datos.notas else "",
+            "etiquetas": datos.etiquetas if datos.etiquetas else "",
+            "nombre": datos.nombre
         }
         
-        # Filtramos estrictamente por teléfono Y por vendedor (Multi-tenant)
-        resultado = supabase.table('prospectos').update(dict_update).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
-            
-        return {"status": "ok", "mensaje": "Sincronización exitosa por ID telefónico"}
+        # ⚡ Ejecución en Supabase
+        # Asegúrate que tu tabla tenga la columna 'vendedor_id' y sea de tipo texto
+        query = supabase.table('prospectos').update(update_data).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
+        
+        return {"status": "ok", "mensaje": "Notas sincronizadas"}
+        
     except Exception as e:
-        print(f"❌ Error crítico en BD: {e}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        print(f"💥 ERROR CRÍTICO EN NOTAS: {str(e)}")
+        # Esto evitará el 500 y nos dará una pista
+        raise HTTPException(status_code=400, detail=f"Error en base de datos: {str(e)}")
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
