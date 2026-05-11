@@ -2075,30 +2075,40 @@ def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesio
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🛡️ LOG DE AUDITORÍA (Para ver en Render qué llega)
-        print(f"📝 Intento de guardado para: {datos.telefono} por {_sesion}")
-        
-        tel = str(datos.telefono).strip()
-        if not tel or tel.lower() in ["sin registrar", "null", "none", ""]:
-            return {"status": "error", "mensaje": "ID de teléfono inválido"}
+        print(f"\n--- 🕵️ AUDITORÍA BACKEND ---")
+        print(f"📥 Recibido: {datos}")
+        print(f"👤 Vendedor: {_sesion}")
 
-        # Diccionario de actualización
-        update_data = {
-            "notas": datos.notas if datos.notas else "",
-            "etiquetas": datos.etiquetas if datos.etiquetas else "",
+        dict_update = {
+            "notas": datos.notas,
+            "etiquetas": datos.etiquetas,
             "nombre": datos.nombre
         }
+
+        # 1. INTENTO POR TELÉFONO
+        res = None
+        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null"]:
+            print(f"🔎 Buscando por teléfono: {datos.telefono}")
+            res = supabase.table('prospectos').update(dict_update).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         
-        # ⚡ Ejecución en Supabase
-        # Asegúrate que tu tabla tenga la columna 'vendedor_id' y sea de tipo texto
-        query = supabase.table('prospectos').update(update_data).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
-        
-        return {"status": "ok", "mensaje": "Notas sincronizadas"}
-        
+        # 2. FALLBACK POR NOMBRE (Si el teléfono falló o no existía)
+        # Si 'res' es None o si no afectó a ninguna fila (res.data es vacío)
+        if not res or len(res.data) == 0:
+            print(f"⚠️ No se encontró por teléfono. Reintentando por nombre: {datos.nombre}")
+            res = supabase.table('prospectos').update(dict_update).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+
+        print(f"✅ Resultado Supabase: {res.data}")
+        print(f"📊 Filas afectadas: {len(res.data)}")
+        print(f"---------------------------\n")
+
+        if len(res.data) == 0:
+            return {"status": "error", "mensaje": "Cliente no encontrado en la base de datos"}
+
+        return {"status": "ok", "mensaje": "Sincronización exitosa"}
+
     except Exception as e:
-        print(f"💥 ERROR CRÍTICO EN NOTAS: {str(e)}")
-        # Esto evitará el 500 y nos dará una pista
-        raise HTTPException(status_code=400, detail=f"Error en base de datos: {str(e)}")
+        print(f"💥 ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
