@@ -319,6 +319,19 @@ class ClienteIdentificador(BaseModel):
     nombre: str
     telefono: Optional[str] = None
 
+class ColumnaUpdate(BaseModel):
+    nombre: str = Field(default="")
+    telefono: str = Field(default="")
+    columna: str
+    vendedor_id: str
+
+class NotasUpdate(BaseModel):
+    nombre: str = Field(default="")
+    telefono: str = Field(default="")
+    notas: str = Field(default="")
+    etiquetas: str = Field(default="")
+    vendedor_id: str
+
 
 
 # ==========================================
@@ -2044,21 +2057,34 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Error en historial")
 
+@app.post("/api/mover_prospecto")
+def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        # Intentamos guardar por teléfono primero (es más seguro)
+        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
+            supabase.table('prospectos').update({"columna": datos.columna}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
+        else:
+            # Si no hay teléfono, guardamos guiándonos por el nombre
+            supabase.table('prospectos').update({"columna": datos.columna}).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+            
+        return {"status": "ok", "mensaje": f"Movido a {datos.columna}"}
+    except Exception as e:
+        print(f"❌ Error moviendo columna: {e}")
+        raise HTTPException(status_code=500, detail="Error en base de datos")
+
 @app.post("/api/actualizar_notas")
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         dict_update = {"notas": datos.notas, "etiquetas": datos.etiquetas}
         
-        # 🛡️ Guardado de alta precisión: Priorizamos el teléfono si existe
-        if datos.telefono and str(datos.telefono).lower() not in ["", "sin registrar", "null", "none"]:
+        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
             supabase.table('prospectos').update(dict_update).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         else:
-            # Fallback por si en algún caso extremo solo tenemos el nombre
             supabase.table('prospectos').update(dict_update).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
             
-        return {"status": "ok", "mensaje": "Perfil guardado correctamente"}
+        return {"status": "ok", "mensaje": "Notas guardadas correctamente"}
     except Exception as e:
-        print(f"❌ Error actualizando perfil: {e}")
+        print(f"❌ Error actualizando notas: {e}")
         raise HTTPException(status_code=500, detail="Error en base de datos")
 
 # ==========================================================
