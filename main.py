@@ -320,8 +320,8 @@ class ClienteIdentificador(BaseModel):
     telefono: Optional[str] = None
 
 class ColumnaUpdate(BaseModel):
-    nombre: str = Field(default="")
-    telefono: str = Field(default="")
+    nombre: Optional[str] = "" # 👈 Añade Optional
+    telefono: str
     columna: str
     vendedor_id: str
 
@@ -1659,41 +1659,34 @@ async def gestionar_mensaje_entrante_bg(
             return
 
         # ==========================================================
-        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase) - AAA FIX
+        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase) - FIX SEGURO
         # ==========================================================
         try:
-            # 1. Definimos el objeto con los datos básicos
-            datos_prospecto = {
-                "nombre": nombre_cliente,
-                "telefono": telefono_cliente,
-                "origen": "WHATSAPP",
-                "columna": "Bandeja Nueva",
-                "vendedor_id": vendedor_actual,
-                "estado_iluminacion": "blanco",
-                "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
-            }
-
-            # 2. USAMOS UPSERT: Si el teléfono+vendedor ya existe, lo actualiza (sin crear duplicados)
-            # Si no existe, lo crea. Esto es 100% seguro contra duplicados.
-            # Nota: Requiere que en Supabase 'telefono' y 'vendedor_id' sean únicos (te explico abajo).
-            res_upsert = (
-                supabase
-                .table('prospectos')
-                .upsert(datos_prospecto, on_conflict="telefono, vendedor_id")
-                .execute()
-            )
+            # 1. Buscamos si ya existe el prospecto
+            res_p = supabase.table('prospectos').select('columna, notas, etiquetas').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
             
-            # Recuperamos la columna actual para saber si el bot debe responder
-            if res_upsert.data:
-                columna_actual = res_upsert.data[0].get("columna", "Bandeja Nueva")
-                nombre_cliente = res_upsert.data[0].get("nombre", nombre_cliente)
+            if res_p.data:
+                # 2. SI EXISTE: Solo actualizamos la fecha de interacción
+                columna_actual = res_p.data[0].get("columna", "Bandeja Nueva")
+                supabase.table('prospectos').update({"ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()}).eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
+                print(f"✅ Cliente {nombre_cliente} detectado. Manteniendo columna: {columna_actual}")
             else:
+                # 3. SI NO EXISTE: Lo creamos desde cero
                 columna_actual = "Bandeja Nueva"
-
-            logger.info(f"✨ [CRM] Prospecto sincronizado: {nombre_cliente} ({telefono_cliente})")
+                nuevo_p = {
+                    "nombre": nombre_cliente,
+                    "telefono": telefono_cliente,
+                    "origen": "WHATSAPP",
+                    "columna": columna_actual,
+                    "vendedor_id": vendedor_actual,
+                    "estado_iluminacion": "blanco",
+                    "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
+                }
+                supabase.table('prospectos').insert(nuevo_p).execute()
+                print(f"🆕 Nuevo prospecto creado: {nombre_cliente}")
                 
         except Exception as db_crm_err:
-            logger.error(f"🚨 Error en Upsert CRM: {db_crm_err}")
+            logger.error(f"🚨 Error en lógica CRM: {db_crm_err}")
             columna_actual = "Bandeja Nueva"
 
         # ==========================================================
