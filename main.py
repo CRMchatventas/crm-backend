@@ -315,6 +315,10 @@ class MobileMessageRequest(BaseModel):
 class MobileChatRequest(BaseModel):
     telefono: str = Field(..., min_length=1, max_length=40)
 
+class ClienteIdentificador(BaseModel):
+    nombre: str
+    telefono: Optional[str] = None
+
 
 
 # ==========================================
@@ -2021,38 +2025,24 @@ def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesi
 @app.post("/api/historial_chat")
 def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Iniciamos la consulta
+        # Buscamos el teléfono real en la base de datos basándonos en el nombre
+        res_prospecto = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+        
+        tel_oficial = ""
+        if res_prospecto.data and res_prospecto.data[0].get('telefono'):
+            tel_oficial = res_prospecto.data[0]['telefono']
+        
+        # Si el teléfono que mandó Godot es basura, usamos el oficial
+        id_busqueda = tel_oficial if tel_oficial else datos.nombre
+        
+        # Consultamos los mensajes
         query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', _sesion)
-        telefono_encontrado = datos.telefono
         
-        # 🛡️ LIMPIEZA AGRESIVA: Si el teléfono es basura, buscamos el real
-        es_basura = not datos.telefono or str(datos.telefono).lower() in ["sin registrar", "null", "none", ""]
-        
-        if es_basura:
-            print(f"🔎 [REPARACIÓN] Buscando teléfono real para: {datos.nombre}")
-            
-            # Buscamos en prospectos pero EXCLUIMOS registros que digan "Sin registrar"
-            res_tel = supabase.table('prospectos').select('telefono') \
-                .eq('nombre', datos.nombre) \
-                .eq('vendedor_id', _sesion) \
-                .not_.is_('telefono', 'null') \
-                .neq('telefono', 'Sin registrar') \
-                .neq('telefono', '') \
-                .limit(1).execute()
-            
-            if res_tel.data and res_tel.data[0].get('telefono'):
-                telefono_encontrado = res_tel.data[0]['telefono']
-                query = query.eq('telefono', telefono_encontrado)
-                print(f"✅ [REPARACIÓN] Encontrado: {telefono_encontrado}")
-            else:
-                print(f"❌ [REPARACIÓN] No hay teléfono válido en DB para {datos.nombre}")
-                return {
-                    "historial": [{"texto": "⚠️ Cliente sin número de WhatsApp válido en base de datos.", "es_mio": False}],
-                    "telefono_oficial": "" 
-                }
+        if tel_oficial:
+            query = query.eq('telefono', tel_oficial)
         else:
-            query = query.eq('telefono', datos.telefono)
-                
+            query = query.eq('nombre', datos.nombre) # Fallback por nombre
+
         res = query.order('created_at', desc=False).limit(50).execute()
         
         historial_formateado = []
@@ -2060,13 +2050,14 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
             es_mio = (fila.get('autor', 'USER') != 'USER')
             historial_formateado.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
             
+        # 🚀 DEVOLVEMOS EL TELÉFONO OFICIAL PARA CURAR A GODOT
         return {
             "historial": historial_formateado, 
-            "telefono_oficial": telefono_encontrado # 🚀 ESTO CURA A GODOT
+            "telefono_oficial": tel_oficial 
         }
     except Exception as e:
-        print(f"❌ [ERROR] en historial_chat: {e}")
-        raise HTTPException(status_code=500, detail="Error cargando chat")
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Error en historial")
 
 # ==========================================================
 # 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
