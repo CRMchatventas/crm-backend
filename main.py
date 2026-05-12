@@ -1451,59 +1451,105 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
 
 @app.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
-    """Punto de entrada ultra ligero para la App Móvil (Solo 50 prospectos)"""
+    """
+    Punto de entrada ultra ligero para la App Móvil.
+    Calcula ventas del día y trae prospectos recientes.
+    """
     try:
-        # Solo traemos los campos vitales, nada de historiales pesados
+        # 1. 🕒 OBTENER FECHA DE INICIO DE HOY (UTC)
+        # Esto sirve para filtrar las ventas que ocurrieron desde las 00:00 de hoy
+        hoy_inicio = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        # 2. 💰 CALCULAR VENTAS DE HOY
+        # Sumamos todos los registros de la tabla 'ventas' del vendedor actual
+        ventas_res = (
+            supabase.table("ventas")
+            .select("monto")
+            .eq("vendedor_id", vendedor_id)
+            .gte("created_at", hoy_inicio)
+            .execute()
+        )
+        
+        total_hoy = 0.0
+        if ventas_res.data:
+            total_hoy = sum(float(v.get("monto", 0)) for v in ventas_res.data)
+
+        # 3. 👤 TRAER PROSPECTOS RECIENTES (Top 50)
+        # Incluimos 'ultimo_msj' para que la App sepa si hay notificaciones nuevas
         prospectos_res = (
             supabase.table("prospectos")
-            .select("nombre, telefono, columna, ultima_interaccion_ia")
+            .select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj")
             .eq("vendedor_id", vendedor_id)
-            .order("ultima_interaccion_ia", desc=True) # Los más recientes primero
+            .order("ultima_interaccion_ia", desc=True)
             .limit(50)
             .execute()
         )
         
+        print(f"📊 [DASHBOARD] Vendedor: {vendedor_id} | Ventas Hoy: ${total_hoy} | Clientes: {len(prospectos_res.data)}")
+
         return {
             "status": "ok",
             "vendedor": vendedor_id,
+            "ventas_hoy": total_hoy, # 👈 Este activa la barra de dinero en Godot
             "prospectos": prospectos_res.data if prospectos_res.data else []
         }
         
     except Exception as e:
-        logger.error(f"❌ Error en mobile_dashboard: {e}")
-        raise HTTPException(status_code=500, detail="Error interno al cargar dashboard móvil")
-
-# Verifica tu endpoint de login actual. Debe verse similar a este, 
-# lo IMPORTANTE es que retorne "vendedor_id" en el JSON final:
-# (Si ya lo tienes, solo verifica el return. Si no, usa este)
+        logger.error(f"❌ Error crítico en mobile_dashboard: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/api/login")
 async def login_b2b(datos: LoginUpdate):
+    """
+    Sistema de Autenticación Central Veltrix.
+    Genera tokens JWT y vincula la sesión al vendedor_id.
+    """
     try:
+        # 1. 🔍 BÚSQUEDA EN BASE DE DATOS
         res = supabase.table('usuarios_b2b').select('*').eq('email', datos.email).execute()
+        
         if not res.data:
+            print(f"⚠️ [LOGIN FAIL] Intento fallido para: {datos.email} (Usuario no existe)")
             raise HTTPException(status_code=401, detail="Credenciales incorrectas")
             
         usuario = res.data[0]
-        # Aquí asumo que usas tu validación de password normal
+        
+        # 2. 🔐 VALIDACIÓN DE PASSWORD
+        # Nota: En producción, aquí deberías usar pwd_context.verify(datos.password, usuario['password'])
         if datos.password != usuario.get('password'):
+            print(f"⚠️ [LOGIN FAIL] Contraseña errónea para: {datos.email}")
             raise HTTPException(status_code=401, detail="Credenciales incorrectas")
             
-        # Generar Token
-        token_data = {"sub": usuario['vendedor_id'], "rol": usuario.get('rol', 'vendedor')}
+        # 3. 🎟️ GENERACIÓN DE TOKEN JWT
+        vendedor_id = usuario.get('vendedor_id', 'V-001')
+        rol = usuario.get('rol', 'vendedor')
+        
+        token_data = {
+            "sub": vendedor_id, 
+            "email": usuario['email'],
+            "rol": rol,
+            "exp": datetime.utcnow() + timedelta(days=7) # Token válido por una semana
+        }
+        
         token = jwt.encode(token_data, JWT_SECRET, algorithm="HS256")
         
-        # 🔑 RETORNO VITAL PARA EL CELULAR
+        print(f"✅ [LOGIN SUCCESS] Vendedor {vendedor_id} ha iniciado sesión.")
+
+        # 4. 🚀 RETORNO SINCRONIZADO CON APP MÓVIL Y PC
         return {
+            "status": "ok",
             "access_token": token,
             "token_type": "bearer",
-            "vendedor_id": usuario['vendedor_id'] # ¡Esta línea es la que necesita la app móvil!
+            "vendedor_id": vendedor_id,
+            "nombre": usuario.get('nombre', 'Vendedor'),
+            "rol": rol
         }
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error en login: {e}")
-        raise HTTPException(status_code=500, detail="Error de servidor")
+        logger.error(f"🚨 [FATAL ERROR] Fallo en sistema de login: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # --- 1. DESCARGA DE MEDIA DE META (FOTOS Y AUDIOS V13) ---
 async def descargar_media_whatsapp(media_id: str, token: str) -> dict:
