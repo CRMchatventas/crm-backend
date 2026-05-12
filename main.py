@@ -351,21 +351,21 @@ class MobileChatRequest(BaseModel):
     telefono: str = Field(..., min_length=1, max_length=40)
 
 class ClienteIdentificador(BaseModel):
-    nombre: str
-    telefono: Optional[str] = None
+    nombre: str = ""
+    telefono: str = ""
 
 class ColumnaUpdate(BaseModel):
-    nombre: Optional[str] = ""
-    telefono: str
-    columna: str
-    vendedor_id: str
+    nombre: str = ""
+    telefono: str = ""
+    columna: str = ""       # Lo que manda la PC
+    nueva_columna: str = "" # Lo que manda el Móvil (Aceptamos ambos)
 
 class NotasUpdate(BaseModel):
-    nombre: str = Field(default="")
-    telefono: str = Field(default="")
-    notas: str = Field(default="")
-    etiquetas: str = Field(default="")
-    vendedor_id: str
+    nombre: str = ""
+    telefono: str = ""
+    notas: str = ""
+    etiquetas: str = ""
+    vendedor_id: str = ""
 
 # ==========================================
 # 🔐 AUTENTICACIÓN JWT Y WEBHOOKS
