@@ -1452,30 +1452,32 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
 @app.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
     """
-    Punto de entrada ultra ligero para la App Móvil.
-    Calcula ventas del día y trae prospectos recientes.
+    Punto de entrada optimizado.
+    Calcula ingresos del día y sincroniza prospectos con estados de lectura.
     """
     try:
-        # 1. 🕒 OBTENER FECHA DE INICIO DE HOY (UTC)
-        # Esto sirve para filtrar las ventas que ocurrieron desde las 00:00 de hoy
+        # 1. 🕒 RANGO DE TIEMPO (Hoy local/UTC)
         hoy_inicio = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
-        # 2. 💰 CALCULAR VENTAS DE HOY
-        # Sumamos todos los registros de la tabla 'ventas' del vendedor actual
-        ventas_res = (
-            supabase.table("ventas")
-            .select("monto")
-            .eq("vendedor_id", vendedor_id)
-            .gte("created_at", hoy_inicio)
-            .execute()
-        )
-        
+        # 2. 💰 CÁLCULO DE INGRESOS DIARIOS
+        # Encapsulamos en un try interno para que si la tabla 'ventas' falla, 
+        # el dashboard de clientes siga funcionando.
         total_hoy = 0.0
-        if ventas_res.data:
-            total_hoy = sum(float(v.get("monto", 0)) for v in ventas_res.data)
+        try:
+            ventas_res = (
+                supabase.table("ventas")
+                .select("monto")
+                .eq("vendedor_id", vendedor_id)
+                .gte("created_at", hoy_inicio)
+                .execute()
+            )
+            if ventas_res.data:
+                total_hoy = sum(float(v.get("monto", 0)) for v in ventas_res.data)
+        except Exception as ve:
+            logger.warning(f"⚠️ No se pudo calcular ventas_hoy: {ve}")
 
-        # 3. 👤 TRAER PROSPECTOS RECIENTES (Top 50)
-        # Incluimos 'ultimo_msj' para que la App sepa si hay notificaciones nuevas
+        # 3. 👤 OBTENCIÓN DE PROSPECTOS RECIENTES
+        # Ahora que la columna 'ultimo_msj' existe, esta consulta será exitosa.
         prospectos_res = (
             supabase.table("prospectos")
             .select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj")
@@ -1485,18 +1487,30 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
             .execute()
         )
         
-        print(f"📊 [DASHBOARD] Vendedor: {vendedor_id} | Ventas Hoy: ${total_hoy} | Clientes: {len(prospectos_res.data)}")
+        # 4. 🧹 LIMPIEZA DE DATOS (Anti-Crash para Godot)
+        # Aseguramos que 'ultimo_msj' nunca sea None para que Godot no reciba 'null'
+        lista_prospectos = []
+        for p in (prospectos_res.data if prospectos_res.data else []):
+            p["ultimo_msj"] = p.get("ultimo_msj") or "" # Si es null, mandamos string vacío
+            lista_prospectos.append(p)
+
+        print(f"📊 [DASHBOARD] V-ID: {vendedor_id} | Ingresos: ${total_hoy} | Leads: {len(lista_prospectos)}")
 
         return {
             "status": "ok",
             "vendedor": vendedor_id,
-            "ventas_hoy": total_hoy, # 👈 Este activa la barra de dinero en Godot
-            "prospectos": prospectos_res.data if prospectos_res.data else []
+            "ventas_hoy": total_hoy,
+            "prospectos": lista_prospectos
         }
         
     except Exception as e:
         logger.error(f"❌ Error crítico en mobile_dashboard: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        # Retornamos un status error para que la App sepa qué pasó sin crashear
+        return {
+            "status": "error",
+            "message": str(e),
+            "prospectos": []
+        }
 
 @app.post("/api/login")
 async def login_b2b(datos: LoginUpdate):
