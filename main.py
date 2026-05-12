@@ -1337,12 +1337,15 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
 @app.post("/api/mover_prospecto")
 def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
+        # Detectamos cuál variable nos mandaron (PC o Móvil)
+        columna_final = datos.nueva_columna if datos.nueva_columna else datos.columna
+
         if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
-            supabase.table('prospectos').update({"columna": datos.columna}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
+            supabase.table('prospectos').update({"columna": columna_final}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         else:
-            supabase.table('prospectos').update({"columna": datos.columna}).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
+            supabase.table('prospectos').update({"columna": columna_final}).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
             
-        return {"status": "ok", "mensaje": f"Movido a {datos.columna}"}
+        return {"status": "ok", "mensaje": f"Movido a {columna_final}"}
     except Exception as e:
         print(f"❌ Error moviendo columna: {e}")
         raise HTTPException(status_code=500, detail="Error en base de datos")
