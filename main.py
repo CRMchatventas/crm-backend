@@ -1477,21 +1477,22 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
             logger.warning(f"⚠️ No se pudo calcular ventas_hoy: {ve}")
 
         # 3. 👤 OBTENCIÓN DE PROSPECTOS RECIENTES
-        # Ahora que la columna 'ultimo_msj' existe, esta consulta será exitosa.
         prospectos_res = (
             supabase.table("prospectos")
-            .select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj")
+            # 💡 FIX MAESTRO: Se añadió 'notas' y 'etiquetas' a la petición
+            .select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas")
             .eq("vendedor_id", vendedor_id)
             .order("ultima_interaccion_ia", desc=True)
             .limit(50)
             .execute()
         )
         
-        # 4. 🧹 LIMPIEZA DE DATOS (Anti-Crash para Godot)
-        # Aseguramos que 'ultimo_msj' nunca sea None para que Godot no reciba 'null'
+        # 4. 🧹 LIMPIEZA DE DATOS (Anti-Crash)
         lista_prospectos = []
         for p in (prospectos_res.data if prospectos_res.data else []):
-            p["ultimo_msj"] = p.get("ultimo_msj") or "" # Si es null, mandamos string vacío
+            p["ultimo_msj"] = p.get("ultimo_msj") or "" 
+            p["notas"] = p.get("notas") or "" # Protegemos notas vacías
+            p["etiquetas"] = p.get("etiquetas") or "" 
             lista_prospectos.append(p)
 
         print(f"📊 [DASHBOARD] V-ID: {vendedor_id} | Ingresos: ${total_hoy} | Leads: {len(lista_prospectos)}")
