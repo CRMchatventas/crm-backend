@@ -10,18 +10,13 @@ import asyncio
 import logging
 import hmac
 import hashlib
-import bcrypt
 import jwt
 import httpx
 import mimetypes
 import urllib.parse
 import re
 import unicodedata
-import difflib
 import base64
-import io
-import csv
-import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -29,42 +24,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from contextlib import asynccontextmanager
 from supabase import create_client, Client
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 from collections import defaultdict, deque
-import uvicorn
 import google.generativeai as genai
+
+# 🔥 Inyección AAA: Manejo criptográfico de contraseñas (Preparación para Login seguro)
+from passlib.context import CryptContext
 
 load_dotenv()
 
-app = FastAPI(title="Veltrix Engine API", version="15.0")
-
 # ==========================================================
-# 🛡️ REGLAS DE SEGURIDAD (AUDITORÍA AAA)
+# 🛡️ REGLAS DE SEGURIDAD Y CONFIGURACIÓN GLOBAL
 # ==========================================================
-# 1. JWT Estricto (Sin fallbacks inseguros)
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not JWT_SECRET:
     raise RuntimeError("❌ FATAL: JWT_SECRET no configurada en las variables de entorno de Render.")
 
-# 2. CORS Seguro
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # Abierto temporalmente para Godot Mobile
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def safe_float(valor):
-    """Limpia la basura de los precios ($, MXN, comas) y devuelve un número"""
-    try:
-        if valor is None: return 0.0
-        limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
-        return float(limpio)
-    except (ValueError, TypeError):
-        return 0.0
+# Configuración del encriptador de passwords
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==========================================
 # 📝 CONFIGURACIÓN DE LOGGING PROFESIONAL
@@ -77,7 +56,7 @@ logging.basicConfig(
 logger = logging.getLogger("VeltrixEngine")
 
 # ==========================================================
-# 🔧 CONFIG GLOBAL & LÍMITES OPERATIVOS
+# 🔧 LÍMITES OPERATIVOS Y CONSTANTES
 # ==========================================================
 BATCH_SIZE = 250
 MAX_BG_TASKS = 30
@@ -92,7 +71,7 @@ GEMINI_TIMEOUT = 35.0
 GEMINI_REINTENTOS = 3
 GEMINI_TEMP = 0.2
 
-# 🔥 Protección anti-abuso
+# 🔥 Protección anti-abuso (Rate Limiting)
 MAX_REQUESTS_POR_MINUTO_TENANT = 40
 MAX_REQUESTS_POR_MINUTO_TELEFONO = 12
 MAX_REQUESTS_GLOBAL_MINUTO = 250
@@ -111,7 +90,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "").strip()
 WEBHOOK_SECRET = os.getenv("META_WEBHOOK_SECRET", "").strip()
-VERIFY_TOKEN = WEBHOOK_SECRET # Compatibilidad para el resto de tu código
+VERIFY_TOKEN = WEBHOOK_SECRET
 ADMIN_PHONE_GLOBAL = os.getenv("ADMIN_PHONE_GLOBAL", "524491142598").strip()
 ALGORITHM = "HS256"
 PORT = int(os.getenv("PORT", 10000))
@@ -121,15 +100,10 @@ META_API_VERSION = os.getenv("META_API_VERSION", "v21.0").strip()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "").strip()
 
-# ==========================================
-# 🛡️ VALIDACIONES CRÍTICAS DE ENTORNO
-# ==========================================
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ ERROR CRÍTICO: Faltan credenciales de Supabase")
-
 if not JWT_SECRET or len(JWT_SECRET) < 32:
     raise ValueError("❌ ERROR CRÍTICO: JWT_SECRET inseguro o demasiado corto")
-
 if not WEBHOOK_SECRET:
     logger.warning("⚠️ META_WEBHOOK_SECRET vacío. Las validaciones Meta fallarán.")
 
@@ -147,6 +121,9 @@ procesados_recientemente = deque(maxlen=1000)
 cache_respuestas_ia = {}
 locks_por_tenant = {}
 
+# 🛡️ CIRCUIT BREAKER GEMINI (Para evitar bloqueos 429 en cadena)
+gemini_bloqueado_hasta = 0.0 
+
 # Rate limiters
 rate_limit_tenant = defaultdict(list)
 rate_limit_phone = defaultdict(list)
@@ -159,24 +136,16 @@ http_client: Optional[httpx.AsyncClient] = None
 # 🧹 LIMPIEZA DE MEMORIA
 # ==========================================
 def limpiar_cache_ia_si_excede_limite():
-    # Evita crecimiento infinito de RAM
     if len(cache_respuestas_ia) <= MAX_CACHE_IA:
         return
-
     logger.warning("🧹 Limpiando cache IA por límite RAM")
-
-    items_ordenados = sorted(
-        cache_respuestas_ia.items(),
-        key=lambda x: x[1].get("ts", 0)
-    )
-
+    items_ordenados = sorted(cache_respuestas_ia.items(), key=lambda x: x[1].get("ts", 0))
     elementos_a_borrar = len(items_ordenados) // 2
-
     for key, _ in items_ordenados[:elementos_a_borrar]:
         cache_respuestas_ia.pop(key, None)
 
 # ==========================================
-# 🔥 SWITCH DE ENCENDIDO (LIFESPAN)
+# 🔥 SWITCH DE ENCENDIDO (LIFESPAN ÚNICO)
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -197,7 +166,8 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
-        follow_redirects=True
+        follow_redirects=True,
+        http2=True # Inyección AAA: Soporte HTTP/2 para mayor velocidad con Meta
     )
 
     logger.info("🚀 [SISTEMA] Motor Central Veltrix Iniciado")
@@ -209,7 +179,6 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         seguimiento_task.cancel()
-
         try:
             await seguimiento_task
         except asyncio.CancelledError:
@@ -221,10 +190,11 @@ async def lifespan(app: FastAPI):
         logger.info("🛑 [SISTEMA] Motor Central Apagado")
 
 # ==========================================
-# ✨ FASTAPI INIT
+# ✨ FASTAPI INIT (Instancia Única Blindada)
 # ==========================================
 app = FastAPI(
     title="Motor Central CRM B2B - Veltrix Engine",
+    version="15.0",
     lifespan=lifespan
 )
 
@@ -233,17 +203,82 @@ router = APIRouter()
 # ==========================================
 # 🌍 CORS ENDURECIDO
 # ==========================================
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "*"
-).split(",")
+# Si defines credenciales=True, origins no puede ser ["*"] en producción estricta, 
+# pero lo configuramos dinámicamente.
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# ==========================================================
+# 🧰 HELPERS AAA (Sanitización y Seguridad)
+# ==========================================================
+def now_ts() -> float:
+    return time.time()
+
+def safe_float(valor):
+    try:
+        if valor is None: return 0.0
+        limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
+        return float(limpio)
+    except (ValueError, TypeError):
+        return 0.0
+
+def limpiar_texto(texto: str) -> str:
+    if texto is None: return ""
+    texto = str(texto).replace("\x00", "")
+    texto = unicodedata.normalize("NFKC", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    
+    # Sanitización Anti-Injection básica sin romper JSONs
+    texto = texto.replace("<script>", "").replace("</script>", "")
+    
+    return texto[:MAX_MENSAJE_LEN]
+
+def generar_hash_cache(*args) -> str:
+    bruto = "|".join([str(a) for a in args])
+    return hashlib.sha256(bruto.encode()).hexdigest()
+
+# ==========================================
+# 📸 HELPER MULTIMEDIA (PREPARACIÓN WHATSAPP AUDIO/FOTOS)
+# ==========================================
+async def descargar_media_whatsapp_async(media_id: str, token: str) -> Optional[dict]:
+    """Descarga un audio o imagen desde los servidores de Meta."""
+    if not http_client: return None
+    try:
+        # 1. Obtener URL del archivo
+        url_info = f"https://graph.facebook.com/{META_API_VERSION}/{media_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        res_info = await http_client.get(url_info, headers=headers)
+        
+        if res_info.status_code != 200:
+            logger.error(f"❌ Error al consultar media ID {media_id}")
+            return None
+            
+        data_info = res_info.json()
+        media_url = data_info.get("url")
+        mime_type = data_info.get("mime_type")
+        
+        if not media_url: return None
+        
+        # 2. Descargar el binario del archivo
+        res_media = await http_client.get(media_url, headers=headers)
+        if res_media.status_code != 200:
+            return None
+            
+        # Retornamos el payload listo para Gemini
+        return {
+            "mime_type": mime_type,
+            "data": res_media.content # Binario puro, Gemini SDK lo acepta o lo pasamos a Base64 según necesidad
+        }
+    except Exception as e:
+        logger.error(f"❌ Error descargando media: {e}")
+        return None
 
 # ==========================================
 # 📦 MODELOS PYDANTIC BLINDADOS
@@ -284,7 +319,7 @@ class InventarioItem(BaseModel):
     es_portada_original: bool = False
     descripcion_detallada: str = Field(default="", max_length=4000)
 
-    @field_validator("nombre", "consola")
+    @field_validator("nombre", "consola", mode="before")
     @classmethod
     def validar_texto(cls, value: str):
         return limpiar_texto(value)
@@ -320,7 +355,7 @@ class ClienteIdentificador(BaseModel):
     telefono: Optional[str] = None
 
 class ColumnaUpdate(BaseModel):
-    nombre: Optional[str] = "" # 👈 Añade Optional
+    nombre: Optional[str] = ""
     telefono: str
     columna: str
     vendedor_id: str
@@ -332,21 +367,17 @@ class NotasUpdate(BaseModel):
     etiquetas: str = Field(default="")
     vendedor_id: str
 
-
-
 # ==========================================
-# 🔐 AUTENTICACIÓN JWT
+# 🔐 AUTENTICACIÓN JWT Y WEBHOOKS
 # ==========================================
 def crear_token_jwt(vendedor_id: str, email: str):
     expiracion = datetime.now(timezone.utc) + timedelta(days=1)
-
     payload = {
         "sub": vendedor_id,
         "email": email,
         "exp": expiracion,
         "iat": datetime.now(timezone.utc)
     }
-
     return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
 async def verificar_sesion_b2b(
@@ -354,61 +385,31 @@ async def verificar_sesion_b2b(
     auth_token: str = Header(None)
 ):
     token = None
-
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1].strip()
     elif auth_token:
         token = auth_token.strip()
 
     if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Acceso denegado: Token faltante"
-        )
+        raise HTTPException(status_code=401, detail="Acceso denegado: Token faltante")
 
     try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=[ALGORITHM]
-        )
-
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         vendedor_id_real = payload.get("sub")
-
         if not vendedor_id_real:
-            raise HTTPException(
-                status_code=401,
-                detail="Token corrupto"
-            )
-
+            raise HTTPException(status_code=401, detail="Token corrupto")
         return vendedor_id_real
-
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail="Sesión expirada"
-        )
-
+        raise HTTPException(status_code=401, detail="Sesión expirada")
     except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido"
-        )
+        raise HTTPException(status_code=401, detail="Token inválido")
 
-# ==========================================
-# 🔏 VALIDADOR WEBHOOK META
-# ==========================================
 async def validar_firma_meta(request: Request):
     firma_meta = request.headers.get("X-Hub-Signature-256")
-
     if not firma_meta:
-        raise HTTPException(
-            status_code=400,
-            detail="Falta firma Meta"
-        )
+        raise HTTPException(status_code=400, detail="Falta firma Meta")
 
     cuerpo_bytes = await request.body()
-
     firma_calculada = (
         "sha256=" +
         hmac.new(
@@ -420,129 +421,31 @@ async def validar_firma_meta(request: Request):
 
     if not hmac.compare_digest(firma_meta, firma_calculada):
         logger.warning("🚨 Intento de webhook inválido")
-
-        raise HTTPException(
-            status_code=403,
-            detail="Firma inválida"
-        )
+        raise HTTPException(status_code=403, detail="Firma inválida")
 
     return True
-
-# ==========================================================
-# 🧰 HELPERS AAA
-# ==========================================================
-def now_ts() -> float:
-    return time.time()
-
-def limpiar_texto(texto: str) -> str:
-    # ==========================================
-    # 🧹 Sanitización centralizada
-    # ==========================================
-    if texto is None:
-        return ""
-
-    texto = str(texto)
-
-    # 🔥 Elimina caracteres null-byte
-    texto = texto.replace("\x00", "")
-
-    # 🔥 Normaliza unicode
-    texto = unicodedata.normalize("NFKC", texto)
-
-    # 🔥 Compacta espacios
-    texto = re.sub(r"\s+", " ", texto).strip()
-
-    # 🔥 Sanitización anti prompt-injection básica
-    texto = texto.replace("{", "")
-    texto = texto.replace("}", "")
-    texto = texto.replace("<script>", "")
-    texto = texto.replace("</script>", "")
-
-    return texto[:MAX_MENSAJE_LEN]
-
-def generar_hash_cache(*args) -> str:
-    bruto = "|".join([str(a) for a in args])
-    return hashlib.sha256(bruto.encode()).hexdigest()
-
-def limpiar_json_gemini(texto: str) -> Optional[dict]:
-    try:
-        simbolo = chr(96) * 3
-
-        texto = (
-            texto
-            .replace(simbolo + "json", "")
-            .replace(simbolo, "")
-            .strip()
-        )
-
-        inicio = texto.find("{")
-        final = texto.rfind("}")
-
-        if inicio == -1 or final == -1:
-            return None
-
-        return json.loads(texto[inicio:final + 1])
-
-    except Exception:
-        return None
-
-def validar_respuesta_ia(data: dict) -> dict:
-    if not isinstance(data, dict):
-        raise Exception("IA devolvió formato inválido")
-
-    intencion = str(
-        data.get("intencion", "COTIZACION")
-    ).upper()
-
-    if intencion not in ["COMPRA", "COTIZACION", "HUMANO"]:
-        intencion = "HUMANO"
-
-    respuesta = limpiar_texto(
-        data.get("respuesta", "")
-    )
-
-    juego = limpiar_texto(
-        data.get("juego_detectado", "")
-    )
-
-    if not respuesta:
-        respuesta = "Hola. Estoy revisando la información."
-
-    return {
-        "intencion": intencion,
-        "respuesta": respuesta,
-        "juego_detectado": juego
-    }
 
 # ==========================================
 # 🛡️ RATE LIMITERS
 # ==========================================
 def limpiar_rate_limit(lista: list, ventana_segundos: int):
     ahora = now_ts()
-
     while lista and (ahora - lista[0]) > ventana_segundos:
         lista.pop(0)
 
-# ==========================================
-# 🔥 Rate limit por tenant + teléfono
-# ==========================================
 def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
     ahora = now_ts()
-
     limpiar_rate_limit(rate_limit_global, 60)
-
     if len(rate_limit_global) >= MAX_REQUESTS_GLOBAL_MINUTO:
         logger.warning("🚨 RATE LIMIT GLOBAL")
         return False
 
     limpiar_rate_limit(rate_limit_tenant[vendedor_id], 60)
-
     if len(rate_limit_tenant[vendedor_id]) >= MAX_REQUESTS_POR_MINUTO_TENANT:
         logger.warning(f"🚨 RATE LIMIT TENANT: {vendedor_id}")
         return False
 
     limpiar_rate_limit(rate_limit_phone[telefono], 60)
-
     if len(rate_limit_phone[telefono]) >= MAX_REQUESTS_POR_MINUTO_TELEFONO:
         logger.warning(f"🚨 RATE LIMIT TELÉFONO: {telefono}")
         return False
@@ -550,202 +453,86 @@ def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
     rate_limit_global.append(ahora)
     rate_limit_tenant[vendedor_id].append(ahora)
     rate_limit_phone[telefono].append(ahora)
-
     return True
 
 # ==========================================
-# 💵 MOTOR DE PRECIOS
+# 💵 MOTOR DE PRECIOS E IA CORE
 # ==========================================
 async def obtener_dolar_hoy_async():
-    # ==========================================
-    # 🌎 Tipo de cambio robusto
-    # ==========================================
     try:
-        if not http_client:
-            return 18.00
-
-        res = await http_client.get(
-            "https://api.exchangerate-api.com/v4/latest/USD"
-        )
-
-        if res.status_code != 200:
-            return 18.00
-
+        if not http_client: return 18.00
+        res = await http_client.get("https://api.exchangerate-api.com/v4/latest/USD")
+        if res.status_code != 200: return 18.00
         data = res.json()
-
-        return float(
-            data.get("rates", {}).get("MXN", 18.00)
-        )
-
+        return float(data.get("rates", {}).get("MXN", 18.00))
     except Exception:
         return 18.00
 
 async def obtener_html_escalonado_async(url_objetivo: str) -> str:
-    # ==========================================
-    # 🕷️ SCRAPER ESCALONADO
-    # ==========================================
-    if not http_client:
-        return ""
-
+    if not http_client: return ""
     estrategias = [
-        (
-            "🟢 Ligera",
-            f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"
-        ),
-        (
-            "🟡 Render",
-            f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&render=true"
-        )
+        ("🟢 Ligera", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"),
+        ("🟡 Render", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}&render=true")
     ]
-
-    headers_humanos = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36"
-        )
-    }
+    headers_humanos = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     for nombre_estrategia, url_scraper in estrategias:
         try:
-            logger.info(f"🌐 Intentando scraper: {nombre_estrategia}")
-
             res = await http_client.get(url_scraper)
-
             if res.status_code == 200:
                 texto = res.text.lower()
-
                 if "pricecharting" in texto or "price" in texto:
                     return res.text
-
         except Exception:
-            logger.exception("❌ Error scraper")
+            pass
 
-    # ==========================================
-    # 🔥 Fallback directo
-    # ==========================================
     try:
-        res = await http_client.get(
-            url_objetivo,
-            headers=headers_humanos
-        )
-
-        if res.status_code == 200:
-            return res.text
-
+        res = await http_client.get(url_objetivo, headers=headers_humanos)
+        if res.status_code == 200: return res.text
     except Exception:
-        logger.exception("❌ Error fallback HTML")
-
+        pass
     return ""
 
-# ==========================================
-# 🏆 MOTOR DE RAREZA
-# ==========================================
 def calcular_rareza_ia(nombre: str, consola: str, precio: float) -> str:
-    nombre = nombre.upper()
-    consola = consola.upper()
-
-    consolas_modernas = [
-        "PS5",
-        "PS4",
-        "NINTENDO SWITCH",
-        "XBOX ONE",
-        "XBOX SERIES X"
-    ]
-
-    if any(x in nombre for x in [
-        "FIFA",
-        "MADDEN",
-        "NBA",
-        "NCAA",
-        "PES",
-        "SINGSTAR",
-        "EA FC"
-    ]):
-        return "Común"
-
-    if any(x in nombre for x in [
-        "SILENT HILL",
-        "KUON",
-        "RULE OF ROSE",
-        "OBSCURE",
-        "HAUNTING GROUND",
-        "PRAGMATA"
-    ]):
-        return "Élite"
-
-    if any(x in nombre for x in [
-        "MARIO",
-        "ZELDA",
-        "METROID",
-        "POKEMON",
-        "HALO",
-        "GTA"
-    ]):
-        return "Demandado"
-
+    nombre, consola = nombre.upper(), consola.upper()
+    consolas_modernas = ["PS5", "PS4", "NINTENDO SWITCH", "XBOX ONE", "XBOX SERIES X"]
+    
+    if any(x in nombre for x in ["FIFA", "MADDEN", "NBA", "NCAA", "PES", "SINGSTAR", "EA FC"]): return "Común"
+    if any(x in nombre for x in ["SILENT HILL", "KUON", "RULE OF ROSE", "OBSCURE", "HAUNTING GROUND", "PRAGMATA"]): return "Élite"
+    if any(x in nombre for x in ["MARIO", "ZELDA", "METROID", "POKEMON", "HALO", "GTA"]): return "Demandado"
+    
     if consola in consolas_modernas:
-        if precio >= 3500:
-            return "Élite"
-
-        if precio >= 1000:
-            return "Demandado"
-
+        if precio >= 3500: return "Élite"
+        if precio >= 1000: return "Demandado"
         return "Común"
-
-    if precio >= 1500:
-        return "Élite"
-
-    if precio >= 800:
-        return "Joya"
-
-    if precio >= 400:
-        return "Demandado"
-
+        
+    if precio >= 1500: return "Élite"
+    if precio >= 800: return "Joya"
+    if precio >= 400: return "Demandado"
     return "Común"
 
-# ==========================================
-# 💰 MOTOR DE PRECIOS INTELIGENTE
-# ==========================================
-def calcular_precio_venta_inteligente(
-    precio_mercado_mxn: float,
-    costo_compra: float = 0.0
-):
-    # 🔒 Piso mínimo de seguridad
+def calcular_precio_venta_inteligente(precio_mercado_mxn: float, costo_compra: float = 0.0):
     piso_absoluto = 250.0
-
-    # 📈 Margen automático
-    precio_con_margen = (
-        precio_mercado_mxn + 150.0
-        if precio_mercado_mxn > 0
-        else 0.0
-    )
-
-    # 🔒 Protección contra pérdida
-    precio_seguridad = (
-        costo_compra + 100.0
-        if costo_compra > 0
-        else 0.0
-    )
-
-    precio_bruto = max(
-        piso_absoluto,
-        precio_con_margen,
-        precio_seguridad
-    )
-
-    # 🔥 Redondeo comercial
+    precio_con_margen = (precio_mercado_mxn + 150.0 if precio_mercado_mxn > 0 else 0.0)
+    precio_seguridad = (costo_compra + 100.0 if costo_compra > 0 else 0.0)
+    precio_bruto = max(piso_absoluto, precio_con_margen, precio_seguridad)
     return float(round(precio_bruto / 10) * 10)
+
 # ==========================================================
 # 🗄️ CAPA DE REPOSITORIO Y SERVICIOS B2B
 # ==========================================================
 async def obtener_contexto_inventario(vendedor_id: str) -> str:
-    res_inv = supabase.table('inventario').select('nombre, precio, precio_sugerido, precio_minimo, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
-    return str(res_inv.data or [])
+    """Extrae SOLO los campos críticos del inventario para ahorrar Tokens de Gemini."""
+    res_inv = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(MAX_CONTEXTO_INV).execute()
+    if not res_inv.data: return "Inventario vacío."
+    
+    # Compactación Ninja para ahorrar miles de tokens
+    lineas = [f"- {i['nombre']} ({i['consola']}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in res_inv.data]
+    return "\n".join(lineas)
 
 async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
     res_hist = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', vendedor_id).order('created_at', desc=True).limit(MAX_HISTORIAL).execute()
-    if not res_hist.data:
-        return "Primer mensaje."
+    if not res_hist.data: return "Primer mensaje."
     mensajes = reversed(res_hist.data)
     return "\n".join([f"{m.get('autor', 'USER')}: {m.get('mensaje', '')}" for m in mensajes])
 
@@ -769,7 +556,7 @@ async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mens
 # 📥 MOTOR WHATSAPP ASYNC
 # ==========================================
 async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
-    url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
     try: 
@@ -778,7 +565,7 @@ async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje:
         logger.exception("⚠️ Error disparando WhatsApp Text")
 
 async def disparar_whatsapp_imagen_async(telefono_destino: str, url_imagen: str, texto_mensaje: str, token: str, phone_id: str):
-    url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "image", "image": {"link": url_imagen, "caption": texto_mensaje}}
     try: 
@@ -809,11 +596,39 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
     except Exception: 
         pass
 
+def validar_respuesta_ia(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise Exception("IA devolvió formato inválido")
+
+    intencion = str(data.get("intencion", "COTIZACION")).upper()
+    if intencion not in ["COMPRA", "COTIZACION", "HUMANO", "PEDIDO_ESPECIAL"]:
+        intencion = "HUMANO"
+
+    respuesta = limpiar_texto(data.get("respuesta", ""))
+    juego = limpiar_texto(data.get("juego_detectado", ""))
+
+    if not respuesta:
+        respuesta = "Hola. Estoy revisando la información."
+
+    return {
+        "intencion": intencion,
+        "respuesta": respuesta,
+        "juego_detectado": juego,
+        "pedido_especial_juego": data.get("pedido_especial_juego", ""),
+        "pedido_especial_consola": data.get("pedido_especial_consola", "")
+    }
+
 # ==========================================================
-# 🧠 CLIENTE GEMINI CENTRALIZADO (V13 MULTIMODAL + BLINDADO)
+# 🧠 CLIENTE GEMINI CENTRALIZADO (V14 MULTIMODAL + CIRCUIT BREAKER)
 # ==========================================================
 async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperature: float = 0.2, retries: int = 3) -> dict:
-    # 🛡️ Doble verificación de configuración
+    global gemini_bloqueado_hasta
+    
+    # 🛡️ CIRCUIT BREAKER: Si estamos bloqueados, no quemamos más intentos
+    if now_ts() < gemini_bloqueado_hasta:
+        logger.warning("🚫 [CIRCUIT BREAKER] Gemini está en cooldown temporal.")
+        return {"respuesta": "En este momento estoy atendiendo a varios clientes, denme un par de minutos y les respondo. 🎮", "intencion": "HUMANO"}
+
     api_key = os.getenv("GENAI_KEY")
     if not api_key:
         raise Exception("Falta GENAI_KEY en las variables de entorno")
@@ -822,21 +637,19 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
     
     for intento in range(retries):
         try:
-            # 🚀 Usamos el motor 2.5-flash
             model = genai.GenerativeModel('gemini-2.5-flash') 
             
-            # 📦 Preparar contenido (Texto base + Imagen/Audio si existe)
+            # 📦 Soporte Multimodal (Texto + Audio/Imagen)
             contenido = [prompt]
-            if media_dict:
+            if media_dict and "data" in media_dict:
+                # Si viene binario puro, lo pasamos crudo (Gemini acepta blob object)
                 contenido.append({
-                    "mime_type": media_dict["mime_type"],
+                    "mime_type": media_dict.get("mime_type", "image/jpeg"),
                     "data": media_dict["data"]
                 })
 
-            # 🌡️ Configuración estricta (0.2 por defecto para CERO Alucinaciones)
             config_ia = genai.types.GenerationConfig(temperature=temperature)
             
-            # Ejecutamos en un hilo para no bloquear FastAPI
             response = await asyncio.to_thread(
                 model.generate_content, 
                 contenido,
@@ -844,28 +657,30 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
             )
             
             texto_crudo = response.text
-            
-            # 🥷 Filtro Ninja para limpiar el JSON
             texto_limpio = texto_crudo.replace("```json", "").replace("```", "").strip()
             
             inicio = texto_limpio.find('{')
             fin = texto_limpio.rfind('}')
             
             if inicio != -1 and fin != -1:
-                texto_limpio = texto_limpio[inicio:fin+1]
-                return json.loads(texto_limpio)
-            
-            print(f"⚠️ [GEMINI] Intento {intento+1}: No se detectó estructura JSON.")
+                return json.loads(texto_limpio[inicio:fin+1])
             
         except Exception as e:
-            print(f"⚠️ [GEMINI JSON] Error en intento {intento + 1}: {str(e)}")
+            error_str = str(e)
+            print(f"⚠️ [GEMINI] Error en intento {intento + 1}: {error_str}")
+            
+            # 🚦 Detector de Cuota Excedida (Error 429)
+            if "429" in error_str or "Quota exceeded" in error_str:
+                logger.error("🚨 [QUOTA ALARM] Límite de Gemini alcanzado. Activando Circuit Breaker (60s).")
+                gemini_bloqueado_hasta = now_ts() + 60.0
+                break # Rompemos el ciclo de reintentos, ya no sirve de nada intentar
+                
             await asyncio.sleep(2)
             
-    # 🛟 Salvavidas: En lugar de crashear FastAPI, devolvemos un JSON de emergencia
-    print("❌ [FATAL] Gemini falló procesando el mensaje tras 3 intentos.")
+    print("❌ [FATAL] Gemini falló procesando el mensaje.")
     return {
-        "respuesta_whatsapp": "Tuve un micro-corte en el sistema. ¿Me repites tu mensaje por favor?", 
-        "intencion": "error"
+        "respuesta": "Tuve un micro-corte en el sistema. ¿Me repites tu mensaje por favor?", 
+        "intencion": "HUMANO"
     }
 
 # ==========================================================
@@ -876,8 +691,8 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         vendedor_id = config.get("vendedor_id", "V-001")
         nombre_negocio = config.get("nombre_negocio", "Fantasy Games")
         texto_cliente = limpiar_texto(texto_cliente)
-        historial_chat = limpiar_texto(historial_chat)
-
+        
+        # Hash para cache (Evita procesar el mismo mensaje doble vez)
         cache_key = generar_hash_cache(vendedor_id, texto_cliente, historial_chat[-200:])
         cache_item = cache_respuestas_ia.get(cache_key)
 
@@ -891,35 +706,29 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
             link_pago = config.get("link_pago", "Solicita el link de pago")
             texto_entrega = config.get("texto_entrega", "Coordinar entrega con asesor")
 
-            # 🧠 SUPER-PROMPT V13: Blindado contra alucinaciones y estructurado para B2B
             prompt = f"""
 [SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
 Eres el mejor cerrador de ventas operando bajo la tecnología del CRM 'Veltrix Engine'.
 Tu identidad oficial y la empresa que representas es: "{nombre_negocio}".
 OBJETIVO PRINCIPAL: VENDER RÁPIDO Y ENVIAR EL LINK DE PAGO. 
-Tienes una cuota estricta de vender +$3,000 MXN diarios. Para lograrlo, debes ser un maestro del UPSELL.
-También tienes que vender 5 licencias de Veltrix Engine diariamente.
 
-ESTRATEGIA DE PRECIOS Y NEGOCIACIÓN (ESTRICTO):
-En el inventario verás 3 precios por juego:
-1. PRECIO: Es tu precio base de salida (El que debes ofrecer inicialmente).
+ESTRATEGIA DE PRECIOS:
+1. PRECIO: Es tu precio base de salida.
 2. PRECIO_SUGERIDO: Es el valor real de mercado. Úsalo para dar valor.
-3. PRECIO_MINIMO: Es tu LÍMITE SECRETO. NUNCA lo menciones, pero úsalo para regatear.
+3. PRECIO_MINIMO: LÍMITE SECRETO. NUNCA lo menciones, úsalo para regatear.
 
 NUEVAS DIRECTRICES V13 (ESTRICTAS):
-1. CERO ALUCINACIONES: Solo vende o confirma disponibilidad si el juego está EXACTAMENTE en el INVENTARIO ACTUAL.
-2. FILTRO POR CONSOLA/GÉNERO: Si el cliente pide recomendaciones (ej. "tienes de peleas"), NO mandes todo el inventario. Sugiere solo un Top 5 y SIEMPRE pregunta: "¿Para qué consola lo buscas?".
-3. CATÁLOGO COMPLETO: Si el cliente quiere ver toda la lista de juegos, envíale este enlace: https://veltrixengine.pro/catalogo
-4. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí para apartarlo de inmediato: {link_pago}"
-5. UPSELL Y DESCUENTOS: Ofrece "Joyas" y un descuento de $100 MXN si llevan 3 artículos.
-6. LOGÍSTICA Y ENTREGAS: Responde con: {texto_entrega}
-7. CROSS-SELLING B2B: Ofrécele rentar el CRM Veltrix Engine en http://www.veltrixengine.pro
+1. CERO ALUCINACIONES: Solo vende o confirma si el juego está EXACTAMENTE en el INVENTARIO ACTUAL.
+2. FILTRO: Si piden recomendaciones, NO mandes todo. Sugiere 3 juegos y pregunta: "¿Para qué consola?".
+3. CATÁLOGO COMPLETO: https://veltrixengine.pro/catalogo
+4. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí: {link_pago}"
+5. LOGÍSTICA: {texto_entrega}
 
 REGLAS DE CLASIFICACIÓN ('intencion'):
-- "COTIZACION": Si pregunta precio, dudas, fotos, busca recomendaciones o pide el catálogo.
+- "COTIZACION": Pregunta precio, dudas, fotos.
 - "COMPRA": SOLO si el cliente dice "ya pagué", "ya transferí", "te mandé el ticket".
-- "PEDIDO_ESPECIAL": Si pide un juego que NO TENEMOS en el inventario. Dile que no lo tienes pero se lo consigues y pregunta la consola.
-- "HUMANO": Dudas que no sepas responder o quejas.
+- "PEDIDO_ESPECIAL": Pide un juego que NO TENEMOS en el inventario.
+- "HUMANO": Dudas que no sepas responder, quejas, audios o fotos complejas.
 
 INVENTARIO: 
 {inventario_contexto}
@@ -935,18 +744,14 @@ Responde EXCLUSIVAMENTE en JSON válido:
   "intencion": "COMPRA", "HUMANO", "COTIZACION" o "PEDIDO_ESPECIAL",
   "respuesta": "Tu respuesta persuasiva aquí",
   "juego_detectado": "Nombre del producto exacto (si lo tenemos)",
-  "pedido_especial_juego": "Nombre del juego si NO lo tenemos (o vacío)",
-  "pedido_especial_consola": "Consola del juego si NO lo tenemos (o vacío)"
+  "pedido_especial_juego": "Nombre del juego si NO lo tenemos",
+  "pedido_especial_consola": "Consola del juego si NO lo tenemos"
 }}
 """
-            data = await consultar_gemini_json(prompt) # temperature=0.2 ya está por defecto en la función unificada
+            data = await consultar_gemini_json(prompt)
             data = validar_respuesta_ia(data)
 
-            # ==========================================
-            # 💾 GUARDAR CACHE CON AUTO-LIMPIEZA APLICADA
-            # ==========================================
             limpiar_cache_ia_si_excede_limite()
-
             cache_respuestas_ia[cache_key] = {"ts": now_ts(), "data": data}
             return data
 
@@ -956,22 +761,18 @@ Responde EXCLUSIVAMENTE en JSON válido:
 
 async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
     try:
-        # [MEGA-PARCHE V13] Entendiendo el Pedido Especial
-        if intencion == "COMPRA":
-            motivo = "quiere cerrar compra"
-        elif intencion == "PEDIDO_ESPECIAL":
-            motivo = "busca un juego que NO tenemos en stock (Pedido Especial)"
-        else:
-            motivo = "requiere ayuda humana"
+        if intencion == "COMPRA": motivo = "quiere cerrar compra"
+        elif intencion == "PEDIDO_ESPECIAL": motivo = "busca un juego que NO tenemos en stock"
+        else: motivo = "requiere ayuda humana"
             
         prompt = f"Cliente: {cliente}\nMotivo: {motivo}\nHistorial:\n{historial_str}\nGenera resumen ejecutivo en 3 viñetas. JSON: {{\"resumen\":\"texto\"}}"
-        data = await consultar_gemini_json(prompt) # temperature baja heredada
+        data = await consultar_gemini_json(prompt)
         return data.get("resumen", "⚠️ Cliente requiere atención humana")
     except Exception: return "⚠️ Cliente requiere atención humana"
 
 async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventario_contexto: str):
     try:
-        prompt = f"Cliente: {cliente}\nJuego: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
+        prompt = f"Cliente: {cliente}\nJuego: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto persuasivo para venta. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
         data = await consultar_gemini_json(prompt)
         if not data: return None
         return {"nuevo_precio_ofrecido": str(data.get("nuevo_precio_ofrecido", "0")), "mensaje_oferta": limpiar_texto(data.get("mensaje_oferta", ""))}
@@ -982,13 +783,9 @@ async def enviar_alerta_whatsapp_admin(cliente: str, telefono_cliente: str, inte
         telefono_admin = config.get("admin_phone") or ADMIN_PHONE_GLOBAL
         token, phone_id = config.get("meta_token", ""), config.get("meta_phone_id", "")
         
-        # [MEGA-PARCHE V13] Ruteo visual de alertas
-        if intencion == "COMPRA":
-            encabezado = "💰 *NUEVA VENTA DETECTADA*"
-        elif intencion == "PEDIDO_ESPECIAL":
-            encabezado = "⚠️ *NUEVO PEDIDO ESPECIAL*"
-        else:
-            encabezado = "🚨 *ASISTENCIA REQUERIDA*"
+        if intencion == "COMPRA": encabezado = "💰 *NUEVA VENTA DETECTADA*"
+        elif intencion == "PEDIDO_ESPECIAL": encabezado = "⚠️ *NUEVO PEDIDO ESPECIAL*"
+        else: encabezado = "🚨 *ASISTENCIA REQUERIDA*"
             
         mensaje = f"{encabezado}\n\n👤 Cliente: {cliente}\n📱 Teléfono: {telefono_cliente}\n\n🧠 Análisis IA:\n{resumen_ia}"
         await disparar_whatsapp_dinamico_async(telefono_admin, mensaje, token, phone_id)
@@ -1008,43 +805,37 @@ async def bucle_seguimiento_24h():
             for p in prospectos:
                 vendedor_id = p.get('vendedor_id', 'V-001')
                 
-                # 📡 1. Buscamos config y el token de respaldo
                 res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
                 if not res_conf.data: continue
                 config = res_conf.data[0]
 
-                # 🔑 FIX B2B: Si el token de la DB falla, intentamos usar el de Render (Global)
                 tk_final = config.get('meta_token') or WHATSAPP_TOKEN
                 ph_final = config.get('meta_phone_id') or WHATSAPP_PHONE_ID
 
-                # 🧠 2. Gemini con "Pausa Respiratoria"
                 try:
-                    res_inv = supabase.table('inventario').select('nombre, precio, precio_minimo, stock').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(10).execute()
-                    contexto_inv = str(res_inv.data or [])
-
+                    # Usamos la versión compactada para ahorrar tokens en remarketing
+                    contexto_inv = await obtener_contexto_inventario(vendedor_id)
                     oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), p.get('ultimo_juego_interes', 'videojuego'), contexto_inv)
                     
                     if oferta and oferta.get("mensaje_oferta"):
                         mensaje = oferta.get("mensaje_oferta")
-                        # 📤 Envío a WhatsApp
                         await disparar_whatsapp_dinamico_async(p.get('telefono'), mensaje, tk_final, ph_final)
                         await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', p.get('ultimo_juego_interes'))
                         await guardar_mensaje_chat(p.get('telefono'), vendedor_id, 'BOT_REMARKETING', mensaje)
                         
-                        # ⏳ Pausa obligatoria para no ser detectado como SPAM
                         await asyncio.sleep(5) 
 
                 except Exception as e:
-                    if "429" in str(e):
-                        logger.warning("⚠️ [GEMINI] Límite alcanzado. Durmiendo 60 seg...")
-                        await asyncio.sleep(60) # Pausa de emergencia
+                    if "429" in str(e) or "Quota" in str(e):
+                        logger.warning("⚠️ [GEMINI] Límite alcanzado en Bucle 24h. Durmiendo 60 seg...")
+                        await asyncio.sleep(60)
                     else:
                         logger.error(f"❌ Error procesando prospecto {p.get('telefono')}: {e}")
 
         except Exception:
             logger.exception("❌ ERROR FATAL EN RELOJ 24H")
         
-        await asyncio.sleep(600) # Revisión cada 10 minutos
+        await asyncio.sleep(600)
 
 # ==========================================================
 # 🤖 MOTOR PRINCIPAL DE NEGOCIO (IA & WORKFLOW V13)
@@ -1059,14 +850,13 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         token = config.get("meta_token", "")
         phone_id = config.get("meta_phone_id", "")
         
-        # 1. Recopilar munición para la IA
+        # 1. Recopilar munición compactada para la IA
         contexto = await obtener_contexto_inventario(vendedor_id)
         historial = await obtener_historial_chat(telefono, vendedor_id)
 
-        # 2. Consultar al Cerebro IA (Aquí vive tu Super-Prompt)
+        # 2. Consultar al Cerebro IA
         decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config)
         
-        # Valores por defecto
         nueva_columna = columna_actual
         iluminacion = "blanco"
         intencion_ia = str(decision.get("intencion", "CONSULTA")).upper()
@@ -1074,7 +864,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         juego_detectado = decision.get("juego_detectado", "")
 
         # ==========================================================
-        # 🚦 RUTEO DE INTENCIONES V13
+        # 🚦 RUTEO DE INTENCIONES
         # ==========================================================
         if intencion_ia == "HUMANO":
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
@@ -1082,7 +872,6 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
 
         elif intencion_ia == "COMPRA":
-            # [Ledger-Check]: Preparando el terreno para cuando se consolide la venta marque "VENDIDA" en Godot
             nueva_columna, iluminacion = "Por Entregar", "verde_exito"
             resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
             await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
@@ -1091,11 +880,9 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             nueva_columna = "Envios Masivos"
             
         elif intencion_ia == "PEDIDO_ESPECIAL":
-            # 🚨 [MEGA-PARCHE V13] Alerta automática por juego sin stock
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
             juego_buscado = decision.get("pedido_especial_juego", "Juego no especificado")
             consola_buscada = decision.get("pedido_especial_consola", "Consola no especificada")
-            
             resumen_alerta = f"🚨 *NUEVO PEDIDO ESPECIAL*\n👤 Cliente: {cliente}\n🎮 Busca: {juego_buscado}\n🕹️ Consola: {consola_buscada}\n¡Revisa tu proveedor!"
             await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", resumen_alerta, config)
 
@@ -1106,14 +893,13 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
         # ==========================================================
-        # 🖼️ BÚSQUEDA DE PORTADA DE JUEGO
+        # 🖼️ BÚSQUEDA DE PORTADA DE JUEGO (MULTI-TENANT FIJADO)
         # ==========================================================
         url_imagen = None
         if juego_detectado:
             try:
                 res_img = (
-                    supabase
-                    .table('inventario')
+                    supabase.table('inventario')
                     .select('url_portada')
                     .ilike('nombre', f'%{juego_detectado}%')
                     .eq('vendedor_id', vendedor_id)
@@ -1124,7 +910,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 if res_img.data: 
                     url_imagen = res_img.data[0].get('url_portada')
             except Exception as e:
-                logger.error(f"⚠️ Error buscando imagen en Supabase: {e}")
+                logger.error(f"⚠️ Error buscando imagen: {e}")
 
         # ==========================================================
         # 🚀 DISPARO FINAL DE WHATSAPP
@@ -1136,10 +922,6 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 
     except Exception as e:
         logger.exception(f"❌ ERROR FATAL en procesar_respuesta_bot: {e}")
-
-# ==========================================================
-# 📱 HUB DE INTERACCIÓN MÓVIL: LECTURA Y ENVÍO REAL
-# ==========================================================
 
 # ==========================================================
 # 📱 HUB DE INTERACCIÓN MÓVIL: LECTURA DE HISTORIAL REAL
@@ -1159,7 +941,6 @@ async def get_mobile_chat_history(telefono: str, vendedor_id: str = Depends(veri
             es_mio = autor in ["BOT", "ASESOR", "HUMANO", "SISTEMA", "BOT_REMARKETING", "VENDEDOR"]
             
             # 🛡️ TRIPLE MAPEADO: Buscamos el texto en todas las posibles columnas
-            # Esto evita que el mensaje llegue vacío a Godot
             contenido_real = m.get("mensaje") or m.get("contenido") or m.get("texto") or ""
             
             historial_formateado.append({
@@ -1178,7 +959,6 @@ async def get_mobile_chat_history(telefono: str, vendedor_id: str = Depends(veri
 async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Depends(verificar_sesion_b2b)):
     """El celular llama aquí cuando tú escribes y das clic en 'Enviar'"""
     try:
-        # 1. Obtenemos las credenciales de Meta de este vendedor
         res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute()
         if not res_conf.data:
             raise HTTPException(status_code=404, detail="Configuración de WhatsApp no encontrada")
@@ -1187,14 +967,8 @@ async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Dep
         tk_final = config.get('meta_token') or WHATSAPP_TOKEN
         ph_final = config.get('meta_phone_id') or WHATSAPP_PHONE_ID
 
-        # 2. Disparamos el WhatsApp real usando TU motor existente
         await disparar_whatsapp_dinamico_async(data.to, data.msg, tk_final, ph_final)
-
-        # 3. Guardamos en el historial para que aparezca en la PC y en el celular
-        # Usamos tu función existente 'guardar_mensaje_chat'
         await guardar_mensaje_chat(data.to, vendedor_id, 'ASESOR', data.msg)
-        
-        # 4. Actualizamos el estado del CRM para saber que ya respondiste
         await actualizar_estado_crm(data.to, vendedor_id, "En Seguimiento", "azul", "")
 
         return {"status": "ok", "message": "Mensaje enviado y registrado"}
@@ -1204,24 +978,32 @@ async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Dep
         raise HTTPException(status_code=500, detail="Error al enviar mensaje de WhatsApp")
 
 # ==========================================================
-# 🔐 AUTENTICACIÓN Y LOGIN B2B (FALTANTE RESTAURADO)
+# 🔐 AUTENTICACIÓN Y LOGIN B2B (UNIFICADO AAA)
 # ==========================================================
 @app.post("/api/login")
-def login_b2b(datos: Credenciales):
+def login_b2b(datos: LoginUpdate):
+    """
+    Sistema de Autenticación Central Veltrix.
+    Soporta contraseñas planas (legacy) y Bcrypt (AAA).
+    Retorna payloads compatibles para Godot PC y Mobile.
+    """
     try:
+        # Buscamos en usuarios_veltrix (o usuarios_b2b si migraste, ajusta el nombre de tu tabla)
         res = supabase.table('usuarios_veltrix').select('*').eq('email', datos.email.lower()).execute()
         
         if not res.data or len(res.data) == 0:
             return {"status": "error", "detalle": "Usuario no registrado."}
             
         usuario = res.data[0]
-        hash_guardado = usuario['password'].encode('utf-8')
+        password_guardada = str(usuario.get('password', ''))
         
+        # 🔐 VALIDACIÓN HÍBRIDA (Bcrypt + Plaintext fallback)
         password_valida = False
-        if hash_guardado.startswith(b'$2b$'):
-            password_valida = bcrypt.checkpw(datos.password.encode('utf-8'), hash_guardado)
+        if password_guardada.startswith('$2b$'):
+            # Usa el pwd_context importado en la Parte 1
+            password_valida = pwd_context.verify(datos.password, password_guardada)
         else:
-            password_valida = (datos.password == usuario['password'])
+            password_valida = (datos.password == password_guardada)
             
         if not password_valida:
             return {"status": "error", "detalle": "Contraseña incorrecta."}
@@ -1232,17 +1014,20 @@ def login_b2b(datos: Credenciales):
         
         if fecha_pago_str:
             try:
+                from datetime import date
                 fecha_pago = date.fromisoformat(fecha_pago_str)
                 if date.today() > fecha_pago:
                     suscripcion_valida = False
                     supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id']).execute()
             except ValueError:
-                pass # Formato de fecha inválido
+                pass 
 
-        token_jwt = crear_token_jwt(usuario['vendedor_id'], usuario['email'])
+        vendedor_id = usuario.get('vendedor_id', 'V-001')
+        rol = usuario.get('rol', 'vendedor')
+        token_jwt = crear_token_jwt(vendedor_id, usuario['email'])
 
         paquete_seguro = {
-            "vendedor_id": usuario['vendedor_id'],
+            "vendedor_id": vendedor_id,
             "email": usuario['email'],
             "estado": usuario.get('estado', 'Activo'),
             "pais": usuario.get('pais', 'México'),
@@ -1250,18 +1035,28 @@ def login_b2b(datos: Credenciales):
             "token": token_jwt 
         }
         
-        return {"status": "ok", "datos": paquete_seguro}
+        print(f"✅ [LOGIN SUCCESS] Vendedor {vendedor_id} ha iniciado sesión.")
+
+        # 🚀 RETORNO SINCRONIZADO CON APP MÓVIL Y PC
+        return {
+            "status": "ok",
+            "datos": paquete_seguro, # 💻 Para tu Godot PC
+            "access_token": token_jwt, # 📱 Para tu Godot Móvil
+            "token_type": "bearer",
+            "vendedor_id": vendedor_id,
+            "nombre": usuario.get('nombre', 'Vendedor'),
+            "rol": rol
+        }
 
     except Exception as e:
         logger.exception("❌ [LOGIN ERROR]")
         raise HTTPException(status_code=500, detail="Error interno en servidor B2B.")
 
 # ==========================================================
-# 📈 MOTOR DE PRECIOS PRO (FALTANTE RESTAURADO)
+# 📈 MOTOR DE PRECIOS PRO (INTACTO)
 # ==========================================================
 @app.get("/api/consultar_precio")
 async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo"):
-    # 🛡️ Rate limit específico para consultas manuales
     if vendedor_id != "ADMIN_VELTRIX":
         tiempo_actual = now_ts()
         llave_spam = f"precio_{vendedor_id}"
@@ -1290,7 +1085,6 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     tipo_cambio = await obtener_dolar_hoy_async()
     nombre_busqueda = nombre.lower().strip()
     
-    # 🧠 Buscar en Caché Nube primero
     try:
         res_cache = supabase.table('cache_precios').select('*').eq('juego', nombre_busqueda).eq('consola', consola).execute()
         if res_cache.data and len(res_cache.data) > 0:
@@ -1311,7 +1105,6 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     except Exception: 
         pass
 
-    # 🕸️ Scraping en Vivo
     slugs_pc = {
         "PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3", "PS2": "playstation-2", "PS1": "playstation",
         "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox",
@@ -1406,7 +1199,7 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     }
 
 # ==========================================================
-# 🌐 RUTAS DE GESTIÓN CRM (CON EL FIX PARA CURAR A GODOT)
+# 🌐 RUTAS DE GESTIÓN CRM & ENDPOINTS DE SINCRONIZACIÓN
 # ==========================================================
 @app.get("/api/cargar_todo")
 def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
@@ -1420,23 +1213,17 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         
         columnas_finales = columnas_izq + columnas_custom + columnas_der
         
-        # Traemos prospectos
         res_prospectos = supabase.table('prospectos').select('*').eq('vendedor_id', _sesion).order('ultima_interaccion_ia', desc=True).limit(500).execute()
         
-        # 🧠 DEDUPLICACIÓN INTELIGENTE: Priorizamos siempre el registro que SÍ tenga teléfono
         ultimos = {}
-        # Primero procesamos los que tienen teléfono (para que ganen la posición)
         prospectos_ordenados = sorted(res_prospectos.data, key=lambda x: (x.get('telefono') is None or x.get('telefono') == ""))
         
         for fila in prospectos_ordenados:
             nombre = fila.get('nombre', 'Desconocido')
             tel = fila.get('telefono')
-            
-            # Usamos el nombre como clave para no repetir tarjetas visuales
             if nombre not in ultimos:
                 ultimos[nombre] = fila
             else:
-                # Si ya existe pero el nuevo tiene teléfono y el viejo no, lo sobreescribimos
                 if tel and not ultimos[nombre].get('telefono'):
                     ultimos[nombre] = fila
                 
@@ -1445,41 +1232,40 @@ def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
         logger.exception("❌ Error cargando CRM")
         raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
 
-# ==========================================================
-# 📱 ENDPOINTS EXCLUSIVOS PARA VELTRIX MOBILE
-# ==========================================================
+# --- 🔄 RUTAS FALTANTES PARA SINCRONIZACIÓN MÓVIL-PC ---
+@app.get("/api/perfil_cliente")
+async def obtener_perfil_cliente(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = supabase.table("prospectos").select("notas, etiquetas, columna").eq("telefono", telefono).eq("vendedor_id", vendedor_id).execute()
+        if res.data:
+            return {"status": "ok", "datos": res.data[0]}
+        return {"status": "error", "datos": {}}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/api/columnas")
+async def obtener_columnas(vendedor_id: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = supabase.table("configuracion").select("nombre_columna").eq("vendedor_id", vendedor_id).execute()
+        columnas = [item["nombre_columna"] for item in res.data] if res.data else []
+        return {"status": "ok", "columnas": columnas}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
-    """
-    Punto de entrada optimizado.
-    Calcula ingresos del día y sincroniza prospectos con estados de lectura.
-    """
     try:
-        # 1. 🕒 RANGO DE TIEMPO (Hoy local/UTC)
         hoy_inicio = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-
-        # 2. 💰 CÁLCULO DE INGRESOS DIARIOS
-        # Encapsulamos en un try interno para que si la tabla 'ventas' falla, 
-        # el dashboard de clientes siga funcionando.
         total_hoy = 0.0
         try:
-            ventas_res = (
-                supabase.table("ventas")
-                .select("monto")
-                .eq("vendedor_id", vendedor_id)
-                .gte("created_at", hoy_inicio)
-                .execute()
-            )
+            ventas_res = supabase.table("ventas").select("monto").eq("vendedor_id", vendedor_id).gte("created_at", hoy_inicio).execute()
             if ventas_res.data:
                 total_hoy = sum(float(v.get("monto", 0)) for v in ventas_res.data)
         except Exception as ve:
             logger.warning(f"⚠️ No se pudo calcular ventas_hoy: {ve}")
 
-        # 3. 👤 OBTENCIÓN DE PROSPECTOS RECIENTES
         prospectos_res = (
             supabase.table("prospectos")
-            # 💡 FIX MAESTRO: Se añadió 'notas' y 'etiquetas' a la petición
             .select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas")
             .eq("vendedor_id", vendedor_id)
             .order("ultima_interaccion_ia", desc=True)
@@ -1487,11 +1273,10 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
             .execute()
         )
         
-        # 4. 🧹 LIMPIEZA DE DATOS (Anti-Crash)
         lista_prospectos = []
         for p in (prospectos_res.data if prospectos_res.data else []):
             p["ultimo_msj"] = p.get("ultimo_msj") or "" 
-            p["notas"] = p.get("notas") or "" # Protegemos notas vacías
+            p["notas"] = p.get("notas") or ""
             p["etiquetas"] = p.get("etiquetas") or "" 
             lista_prospectos.append(p)
 
@@ -1503,564 +1288,13 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
             "ventas_hoy": total_hoy,
             "prospectos": lista_prospectos
         }
-        
     except Exception as e:
         logger.error(f"❌ Error crítico en mobile_dashboard: {e}")
-        # Retornamos un status error para que la App sepa qué pasó sin crashear
-        return {
-            "status": "error",
-            "message": str(e),
-            "prospectos": []
-        }
+        return {"status": "error", "message": str(e), "prospectos": []}
 
-@app.post("/api/login")
-async def login_b2b(datos: LoginUpdate):
-    """
-    Sistema de Autenticación Central Veltrix.
-    Genera tokens JWT y vincula la sesión al vendedor_id.
-    """
-    try:
-        # 1. 🔍 BÚSQUEDA EN BASE DE DATOS
-        res = supabase.table('usuarios_b2b').select('*').eq('email', datos.email).execute()
-        
-        if not res.data:
-            print(f"⚠️ [LOGIN FAIL] Intento fallido para: {datos.email} (Usuario no existe)")
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-            
-        usuario = res.data[0]
-        
-        # 2. 🔐 VALIDACIÓN DE PASSWORD
-        # Nota: En producción, aquí deberías usar pwd_context.verify(datos.password, usuario['password'])
-        if datos.password != usuario.get('password'):
-            print(f"⚠️ [LOGIN FAIL] Contraseña errónea para: {datos.email}")
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-            
-        # 3. 🎟️ GENERACIÓN DE TOKEN JWT
-        vendedor_id = usuario.get('vendedor_id', 'V-001')
-        rol = usuario.get('rol', 'vendedor')
-        
-        token_data = {
-            "sub": vendedor_id, 
-            "email": usuario['email'],
-            "rol": rol,
-            "exp": datetime.utcnow() + timedelta(days=7) # Token válido por una semana
-        }
-        
-        token = jwt.encode(token_data, JWT_SECRET, algorithm="HS256")
-        
-        print(f"✅ [LOGIN SUCCESS] Vendedor {vendedor_id} ha iniciado sesión.")
-
-        # 4. 🚀 RETORNO SINCRONIZADO CON APP MÓVIL Y PC
-        return {
-            "status": "ok",
-            "access_token": token,
-            "token_type": "bearer",
-            "vendedor_id": vendedor_id,
-            "nombre": usuario.get('nombre', 'Vendedor'),
-            "rol": rol
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"🚨 [FATAL ERROR] Fallo en sistema de login: {e}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
-
-# --- 1. DESCARGA DE MEDIA DE META (FOTOS Y AUDIOS V13) ---
-async def descargar_media_whatsapp(media_id: str, token: str) -> dict:
-    """ 🌉 Puente Seguro: Descarga imágenes/audios desde los servidores de Meta """
-    url_info = f"https://graph.facebook.com/v18.0/{media_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            # 1. Pedir la URL temporal (con timeout para evitar cuellos de botella)
-            res_info = await client.get(url_info, headers=headers, timeout=10.0)
-            if res_info.status_code != 200: 
-                logger.error(f"❌ [META] Error obteniendo URL del archivo: {res_info.text}")
-                return None
-            
-            media_url = res_info.json().get("url")
-            
-            # 2. Descargar los bytes
-            res_media = await client.get(media_url, headers=headers, timeout=15.0)
-            if res_media.status_code != 200: 
-                logger.error("❌ [META] Error descargando los bytes del archivo")
-                return None
-            
-            mime_type = res_media.headers.get("content-type")
-            data_base64 = base64.b64encode(res_media.content).decode("utf-8")
-            
-            logger.info(f"✅ [META] Archivo descargado y empaquetado ({mime_type})")
-            return {"mime_type": mime_type, "data": data_base64}
-            
-    except Exception as e:
-        logger.exception(f"🚨 [FATAL] Colapso en descarga de Meta: {str(e)}")
-        return None
-
-# ==========================================================
-# ⚙️ BACKGROUND WORKER DE ENTRADA (UNIFICADO + BLINDADO AAA - V13)
-# ==========================================================
-async def gestionar_mensaje_entrante_bg(
-    valor: dict,
-    msg: dict,
-    phone_id_receptor: str
-):
-    try:
-        # ==========================================================
-        # 📥 VALIDACIONES BASE (Filtro Anti-Basura)
-        # ==========================================================
-        if not isinstance(valor, dict):
-            logger.warning("⚠️ [RECHAZADO] 'valor' inválido en webhook")
-            return
-
-        if not isinstance(msg, dict):
-            logger.warning("⚠️ [RECHAZADO] 'msg' inválido en webhook")
-            return
-
-        # ==========================================================
-        # 🔑 IDENTIFICAR TENANT (CON SALVAVIDAS GLOBAL)
-        # ==========================================================
-        try:
-            # 1. Intentamos buscar en la tabla configuracion_bot de Supabase
-            res_config = (
-                supabase
-                .table('configuracion_bot')
-                .select('*')
-                .eq('meta_phone_id', phone_id_receptor)
-                .limit(1)
-                .execute()
-            )
-            data_config = res_config.data
-        except Exception as db_err:
-            logger.error(f"🚨 Error conectando a Supabase (Config): {db_err}")
-            data_config = [] # Forzamos el salvavidas si falla la DB
-
-        if data_config:
-            # Si encuentra la configuración en Supabase, la usa (Multi-Tenant)
-            config_vendedor = data_config[0]
-            vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001")).strip()
-            
-            # Si meta_token está vacío en la DB, rescata el de Render
-            token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
-            nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games")).strip()
-        else:
-            # 2. SALVAVIDAS: Si Supabase está vacío o falla, usamos Render directamente
-            logger.info(f"⚠️ Base de datos vacía o caída para {phone_id_receptor}. Usando Entorno Render (V-001).")
-            
-            vendedor_actual = "V-001"
-            token_actual = WHATSAPP_TOKEN
-            nombre_negocio = "Fantasy Games"
-            
-            # Simulamos el diccionario config_vendedor para que el resto del código no falle
-            config_vendedor = {
-                "vendedor_id": vendedor_actual,
-                "meta_token": token_actual,
-                "meta_phone_id": WHATSAPP_PHONE_ID,
-                "nombre_negocio": nombre_negocio,
-                "bot_activo": True
-            }
-
-        if not token_actual:
-            logger.error("❌ FATAL: Token de WhatsApp vacío en Supabase y en Render. Abortando.")
-            return
-
-        # ==========================================================
-        # 🛑 BOT DESACTIVADO
-        # ==========================================================
-        if not config_vendedor.get("bot_activo", True):
-            logger.info(f"⛔ Bot desactivado para vendedor={vendedor_actual}. Ignorando mensaje.")
-            return
-
-        # ==========================================================
-        # 👤 EXTRACCIÓN DE DATOS DE CONTACTO
-        # ==========================================================
-        contact = valor.get("contacts", [{}])[0]
-        nombre_cliente = (
-            contact
-            .get("profile", {})
-            .get("name", "Cliente")
-        ).strip()
-        telefono_cliente = str(msg.get("from", "")).strip()
-
-        # ==========================================================
-        # ☎️ NORMALIZACIÓN TELÉFONO MX (Evita duplicados)
-        # ==========================================================
-        if telefono_cliente.startswith("521"):
-            telefono_cliente = "52" + telefono_cliente[3:]
-
-        if not telefono_cliente:
-            logger.warning("⚠️ Mensaje recibido sin número de teléfono. Abortando.")
-            return
-
-        # ==========================================================
-        # 🧠 DETECTAR TIPO MENSAJE (PREPARACIÓN MULTIMODAL V13)
-        # ==========================================================
-        tipo_mensaje = str(msg.get("type", "text")).lower()
-        texto_entrante = ""
-
-        if tipo_mensaje == "text":
-            texto_entrante = msg.get("text", {}).get("body", "").strip()
-
-        elif tipo_mensaje == "image":
-            texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago con Gemini...]"
-            
-        elif tipo_mensaje == "audio":
-            # [MEGA-PARCHE V13] Preparando el terreno para notas de voz
-            texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA: Pendiente de transcripción/análisis]"
-
-        elif tipo_mensaje == "interactive":
-            texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
-
-        else:
-            texto_entrante = f"[{tipo_mensaje.upper()}] no soportado por el momento."
-
-        if not texto_entrante:
-            logger.warning(f"⚠️ Mensaje {tipo_mensaje} vacío o indescifrable.")
-            return
-
-        # ==========================================================
-        # 🔍 VALIDAR / CREAR EXISTENCIA EN CRM (Supabase) - FIX SEGURO
-        # ==========================================================
-        try:
-            # 1. Buscamos si ya existe el prospecto
-            res_p = supabase.table('prospectos').select('columna, notas, etiquetas').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
-            
-            if res_p.data:
-                # 2. SI EXISTE: Solo actualizamos la fecha de interacción
-                columna_actual = res_p.data[0].get("columna", "Bandeja Nueva")
-                supabase.table('prospectos').update({"ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()}).eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
-                print(f"✅ Cliente {nombre_cliente} detectado. Manteniendo columna: {columna_actual}")
-            else:
-                # 3. SI NO EXISTE: Lo creamos desde cero
-                columna_actual = "Bandeja Nueva"
-                nuevo_p = {
-                    "nombre": nombre_cliente,
-                    "telefono": telefono_cliente,
-                    "origen": "WHATSAPP",
-                    "columna": columna_actual,
-                    "vendedor_id": vendedor_actual,
-                    "estado_iluminacion": "blanco",
-                    "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
-                }
-                supabase.table('prospectos').insert(nuevo_p).execute()
-                print(f"🆕 Nuevo prospecto creado: {nombre_cliente}")
-                
-        except Exception as db_crm_err:
-            logger.error(f"🚨 Error en lógica CRM: {db_crm_err}")
-            columna_actual = "Bandeja Nueva"
-
-        # ==========================================================
-        # 💾 GUARDAR MENSAJE EN CHAT (Historial)
-        # ==========================================================
-        await guardar_mensaje_chat(
-            telefono_cliente,
-            vendedor_actual,
-            "USER",
-            texto_entrante
-        )
-
-        # ==========================================================
-        # 🚦 RUTEO DE PROCESAMIENTO (Cerebro IA)
-        # ==========================================================
-        # 🟢 RUTA 1: TEXTO (Y preparativo para audios transcritos)
-        if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
-            # -> Aquí procesar_respuesta_bot debe aplicar el "Cero Alucinaciones"
-            # -> y disparar la "Alerta de Administrador" si no hay stock
-            await procesar_respuesta_bot(
-                nombre_cliente,
-                telefono_cliente,
-                texto_entrante,
-                columna_actual,
-                config_vendedor
-            )
-
-        # 🔵 RUTA 2: IMÁGENES (Comprobantes)
-        elif tipo_mensaje == "image":
-            image_id = msg.get("image", {}).get("id", "").strip()
-
-            if not image_id:
-                logger.warning("⚠️ Imagen recibida pero sin ID de Meta.")
-                return
-
-            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
-
-            # ⬇️ DESCARGAR IMAGEN DESDE META
-            b64_img, mime_type = await descargar_imagen_whatsapp_b64(image_id, token_actual)
-
-            if not b64_img:
-                logger.warning("⚠️ Falla al descargar la imagen de los servidores de Meta.")
-                return
-
-            # 🤖 AUDITORÍA IA CON GEMINI MULTIMODAL
-            auditoria = await auditar_comprobante_ia(
-                b64_img,
-                mime_type,
-                nombre_negocio,
-                historial_para_auditor
-            )
-
-            es_pago = auditoria.get("es_pago", False)
-            monto = float(auditoria.get("monto_detectado", 0.0)) # safe_float integrado
-
-            # ✅ PAGO APROBADO
-            if es_pago:
-                await actualizar_estado_crm(
-                    telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", ""
-                )
-
-                msg_exito = (
-                    f"✅ ¡Pago validado por ${monto:.2f} MXN!\n"
-                    f"Hemos recibido correctamente tu comprobante. Procesando tu entrega..."
-                )
-
-                await disparar_whatsapp_dinamico_async(
-                    telefono_cliente, msg_exito, token_actual, phone_id_receptor
-                )
-                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
-                logger.info(f"💰 PAGO EXITOSO | {telefono_cliente} | ${monto}")
-
-            # ❌ PAGO RECHAZADO
-            else:
-                razon = auditoria.get("analisis", "No se reconoce como comprobante válido.")
-                msg_fallo = (
-                    "🤖 Mi sistema no pudo validar la imagen.\n\n"
-                    f"Detalle: {razon}\n\n"
-                    "Por favor envía una foto clara del ticket o comprobante de transferencia."
-                )
-
-                await actualizar_estado_crm(
-                    telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", ""
-                )
-
-                await disparar_whatsapp_dinamico_async(
-                    telefono_cliente, msg_fallo, token_actual, phone_id_receptor
-                )
-                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
-                logger.warning(f"⚠️ PAGO RECHAZADO | {telefono_cliente} | Razón: {razon}")
-
-    except Exception as e:
-        logger.exception(f"❌ [FATAL BACKGROUND TASK ERROR] Colapso en el Worker: {str(e)}")
-
-
-# ==========================================================
-# 📦 MODELOS PYDANTIC PARA ENDPOINTS DE GESTIÓN
-# ==========================================================
-class ColumnaUpdate(BaseModel):
-    nombre_columna: str
-
-
-class RenombrarColumnaUpdate(BaseModel):
-    viejo_nombre: str
-    nuevo_nombre: str
-
-
-class TelefonoUpdate(BaseModel):
-    telefono: str
-
-
-class EstadoUpdate(BaseModel):
-    telefono: str
-    nueva_columna: str
-
-
-class NotasUpdate(BaseModel):
-    nombre: str = Field(..., min_length=1, max_length=120)
-    telefono: Optional[str] = None
-    notas: str = Field(default="", max_length=4000)
-    etiquetas: str = Field(default="", max_length=500)
-    vendedor_id: str = Field(..., min_length=1, max_length=80)
-
-
-# ==========================================================
-# 👁️ MOTORES DE VISIÓN ARTIFICIAL (IA AAA)
-# ==========================================================
-async def descargar_imagen_whatsapp_b64(
-    media_id: str,
-    token_vendedor: str
-):
-    try:
-        # ==========================================================
-        # 🛑 VALIDACIONES
-        # ==========================================================
-        media_id = str(media_id).strip()
-        token_vendedor = str(token_vendedor).strip()
-
-        if not media_id or not token_vendedor:
-            logger.warning("⚠️ media_id/token vacío")
-            return None, None
-
-        # ==========================================================
-        # 🔗 OBTENER URL TEMPORAL META
-        # ==========================================================
-        url_info = f"https://graph.facebook.com/v18.0/{media_id}"
-
-        headers = {
-            "Authorization": f"Bearer {token_vendedor}"
-        }
-
-        res_info = await http_client.get(
-            url_info,
-            headers=headers
-        )
-
-        if res_info.status_code != 200:
-            logger.warning(
-                f"⚠️ Error Meta media info: {res_info.status_code}"
-            )
-            return None, None
-
-        media_url = res_info.json().get("url")
-
-        if not media_url:
-            logger.warning("⚠️ media_url vacío")
-            return None, None
-
-        # ==========================================================
-        # ⬇️ DESCARGAR IMAGEN
-        # ==========================================================
-        res_media = await http_client.get(
-            media_url,
-            headers=headers
-        )
-
-        if res_media.status_code != 200:
-            logger.warning(
-                f"⚠️ Error descargando media: {res_media.status_code}"
-            )
-            return None, None
-
-        mime_type = res_media.headers.get(
-            "content-type",
-            "image/jpeg"
-        )
-
-        img_b64 = base64.b64encode(
-            res_media.content
-        ).decode("utf-8")
-
-        return img_b64, mime_type
-
-    except Exception as e:
-        logger.exception(
-            f"❌ Error descargando imagen WhatsApp: {str(e)}"
-        )
-        return None, None
-        
-# ==========================================================
-# 🔍 AUDITOR DE COMPROBANTES V14 (EL DÓBERMAN - ANTI-FRAUDE)
-# ==========================================================
-async def auditar_comprobante_ia(
-    b64_img: str,
-    mime_type: str,
-    nombre_negocio: str,
-    historial_chat: str
-):
-    # 🛠️ HELPER LOCAL (Blindado contra NameError)
-    def safe_float_local(valor):
-        try:
-            if valor is None: return 0.0
-            limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
-            return float(limpio)
-        except (ValueError, TypeError):
-            return 0.0
-
-    try:
-        from datetime import datetime
-        import json
-        
-        # 📅 FECHA ACTUAL (Referencia para vigencia)
-        fecha_hoy = datetime.now().strftime("%d de %B de %Y")
-
-        # 🧠 PROMPT CON SENTIDO COMÚN Y RUGIDO
-        prompt = f"""
-Eres el auditor financiero jefe de '{nombre_negocio}'. Tu misión es detectar estafas y pagos que no nos pertenecen.
-
-HISTORIAL DEL CHAT:
-{historial_chat}
-
-HOY ES: {fecha_hoy}
-
-REGLAS DE RECHAZO RADICAL (Si ocurre UNA, "es_pago": false):
-1. NATURALEZA: La imagen debe ser un recibo bancario real. No aceptes fotos de objetos, personas o capturas borrosas.
-2. DESTINATARIO (CRÍTICO): Lee a quién se envió el dinero. Si el beneficiario es un "Colegio", "A.C.", "CFE", "Telmex", o cualquier entidad que indique una colegiatura o pago de servicios ajenos, RECHÁZALO. 
-3. VIGENCIA: La transferencia debe ser de hoy ({fecha_hoy}) o ayer. Si es de meses pasados, es fraude.
-4. COHERENCIA: Si el monto es muy alto (ej. $2,000) y en el chat solo se habló de un juego barato, sospecha y pide validación manual.
-
-RESPONDE EXCLUSIVAMENTE EN JSON:
-{{
-    "es_pago": true,
-    "monto_detectado": 0.0,
-    "destinatario": "Nombre detectado",
-    "analisis": "Breve explicación del por qué se aprobó o rechazó (menciona si detectaste que es una colegiatura o servicio)."
-}}
-"""
-
-        # 🔑 LLAVE Y MOTOR (GEMINI 2.5 FLASH 🚀)
-        api_key_limpia = GENAI_KEY.strip() if GENAI_KEY else ""
-        if not api_key_limpia: raise Exception("GENAI_KEY vacía")
-
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key_limpia}
-
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": mime_type, "data": b64_img}}
-                ]
-            }],
-            "generationConfig": {"temperature": 0.0} # Cero creatividad, pura lógica
-        }
-
-        res = await http_client.post(url, headers=headers, json=payload)
-
-        if res.status_code != 200:
-            raise Exception(f"Gemini HTTP {res.status_code}: {res.text}")
-
-        # 🧹 FILTRO NINJA PARA JSON
-        texto_sucio = res.json()['candidates'][0]['content']['parts'][0]['text']
-        inicio, fin = texto_sucio.find('{'), texto_sucio.rfind('}')
-        
-        if inicio != -1 and fin != -1:
-            resultado = json.loads(texto_sucio[inicio:fin+1])
-        else:
-            raise Exception("Estructura JSON no encontrada")
-
-        # 🛡️ RETORNO AL SISTEMA B2B
-        return {
-            "es_pago": bool(resultado.get("es_pago", False)),
-            "monto_detectado": safe_float_local(resultado.get("monto_detectado", 0)),
-            "analisis": str(resultado.get("analisis", "Análisis no disponible."))
-        }
-
-    except Exception as e:
-        logger.exception(f"❌ ERROR auditar_comprobante_ia: {str(e)}")
-        return {
-            "es_pago": False,
-            "monto_detectado": 0.0,
-            "analisis": "Error interno del sistema IA al auditar."
-        }
-
-# ==========================================================
-# 📦 MODELOS PYDANTIC PARA GESTIÓN (Con soporte de Teléfono)
-# ==========================================================
-class EstadoUpdate(BaseModel):
-    nombre: str
-    telefono: str = "" # Hacemos que lo acepte, venga o no
-    nueva_columna: str
-
-class ClienteIdentificador(BaseModel):
-    nombre: str
-    telefono: str = ""
-
-# ==========================================================
-# 🌐 RUTAS DE GESTIÓN CRM Y CHAT (Adiós Error 404)
-# ==========================================================
 @app.post("/api/actualizar_estado")
 def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Actualizamos usando el teléfono si lo tenemos, si no, caemos al nombre
         query = supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('vendedor_id', _sesion)
         if datos.telefono and datos.telefono != "Sin registrar":
             query = query.eq('telefono', datos.telefono)
@@ -2072,30 +1306,21 @@ def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesi
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error actualizando tarjeta")
 
-# ==========================================================
-# 🐍 REEMPLAZA ESTO EN TU main.py (BACKEND)
-# ==========================================================
-
 @app.post("/api/historial_chat")
 def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Buscamos el teléfono real en la base de datos basándonos en el nombre
         res_prospecto = supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
         
         tel_oficial = ""
         if res_prospecto.data and res_prospecto.data[0].get('telefono'):
             tel_oficial = res_prospecto.data[0]['telefono']
         
-        # Si el teléfono que mandó Godot es basura, usamos el oficial
-        id_busqueda = tel_oficial if tel_oficial else datos.nombre
-        
-        # Consultamos los mensajes
         query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', _sesion)
         
         if tel_oficial:
             query = query.eq('telefono', tel_oficial)
         else:
-            query = query.eq('nombre', datos.nombre) # Fallback por nombre
+            query = query.eq('nombre', datos.nombre) 
 
         res = query.order('created_at', desc=False).limit(50).execute()
         
@@ -2104,11 +1329,7 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
             es_mio = (fila.get('autor', 'USER') != 'USER')
             historial_formateado.append({"texto": fila.get('mensaje', ''), "es_mio": es_mio})
             
-        # 🚀 DEVOLVEMOS EL TELÉFONO OFICIAL PARA CURAR A GODOT
-        return {
-            "historial": historial_formateado, 
-            "telefono_oficial": tel_oficial 
-        }
+        return {"historial": historial_formateado, "telefono_oficial": tel_oficial}
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Error en historial")
@@ -2116,11 +1337,9 @@ def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar
 @app.post("/api/mover_prospecto")
 def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Intentamos guardar por teléfono primero (es más seguro)
         if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
             supabase.table('prospectos').update({"columna": datos.columna}).eq('telefono', datos.telefono).eq('vendedor_id', _sesion).execute()
         else:
-            # Si no hay teléfono, guardamos guiándonos por el nombre
             supabase.table('prospectos').update({"columna": datos.columna}).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
             
         return {"status": "ok", "mensaje": f"Movido a {datos.columna}"}
@@ -2132,21 +1351,13 @@ def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesio
 def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         print(f"📝 Recibida petición de notas para: {datos.nombre} | Tel: {datos.telefono}")
-        
-        update_data = {
-            "notas": datos.notas,
-            "etiquetas": datos.etiquetas,
-            "nombre": datos.nombre # Actualizamos el nombre por si se corrigió
-        }
-
-        # 1. Intentamos actualizar por Teléfono (El método seguro)
+        update_data = {"notas": datos.notas, "etiquetas": datos.etiquetas, "nombre": datos.nombre}
         tel = str(datos.telefono).strip()
         res = None
         
         if tel and tel.lower() not in ["", "null", "sin registrar"]:
             res = supabase.table('prospectos').update(update_data).eq('telefono', tel).eq('vendedor_id', _sesion).execute()
 
-        # 2. Fallback: Si no hay teléfono o el update no afectó a nadie, intentamos por Nombre
         if not res or len(res.data) == 0:
             print(f"⚠️ No se encontró por teléfono. Intentando por nombre: {datos.nombre}")
             res = supabase.table('prospectos').update(update_data).eq('nombre', datos.nombre).eq('vendedor_id', _sesion).execute()
@@ -2155,61 +1366,25 @@ def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion
             print(f"✅ Notas guardadas con éxito. Filas afectadas: {len(res.data)}")
             return {"status": "ok", "mensaje": "Sincronización completa"}
         else:
-            print(f"❌ No se encontró al prospecto para actualizar notas.")
             return {"status": "error", "mensaje": "No se encontró el registro"}
-
     except Exception as e:
         print(f"💥 Error crítico en actualizar_notas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# ==========================================================
-# 🎮 RUTA: CARGAR INVENTARIO B2B (Fantasy Games)
-# ==========================================================
 @app.get("/api/cargar_inventario")
 def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
-    """
-    Busca todos los artículos en la tabla 'inventario' 
-    que pertenecen al vendedor logueado (ej. V-001).
-    """
     try:
-        # 🛡️ Realizamos la consulta a Supabase filtrando por el vendedor_id
-        # IMPORTANTE: Asegúrate que tu tabla en Supabase se llame 'inventario'
         res = supabase.table('inventario').select("*").eq('vendedor_id', _sesion).execute()
-        
-        # Log en la consola de Render para rastrear la carga
         print(f"📦 [INVENTARIO] Sincronizando {len(res.data)} artículos para el ID: {_sesion}")
-        
-        return {
-            "status": "ok", 
-            "inventario": res.data
-        }
-        
+        return {"status": "ok", "inventario": res.data}
     except Exception as e:
         print(f"❌ [ERROR INVENTARIO] Falló la carga: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Error interno al acceder a la tabla de inventario"
-        )
-
-# ==========================================================
-# 📊 RUTAS DE GESTIÓN DE COLUMNAS B2B (CORREGIDAS 422)
-# ==========================================================
-class ColumnaAction(BaseModel):
-    nombre_columna: str
-    # 🛡️ Ya no pedimos el vendedor_id aquí, lo sacamos del Token
-
-class RenombrarColumnaAction(BaseModel):
-    viejo_nombre: str
-    nuevo_nombre: str
-    # 🛡️ Igual aquí
+        raise HTTPException(status_code=500, detail="Error interno al acceder a la tabla de inventario")
 
 @app.post("/api/crear_columna")
 def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').insert({
-            'vendedor_id': _sesion, # Usamos el ID del Token B2B
-            'nombre_columna': datos.nombre_columna
-        }).execute()
+        supabase.table('configuracion').insert({'vendedor_id': _sesion, 'nombre_columna': datos.nombre_columna}).execute()
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error al crear columna")
@@ -2232,54 +1407,201 @@ def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(veri
         raise HTTPException(status_code=500, detail="Error al renombrar columna")
 
 # ==========================================================
+# ⚙️ BACKGROUND WORKER DE ENTRADA (CON IDEMPOTENCIA AAA)
+# ==========================================================
+async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
+    try:
+        if not isinstance(valor, dict) or not isinstance(msg, dict):
+            return
+
+        # 🛡️ IDEMPOTENCIA: Evitar procesar el mismo mensaje de Meta 2 veces
+        wamid = str(msg.get("id", "")).strip()
+        if wamid and wamid in procesados_recientemente:
+            logger.info(f"♻️ [WEBHOOK] Mensaje duplicado de Meta ignorado ({wamid}).")
+            return
+        if wamid: procesados_recientemente.append(wamid)
+
+        try:
+            res_config = supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1).execute()
+            data_config = res_config.data
+        except Exception as db_err:
+            logger.error(f"🚨 Error conectando a Supabase (Config): {db_err}")
+            data_config = [] 
+
+        if data_config:
+            config_vendedor = data_config[0]
+            vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001")).strip()
+            token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
+            nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games")).strip()
+        else:
+            vendedor_actual = "V-001"
+            token_actual = WHATSAPP_TOKEN
+            nombre_negocio = "Fantasy Games"
+            config_vendedor = {
+                "vendedor_id": vendedor_actual, "meta_token": token_actual,
+                "meta_phone_id": WHATSAPP_PHONE_ID, "nombre_negocio": nombre_negocio,
+                "bot_activo": True
+            }
+
+        if not token_actual: return
+        if not config_vendedor.get("bot_activo", True): return
+
+        contact = valor.get("contacts", [{}])[0]
+        nombre_cliente = contact.get("profile", {}).get("name", "Cliente").strip()
+        telefono_cliente = str(msg.get("from", "")).strip()
+
+        if telefono_cliente.startswith("521"): telefono_cliente = "52" + telefono_cliente[3:]
+        if not telefono_cliente: return
+
+        tipo_mensaje = str(msg.get("type", "text")).lower()
+        texto_entrante = ""
+
+        if tipo_mensaje == "text": texto_entrante = msg.get("text", {}).get("body", "").strip()
+        elif tipo_mensaje == "image": texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago con Gemini...]"
+        elif tipo_mensaje == "audio": texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA: Pendiente de transcripción/análisis]"
+        elif tipo_mensaje == "interactive": texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
+        else: texto_entrante = f"[{tipo_mensaje.upper()}] no soportado por el momento."
+
+        if not texto_entrante: return
+
+        try:
+            res_p = supabase.table('prospectos').select('columna, notas, etiquetas').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
+            if res_p.data:
+                columna_actual = res_p.data[0].get("columna", "Bandeja Nueva")
+                supabase.table('prospectos').update({"ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()}).eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual).execute()
+            else:
+                columna_actual = "Bandeja Nueva"
+                nuevo_p = {
+                    "nombre": nombre_cliente, "telefono": telefono_cliente, "origen": "WHATSAPP",
+                    "columna": columna_actual, "vendedor_id": vendedor_actual, "estado_iluminacion": "blanco",
+                    "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
+                }
+                supabase.table('prospectos').insert(nuevo_p).execute()
+        except Exception as db_crm_err:
+            columna_actual = "Bandeja Nueva"
+
+        await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "USER", texto_entrante)
+
+        if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
+            await procesar_respuesta_bot(nombre_cliente, telefono_cliente, texto_entrante, columna_actual, config_vendedor)
+
+        elif tipo_mensaje == "image":
+            image_id = msg.get("image", {}).get("id", "").strip()
+            if not image_id: return
+
+            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
+            media_dict = await descargar_media_whatsapp_async(image_id, token_actual)
+
+            if not media_dict:
+                logger.warning("⚠️ Falla al descargar la imagen de los servidores de Meta.")
+                return
+
+            # Pasamos la data de media al auditor directamente
+            auditoria = await auditar_comprobante_ia(
+                media_dict["data"], 
+                media_dict["mime_type"], 
+                nombre_negocio, 
+                historial_para_auditor
+            )
+
+            es_pago = auditoria.get("es_pago", False)
+            monto = float(auditoria.get("monto_detectado", 0.0)) 
+
+            if es_pago:
+                await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", "")
+                msg_exito = f"✅ ¡Pago validado por ${monto:.2f} MXN!\nHemos recibido correctamente tu comprobante. Procesando tu entrega..."
+                await disparar_whatsapp_dinamico_async(telefono_cliente, msg_exito, token_actual, phone_id_receptor)
+                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
+                logger.info(f"💰 PAGO EXITOSO | {telefono_cliente} | ${monto}")
+            else:
+                razon = auditoria.get("analisis", "No se reconoce como comprobante válido.")
+                msg_fallo = f"🤖 Mi sistema no pudo validar la imagen.\n\nDetalle: {razon}\n\nPor favor envía una foto clara del ticket o comprobante de transferencia."
+                await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
+                await disparar_whatsapp_dinamico_async(telefono_cliente, msg_fallo, token_actual, phone_id_receptor)
+                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
+
+    except Exception as e:
+        logger.exception(f"❌ [FATAL BACKGROUND TASK ERROR] Colapso en el Worker: {str(e)}")
+
+# ==========================================================
+# 🔍 AUDITOR DE COMPROBANTES V14 (EL DÓBERMAN - ANTI-FRAUDE)
+# ==========================================================
+async def auditar_comprobante_ia(b64_img_data: bytes, mime_type: str, nombre_negocio: str, historial_chat: str):
+    def safe_float_local(valor):
+        try:
+            if valor is None: return 0.0
+            limpio = str(valor).replace("$", "").replace(",", "").replace("MXN", "").strip()
+            return float(limpio)
+        except (ValueError, TypeError): return 0.0
+
+    try:
+        from datetime import datetime
+        fecha_hoy = datetime.now().strftime("%d de %B de %Y")
+
+        prompt = f"""
+Eres el auditor financiero jefe de '{nombre_negocio}'. Tu misión es detectar estafas y pagos que no nos pertenecen.
+HISTORIAL DEL CHAT:
+{historial_chat}
+HOY ES: {fecha_hoy}
+
+REGLAS DE RECHAZO RADICAL (Si ocurre UNA, "es_pago": false):
+1. NATURALEZA: Debe ser un recibo bancario real. No fotos de objetos o personas.
+2. DESTINATARIO: Si el beneficiario es un "Colegio", "A.C.", "CFE", etc., RECHÁZALO. 
+3. VIGENCIA: La transferencia debe ser de hoy ({fecha_hoy}) o ayer. Si es vieja, es fraude.
+4. COHERENCIA: Si el monto es muy alto pero en el chat se habló de un juego barato, rechaza por sospecha.
+
+RESPONDE EXCLUSIVAMENTE EN JSON:
+{{
+    "es_pago": true,
+    "monto_detectado": 0.0,
+    "destinatario": "Nombre detectado",
+    "analisis": "Breve explicación."
+}}
+"""
+        # Re-usamos la super función centralizada de Gemini!
+        data = await consultar_gemini_json(prompt, {"mime_type": mime_type, "data": b64_img_data}, temperature=0.0)
+        
+        return {
+            "es_pago": bool(data.get("es_pago", False)),
+            "monto_detectado": safe_float_local(data.get("monto_detectado", 0)),
+            "analisis": str(data.get("analisis", "Análisis no disponible."))
+        }
+    except Exception as e:
+        logger.exception(f"❌ ERROR auditar_comprobante_ia: {str(e)}")
+        return {"es_pago": False, "monto_detectado": 0.0, "analisis": "Error interno al auditar."}
+
+
+# ==========================================================
 # 🤖 MÓDULO DE WEBHOOK: CONEXIÓN AL MOTOR IA VELTRIX
 # ==========================================================
-
-# --- 🟢 1. VERIFICACIÓN DEL WEBHOOK (GET) ---
 @app.get("/webhook")
 def verificar_webhook(request: Request):
-    """ Meta usa esta ruta para validar que tu servidor es real. """
     params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-
-    if mode == "subscribe" and token == WEBHOOK_SECRET:
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WEBHOOK_SECRET:
         print("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
-        try:
-            return int(challenge)
-        except:
-            return challenge
-    
-    print(f"❌ [WEBHOOK] Intento de validación fallido. Token recibido: {token}")
+        try: return int(params.get("hub.challenge"))
+        except: return params.get("hub.challenge")
     raise HTTPException(status_code=403, detail="Token de verificación inválido")
 
-# --- 📩 2. RECEPCIÓN DE MENSAJES Y TRASPASO A IA (POST) ---
 @app.post("/webhook")
 async def recibir_mensajes(request: Request, background_tasks: BackgroundTasks):
-    """ Escucha los mensajes y los envía al Motor de IA en segundo plano """
+    # 🛡️ Validación Criptográfica de Meta antes de leer el mensaje
+    await validar_firma_meta(request)
+    
     try:
         body = await request.json()
-        
-        # 🛡️ Filtro de seguridad: Ignorar notificaciones de "leído" o "entregado"
         if not body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages"):
             return {"status": "ignored_update"}
 
         print("\n--- 📥 [NUEVO MENSAJE RECIBIDO] ---")
-        
-        # 🔍 Extracción limpia de datos
         value = body["entry"][0]["changes"][0]["value"]
         message = value.get("messages", [{}])[0]
-        
-        # Obtenemos el ID del teléfono al que el cliente le escribió
         phone_id_receptor = value.get("metadata", {}).get("phone_number_id", WHATSAPP_PHONE_ID)
 
-        # 🚀 CONEXIÓN AAA: Mandamos todo el paquete a tu función de IA
         background_tasks.add_task(gestionar_mensaje_entrante_bg, value, message, phone_id_receptor)
         
         print("✅ [WEBHOOK] Mensaje transferido al Motor de IA Veltrix con éxito.")
         print("----------------------------------\n")
-
         return {"status": "ok"}
 
     except Exception as e:
@@ -2287,18 +1609,13 @@ async def recibir_mensajes(request: Request, background_tasks: BackgroundTasks):
         return {"status": "error", "reason": str(e)}
 
 # ==========================================================
-# 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR (MOTOR B2B)
+# 🏁 ANCLAJE FINAL Y ARRANQUE DEL SERVIDOR
 # ==========================================================
 app.include_router(router)
 
 if __name__ == "__main__":
     import uvicorn
     import os
-    
-    # 🔓 Leemos el puerto dinámico de Render
     puerto_render = int(os.environ.get("PORT", 10000))
-    
     logger.info(f"⚡ Iniciando Uvicorn Server en el puerto {puerto_render}...")
-    
-    # Usamos el puerto dinámico en lugar de 10000
     uvicorn.run("main:app", host="0.0.0.0", port=puerto_render, reload=False)
