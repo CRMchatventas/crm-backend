@@ -65,7 +65,9 @@ PRECIO_FALLBACK = 50.0
 MAX_HISTORIAL = 8
 MAX_MENSAJE_LEN = 1200
 MAX_CONTEXTO_INV = 150
-MAX_CACHE_IA = 5000
+
+# 🚀 FIX RAM: Límite estricto bajado a 500 para evitar crasheos (OOM) en Render
+MAX_CACHE_IA = 500 
 
 GEMINI_TIMEOUT = 35.0
 GEMINI_REINTENTOS = 3
@@ -132,17 +134,17 @@ rate_limit_global = []
 # ⚡ HTTPX Singleton
 http_client: Optional[httpx.AsyncClient] = None
 
-# ==========================================
-# 🧹 LIMPIEZA DE MEMORIA
-# ==========================================
-def limpiar_cache_ia_si_excede_limite():
-    if len(cache_respuestas_ia) <= MAX_CACHE_IA:
-        return
-    logger.warning("🧹 Limpiando cache IA por límite RAM")
-    items_ordenados = sorted(cache_respuestas_ia.items(), key=lambda x: x[1].get("ts", 0))
-    elementos_a_borrar = len(items_ordenados) // 2
-    for key, _ in items_ordenados[:elementos_a_borrar]:
-        cache_respuestas_ia.pop(key, None)
+# ==========================================================
+# 🧹 ANTI-LEAK: MANEJO DE CACHÉ IA INTELIGENTE (O(1) FIFO)
+# ==========================================================
+def guardar_en_cache_ia(prompt: str, respuesta: str):
+    """Guarda en caché y elimina el más viejo si excede el límite (Anti RAM Leak)"""
+    if len(cache_respuestas_ia) >= MAX_CACHE_IA:
+        llave_mas_vieja = next(iter(cache_respuestas_ia))
+        del cache_respuestas_ia[llave_mas_vieja]
+        logger.info(f"🧹 [MEMORIA] Caché IA lleno. Eliminando registro viejo para liberar RAM.")
+        
+    cache_respuestas_ia[prompt] = respuesta
 
 # ==========================================
 # 🔥 SWITCH DE ENCENDIDO (LIFESPAN ÚNICO)
