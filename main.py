@@ -384,6 +384,10 @@ class EstadoUpdate(BaseModel):
     telefono: str = ""
     nueva_columna: str
 
+class BorrarColumnaAction(BaseModel):
+    nombre: str
+    vendedor_id: str = ""
+
 # ==========================================
 # 🔐 AUTENTICACIÓN JWT Y WEBHOOKS
 # ==========================================
@@ -1456,9 +1460,17 @@ def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(veri
 @app.post("/api/borrar_columna")
 def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').delete().eq('vendedor_id', _sesion).eq('nombre_columna', datos.nombre_columna).execute()
+        # 🔍 Log de auditoría para Render
+        print(f"🗑️ [DB] Ejecutando purga de columna: {datos.nombre}")
+        
+        # 🛡️ FIX: Usamos datos.nombre para que coincida con el modelo Pydantic
+        # Borramos la configuración de la columna para ese vendedor específico
+        supabase.table('configuracion').delete().eq('vendedor_id', _sesion).eq('nombre_columna', datos.nombre).execute()
+        
         return {"status": "ok"}
     except Exception as e:
+        # ❌ Log de error detallado
+        print(f"❌ [DB] Error fatal al borrar columna: {str(e)}")
         raise HTTPException(status_code=500, detail="Error al borrar columna")
         
 # ==========================================================
