@@ -362,6 +362,16 @@ class ColumnaUpdate(BaseModel):
     columna: str = ""       # Lo que manda la PC
     nueva_columna: str = "" # Lo que manda el Móvil (Aceptamos ambos)
 
+# 🛡️ FIX: Modelos exactos para crear y renombrar
+class ColumnaAction(BaseModel):
+    nombre: str             # Godot manda "nombre"
+    vendedor_id: str = ""
+
+class RenombrarColumnaAction(BaseModel):
+    viejo_nombre: str
+    nuevo_nombre: str
+    vendedor_id: str = ""
+
 class NotasUpdate(BaseModel):
     nombre: str = ""
     telefono: str = ""
@@ -1389,10 +1399,35 @@ def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/crear_columna")
 def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        supabase.table('configuracion').insert({'vendedor_id': _sesion, 'nombre_columna': datos.nombre_columna}).execute()
+        print(f"➕ [DB] Creando columna: {datos.nombre}")
+        # 🛡️ FIX: Leemos datos.nombre, no nombre_columna
+        supabase.table('configuracion').insert({
+            'vendedor_id': _sesion, 
+            'nombre_columna': datos.nombre
+        }).execute()
         return {"status": "ok"}
     except Exception as e:
+        print(f"❌ Error al crear columna: {e}")
         raise HTTPException(status_code=500, detail="Error al crear columna")
+
+@app.post("/api/renombrar_columna")
+def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        print(f"🔄 [DB] Renombrando {datos.viejo_nombre} a {datos.nuevo_nombre}")
+        # 1. Actualizamos la lista de columnas en configuracion
+        supabase.table('configuracion').update({
+            'nombre_columna': datos.nuevo_nombre
+        }).eq('vendedor_id', _sesion).eq('nombre_columna', datos.viejo_nombre).execute()
+        
+        # 2. Actualizamos a los prospectos que estaban en esa columna
+        supabase.table('prospectos').update({
+            'columna': datos.nuevo_nombre
+        }).eq('vendedor_id', _sesion).eq('columna', datos.viejo_nombre).execute()
+        
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"❌ Error al renombrar columna: {e}")
+        raise HTTPException(status_code=500, detail="Error al renombrar columna")
 
 @app.post("/api/borrar_columna")
 def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
@@ -1401,16 +1436,7 @@ def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error al borrar columna")
-
-@app.post("/api/renombrar_columna")
-def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
-    try:
-        supabase.table('configuracion').update({'nombre_columna': datos.nuevo_nombre}).eq('vendedor_id', _sesion).eq('nombre_columna', datos.viejo_nombre).execute()
-        supabase.table('prospectos').update({'columna': datos.nuevo_nombre}).eq('vendedor_id', _sesion).eq('columna', datos.viejo_nombre).execute()
-        return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error al renombrar columna")
-
+        
 # ==========================================================
 # ⚙️ BACKGROUND WORKER DE ENTRADA (CON IDEMPOTENCIA AAA)
 # ==========================================================
