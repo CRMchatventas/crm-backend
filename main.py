@@ -379,6 +379,11 @@ class NotasUpdate(BaseModel):
     etiquetas: str = ""
     vendedor_id: str = ""
 
+class EstadoUpdate(BaseModel):
+    nombre: str
+    telefono: str = ""
+    nueva_columna: str
+
 # ==========================================
 # 🔐 AUTENTICACIÓN JWT Y WEBHOOKS
 # ==========================================
@@ -1307,16 +1312,35 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/actualizar_estado")
 def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
+        print(f"\n🔄 [Veltrix Engine] Iniciando actualización de columna...")
+        print(f"👤 Prospecto: {datos.nombre}")
+        print(f"📍 Destino: {datos.nueva_columna}")
+
+        # Construcción dinámica de la Query
         query = supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('vendedor_id', _sesion)
+        
+        # Filtro de seguridad: Priorizamos teléfono si existe, si no, usamos nombre
         if datos.telefono and datos.telefono != "Sin registrar":
             query = query.eq('telefono', datos.telefono)
+            print(f"📱 Identificador detectado: Teléfono ({datos.telefono})")
         else:
             query = query.eq('nombre', datos.nombre)
-        
-        query.execute()
-        return {"status": "ok"}
+            print(f"⚠️ Identificador detectado: Nombre (Teléfono no registrado)")
+
+        # Ejecución
+        resultado = query.execute()
+
+        # Verificación de impacto en DB
+        if resultado:
+            print(f"✅ Sincronización exitosa con Supabase para {datos.nombre}")
+            return {"status": "ok"}
+        else:
+            print(f"⚠️ La operación finalizó pero no se encontró ninguna fila que coincida.")
+            return {"status": "error", "mensaje": "No se encontró el registro"}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error actualizando tarjeta")
+        print(f"❌ ERROR FATAL en actualizar_estado: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error actualizando tarjeta en la nube")
 
 @app.post("/api/historial_chat")
 def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
