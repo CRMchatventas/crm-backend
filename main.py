@@ -713,7 +713,7 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
     }
 
 # ==========================================================
-# 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-13.0)
+# 🤖 ANALIZAR INTENCIÓN IA (CERRADOR MAESTRO V-13.1 MULTI-ROL)
 # ==========================================================
 async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict):
     try:
@@ -721,7 +721,7 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         nombre_negocio = config.get("nombre_negocio", "Fantasy Games")
         texto_cliente = limpiar_texto(texto_cliente)
         
-        # Hash para cache (Evita procesar el mismo mensaje doble vez)
+        # Hash para cache
         cache_key = generar_hash_cache(vendedor_id, texto_cliente, historial_chat[-200:])
         cache_item = cache_respuestas_ia.get(cache_key)
 
@@ -735,10 +735,46 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
             link_pago = config.get("link_pago", "Solicita el link de pago")
             texto_entrega = config.get("texto_entrega", "Coordinar entrega con asesor")
 
+            # 🧠 BIFURCACIÓN DE PERSONALIDAD (MODO CAMALEÓN)
+            es_veltrix = "veltrix" in nombre_negocio.lower()
+
+            if es_veltrix:
+                # 🚀 PERSONALIDAD B2B (VENTA DE SOFTWARE CRM)
+                giro_comercial = "Software B2B, CRM Inteligente y Automatización de Ventas con IA."
+                reglas_especificas = f"""
+1. ENFOQUE SAAS: Resalta cómo Veltrix Engine ahorra tiempo, automatiza ventas y organiza inventarios. Eres un consultor tecnológico experto.
+2. CERO ALUCINACIONES: Solo ofrece los planes (Ej. Básico, Pro, Elite) y precios que estén EXACTAMENTE en el INVENTARIO.
+3. CATÁLOGO/DEMO: https://veltrixengine.pro (o envía el link que tengas).
+4. LINK DE PAGO: SIEMPRE incluye: "💳 Contrata tu licencia seguro aquí: {link_pago}"
+5. LOGÍSTICA: {texto_entrega} (Ej. Te enviaremos tus credenciales de acceso por correo de inmediato)."""
+                
+                reglas_json = """
+- "juego_detectado": Nombre del Plan o Licencia Veltrix de interés (MANTENEMOS ESTA LLAVE POR COMPATIBILIDAD DE SISTEMA).
+- "pedido_especial_juego": Funcionalidad extra que el cliente pide y no tenemos.
+- "pedido_especial_consola": Integración solicitada (Ej. Mac, Windows, iOS)."""
+
+            else:
+                # 🎮 PERSONALIDAD CLÁSICA (FANTASY GAMES)
+                giro_comercial = "Videojuegos, Consolas y Accesorios."
+                reglas_especificas = f"""
+1. CERO ALUCINACIONES: Solo vende o confirma si el juego está EXACTAMENTE en el INVENTARIO ACTUAL.
+2. FILTRO: Si piden recomendaciones, NO mandes todo. Sugiere 3 juegos y pregunta: "¿Para qué consola?".
+3. CATÁLOGO COMPLETO: https://veltrixengine.pro/catalogo
+4. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí: {link_pago}"
+5. LOGÍSTICA: {texto_entrega}"""
+                
+                reglas_json = """
+- "juego_detectado": Nombre del producto exacto (si lo tenemos).
+- "pedido_especial_juego": Nombre del juego si NO lo tenemos.
+- "pedido_especial_consola": Consola del juego si NO lo tenemos."""
+
+            # 🛠️ CONSTRUCCIÓN DEL PROMPT MAESTRO
             prompt = f"""
 [SYSTEM: Eres un Vendedor Senior Elite estricto, persuasivo y altamente adaptable].
 Eres el mejor cerrador de ventas operando bajo la tecnología del CRM 'Veltrix Engine'.
 Tu identidad oficial y la empresa que representas es: "{nombre_negocio}".
+Tu giro comercial es: {giro_comercial}
+
 OBJETIVO PRINCIPAL: VENDER RÁPIDO Y ENVIAR EL LINK DE PAGO. 
 
 ESTRATEGIA DE PRECIOS:
@@ -747,17 +783,13 @@ ESTRATEGIA DE PRECIOS:
 3. PRECIO_MINIMO: LÍMITE SECRETO. NUNCA lo menciones, úsalo para regatear.
 
 NUEVAS DIRECTRICES V13 (ESTRICTAS):
-1. CERO ALUCINACIONES: Solo vende o confirma si el juego está EXACTAMENTE en el INVENTARIO ACTUAL.
-2. FILTRO: Si piden recomendaciones, NO mandes todo. Sugiere 3 juegos y pregunta: "¿Para qué consola?".
-3. CATÁLOGO COMPLETO: https://veltrixengine.pro/catalogo
-4. LINK DE PAGO: SIEMPRE incluye: "💳 Paga seguro aquí: {link_pago}"
-5. LOGÍSTICA: {texto_entrega}
+{reglas_especificas}
 
 REGLAS DE CLASIFICACIÓN ('intencion'):
-- "COTIZACION": Pregunta precio, dudas, fotos.
+- "COTIZACION": Pregunta precio, dudas, características.
 - "COMPRA": SOLO si el cliente dice "ya pagué", "ya transferí", "te mandé el ticket".
-- "PEDIDO_ESPECIAL": Pide un juego que NO TENEMOS en el inventario.
-- "HUMANO": Dudas que no sepas responder, quejas, audios o fotos complejas.
+- "PEDIDO_ESPECIAL": Pide un artículo/plan que NO TENEMOS en el inventario.
+- "HUMANO": Dudas técnicas complejas, quejas, audios o comprobantes de pago borrosos.
 
 INVENTARIO: 
 {inventario_contexto}
@@ -772,9 +804,7 @@ Responde EXCLUSIVAMENTE en JSON válido:
 {{
   "intencion": "COMPRA", "HUMANO", "COTIZACION" o "PEDIDO_ESPECIAL",
   "respuesta": "Tu respuesta persuasiva aquí",
-  "juego_detectado": "Nombre del producto exacto (si lo tenemos)",
-  "pedido_especial_juego": "Nombre del juego si NO lo tenemos",
-  "pedido_especial_consola": "Consola del juego si NO lo tenemos"
+  {reglas_json}
 }}
 """
             data = await consultar_gemini_json(prompt)
@@ -786,22 +816,28 @@ Responde EXCLUSIVAMENTE en JSON válido:
 
     except Exception:
         logger.exception("❌ ERROR analizar_intencion_venta_ia")
-        return {"intencion": "HUMANO", "respuesta": "Estoy revisando la información. Un asesor continuará contigo enseguida. 🎮", "juego_detectado": ""}
+        return {"intencion": "HUMANO", "respuesta": "Estoy revisando la información. Un especialista continuará contigo enseguida. 🚀", "juego_detectado": ""}
 
+# ==========================================================
+# 📋 GENERAR RESUMEN HANDOFF (NEUTRALIZADO PARA B2B)
+# ==========================================================
 async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
     try:
-        if intencion == "COMPRA": motivo = "quiere cerrar compra"
-        elif intencion == "PEDIDO_ESPECIAL": motivo = "busca un juego que NO tenemos en stock"
-        else: motivo = "requiere ayuda humana"
+        if intencion == "COMPRA": motivo = "quiere cerrar compra/contratación"
+        elif intencion == "PEDIDO_ESPECIAL": motivo = "busca un producto/plan que NO tenemos en catálogo"
+        else: motivo = "requiere ayuda humana especializada"
             
-        prompt = f"Cliente: {cliente}\nMotivo: {motivo}\nHistorial:\n{historial_str}\nGenera resumen ejecutivo en 3 viñetas. JSON: {{\"resumen\":\"texto\"}}"
+        prompt = f"Cliente: {cliente}\nMotivo: {motivo}\nHistorial:\n{historial_str}\nGenera resumen ejecutivo en 3 viñetas para el asesor humano. JSON: {{\"resumen\":\"texto\"}}"
         data = await consultar_gemini_json(prompt)
         return data.get("resumen", "⚠️ Cliente requiere atención humana")
     except Exception: return "⚠️ Cliente requiere atención humana"
 
+# ==========================================================
+# 🎯 GENERAR OFERTA INTELIGENTE (NEUTRALIZADO PARA B2B)
+# ==========================================================
 async def generar_oferta_inteligente(cliente: str, juego_detectado: str, inventario_contexto: str):
     try:
-        prompt = f"Cliente: {cliente}\nJuego: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto persuasivo para venta. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
+        prompt = f"Cliente: {cliente}\nProducto de interés: {juego_detectado}\nInventario:\n{inventario_contexto}\nGenera remarketing corto persuasivo para cerrar venta. JSON: {{\"nuevo_precio_ofrecido\":\"0\", \"mensaje_oferta\":\"texto\"}}"
         data = await consultar_gemini_json(prompt)
         if not data: return None
         return {"nuevo_precio_ofrecido": str(data.get("nuevo_precio_ofrecido", "0")), "mensaje_oferta": limpiar_texto(data.get("mensaje_oferta", ""))}
