@@ -1422,6 +1422,23 @@ def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion
         print(f"💥 Error crítico en actualizar_notas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+@app.post("/api/crear_inventario")
+def crear_inventario(datos: NuevoArticulo, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        print(f"📦 [DB] Creando artículo B2B: {datos.nombre} | Cat: {datos.categoria}")
+        supabase.table('inventario').insert({
+            'vendedor_id': _sesion,
+            'nombre': datos.nombre,
+            'categoria': datos.categoria,
+            'precio_compra': datos.precio_compra,
+            'precio': datos.precio,
+            'stock': datos.stock
+        }).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"❌ Error al crear artículo: {e}")
+        raise HTTPException(status_code=500, detail="Error en DB")
+
 @app.get("/api/cargar_inventario")
 def cargar_inventario(_sesion: str = Depends(verificar_sesion_b2b)):
     try:
