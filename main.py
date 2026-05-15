@@ -388,6 +388,14 @@ class BorrarColumnaAction(BaseModel):
     nombre: str
     vendedor_id: str = ""
 
+class NuevoArticulo(BaseModel):
+    nombre: str
+    categoria: str = "General"
+    precio_compra: float = 0.0
+    precio: float = 0.0
+    stock: int = 1
+    vendedor_id: str = ""
+
 # ==========================================
 # 🔐 AUTENTICACIÓN JWT Y WEBHOOKS
 # ==========================================
