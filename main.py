@@ -887,7 +887,7 @@ async def cargar_inventario(offset: int = 0, limit: int = 500, _sesion: str = De
         return {"status": "ok", "inventario": res.data or []}
     except Exception as e: raise HTTPException(status_code=500, detail="Error carga de inventario")
 
-@app.post("/api/editar_item")
+@app.post("/api/editar_item_visor")
 async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
@@ -898,6 +898,20 @@ async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
         else: await async_db_execute(supabase.table("inventario").update({"precio": precio_final, "stock": stock_final}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail="Error editar item")
+
+@app.get("/api/buscar_maestro")
+async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = await async_db_execute(
+            supabase.table('inventario')
+            .select('*')
+            .eq('vendedor_id', str(_sesion))
+            .ilike('nombre', f'%{q}%')
+            .limit(50)
+        )
+        return {"status": "ok", "resultados": res.data or []}
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail="Error en buscador maestro")
 
 @app.post("/api/borrar_item")
 async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
