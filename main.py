@@ -549,6 +549,44 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 # ==========================================================
 # 📈 8. MOTOR DE PRECIOS PRO (NOMBRES OFICIALES Y CERO SEGURO)
 # ==========================================================
+
+async def obtener_html_escalonado_async(url_objetivo: str) -> str:
+    """Motor de Scrapeo en 4 Fases con Evasión de Cloudflare"""
+    if not http_client: return ""
+    
+    # 🛡️ Escudo Anti-Cloudflare: Detecta si la página es un CAPTCHA disfrazado de éxito
+    def es_html_valido(html_text: str) -> bool:
+        texto = html_text.lower()
+        if "just a moment" in texto or "cloudflare" in texto or "security check" in texto:
+            return False
+        return True
+
+    # 🟢 FASE 1: Intento Gratis (Conexión directa sin gastar tokens)
+    try:
+        res = await http_client.get(url_objetivo, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        if res.status_code == 200 and es_html_valido(res.text): 
+            return res.text
+    except: pass
+
+    # ⚙️ Preparar URL para la artillería de ScraperAPI
+    url_codificada = urllib.parse.quote(url_objetivo)
+    
+    # 🟡 FASES 2 a 4: Escalada agresiva de Tokens para evadir bloqueos
+    estrategias = [
+        ("Ligera (1 Token)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}"),
+        ("Render JS (10 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
+        ("Premium (30 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
+    ]
+    
+    for _, url_scraper in estrategias:
+        try:
+            res = await http_client.get(url_scraper)
+            if res.status_code == 200 and es_html_valido(res.text): 
+                return res.text
+        except: pass
+        
+    return ""
+
 async def obtener_dolar_hoy_async():
     try:
         if not http_client: return 18.00
