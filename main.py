@@ -858,11 +858,27 @@ async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_
 # 📦 11. INVENTARIO Y GESTIÓN DE COLUMNAS
 # ==========================================================
 @app.post("/api/crear_inventario")
-async def crear_inventario(datos: NuevoArticulo, _sesion: str = Depends(verificar_sesion_b2b)):
+async def crear_inventario(datos: NuevoArticulo, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        await async_db_execute(supabase.table('inventario').insert({'vendedor_id': str(_sesion), 'nombre': datos.nombre, 'categoria': datos.categoria, 'precio_compra': datos.precio_compra, 'precio': datos.precio, 'stock': datos.stock}))
+        # 1. Insertamos el juego en la base de datos
+        res = await async_db_execute(supabase.table('inventario').insert({
+            'vendedor_id': str(_sesion), 
+            'nombre': datos.nombre, 
+            'categoria': datos.categoria, 
+            'precio_compra': datos.precio_compra, 
+            'precio': datos.precio, 
+            'stock': datos.stock
+        }))
+        
+        # 2. 🚀 Disparamos el Scraper en Segundo Plano (Sin congelar Godot)
+        if res.data:
+            juego_id_creado = str(res.data[0]['id'])
+            # Usamos 'categoria' como el equivalente a la 'consola' para la búsqueda
+            background_tasks.add_task(cazar_portada_y_guardar_background, juego_id_creado, datos.nombre, datos.categoria)
+            
         return {"status": "ok"}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error en DB")
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail="Error en DB")
 
 @app.get("/api/cargar_inventario")
 async def cargar_inventario(offset: int = 0, limit: int = 500, _sesion: str = Depends(verificar_sesion_b2b)):
@@ -896,10 +912,32 @@ async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
 async def actualizar_stock(item: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
+        
+        # 1. Consultar el precio actual del juego para saber de cuánto fue la venta
+        precio_venta = 0.0
+        if item.id:
+            res_inv = await async_db_execute(supabase.table("inventario").select("precio").eq("id", item.id).eq("vendedor_id", vid_str))
+        else:
+            res_inv = await async_db_execute(supabase.table("inventario").select("precio").eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+            
+        if res_inv.data:
+            precio_venta = float(res_inv.data[0].get("precio", 0.0))
+
+        # 2. Descontar el Stock del inventario
         if item.id:
             await async_db_execute(supabase.table("inventario").update({"stock": item.nuevo_stock}).eq("id", item.id).eq("vendedor_id", vid_str))
         else:
             await async_db_execute(supabase.table("inventario").update({"stock": item.nuevo_stock}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+            
+        # 3. 🚀 Registrar el ingreso en la tabla 'ventas' para que el Dashboard Móvil lo sume
+        await async_db_execute(supabase.table("ventas").insert({
+            "vendedor_id": vid_str,
+            "articulo": item.nombre,
+            "consola": item.consola,
+            "monto": precio_venta,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }))
+        
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"❌ Error al vender/actualizar stock: {str(e)}")
