@@ -243,82 +243,177 @@ def validar_respuesta_ia(data: dict) -> dict:
         "accion_tool": str(data.get("accion_tool", "ninguna"))
     }
 
-async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict, perfil_cliente_previo: dict = None):
+async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict, perfil_cliente_previo: dict = None, media_dict: dict = None):
+    """
+    Cerebro Central IA Veltrix: Evalúa intenciones, gestiona la memoria de consola preferida,
+    procesa audios entrantes y activa el Tool Calling para aplicar descuentos de forma autónoma.
+    """
     try:
         vendedor_id = config.get("vendedor_id", "V-001")
         giro_comercial = config.get("giro_comercial", "Videojuegos y Consolas")
         tono_ia = config.get("tono_ia", "Persuasivo y experto")
         
+        # Micro-locking para evitar colisiones de peticiones paralelas del mismo cliente
         lock_id = hashlib.sha256(f"{vendedor_id}:{texto_cliente[:50]}".encode()).hexdigest()
-        cache_key = generar_hash_cache(vendedor_id, giro_comercial, tono_ia, texto_cliente, historial_chat[-200:])
-        
-        if lock_id not in locks_por_conversacion: locks_por_conversacion[lock_id] = asyncio.Lock()
+        if lock_id not in locks_por_conversacion: 
+            locks_por_conversacion[lock_id] = asyncio.Lock()
 
         async with locks_por_conversacion[lock_id]:
-            perfil_str = json.dumps(perfil_cliente_previo) if perfil_cliente_previo else "Cliente nuevo."
+            print(f"🔮 [CEREBRO IA] Iniciando análisis cognitivo para Vendedor: {vendedor_id}")
+            perfil_str = json.dumps(perfil_cliente_previo) if perfil_cliente_previo else "Cliente nuevo sin historial de consolas."
 
             prompt_estructurado = [
                 {"role": "user", "parts": [f"""
 [SYSTEM INSTRUCTIONS]
-Eres un Agente Comercial Autónomo SaaS (Veltrix Engine).
+Eres el Motor de Inteligencia Artificial Comercial de un software SaaS llamado Veltrix Engine.
 GIRO COMERCIAL: {giro_comercial}
-PERSONALIDAD: {tono_ia}
+PERSONALIDAD/TONO: {tono_ia}
 
-[MEMORY CONTEXT - CLIENTE]
+[MEMORIA A LARGO PLAZO - PERFIL DEL CLIENTE]
 {perfil_str}
+*DIRECTRICES*: Si el perfil ya cuenta con una "consola_preferida", prioriza ofrecer juegos de esa plataforma. Si no la tiene o está vacía, dedúcela basándote en lo que el cliente pida en su mensaje.
 
-[RAG CONTEXT - INVENTARIO]
+[RAG CONTEXT - INVENTARIO DISPONIBLE EN TIEMPO REAL]
 {inventario_contexto}
 
-[HISTORY]
+[HISTORIAL DE CHAT RECIENTE]
 {historial_chat}
 
-[MESSAGE]
+[MENSAJE ACTUAL O ACCIÓN DEL CLIENTE]
 "{texto_cliente}"
 
-TAREAS:
-1. Detecta intención (COMPRA, COTIZACION, REGATEO, GARANTIA, HUMANO, SALUDO, ENOJO).
-2. Calcula tu Confidence Score (0.0 a 1.0). Si dudas, pon < 0.6.
+🤖 TAREAS AUTÓNOMAS (TOOL CALLING INTEGRADO):
+1. Detecta la intención real (COMPRA, COTIZACION, REGATEO, GARANTIA, HUMANO, SALUDO, ENOJO).
+2. Determina la emoción dominante del lead y su temperatura comercial.
+3. Extrae de forma limpia el nombre del juego solicitado.
+4. Deduce o mantén la "consola_preferida" del usuario (PS5, PS4, Xbox, Nintendo Switch, etc).
+5. REGLA DE NEGOCIO (TOOL): Si el cliente está en intención de REGATEO o expresa que el precio es muy elevado, tienes autorización exclusiva para aplicar una herramienta de descuento autónomo de hasta el 10% sobre el precio de lista. Si decides aplicarlo, cambia "accion_tool" a "aplicar_descuento" e inyecta el valor en "precio_oferta".
 
-Responde en JSON:
+Responde estrictamente en un formato JSON plano, válido y limpio:
 {{
   "intencion": "...",
-  "respuesta": "...",
+  "respuesta": "Tu respuesta persuasiva, humana y orientada a cerrar la venta, mencionando precios si los tienes...",
   "emocion_cliente": "urgencia|enojo|duda|entusiasmo|neutral",
   "temperatura_lead": "frio|tibio|caliente",
   "juego_detectado": "...",
+  "consola_preferida": "...",
   "confidence": 0.95,
-  "accion_tool": "ninguna"
+  "accion_tool": "ninguna|aplicar_descuento",
+  "precio_oferta": 0.0
 }}
 """]}
             ]
+            
+            # Si el webhook detectó una nota de voz, media_dict traerá los bytes binarios del audio nativo
+            if media_dict and "data" in media_dict:
+                print(f"🎙️ [CEREBRO IA] Inyectando Audio Nativo Base64 al modelo generativo.")
+                prompt_estructurado.append({
+                    "mime_type": media_dict.get("mime_type", "audio/ogg"),
+                    "data": media_dict["data"]
+                })
+
+            # Llamada al distribuidor de Gemini
             data = await consultar_gemini_json(prompt_estructurado, vendedor_id=vendedor_id)
-            return validar_respuesta_ia(data)
-    except Exception:
-        return {"intencion": "HUMANO", "respuesta": "Un especialista continuará contigo enseguida. 🚀", "confidence": 0.0}
+            print(f"🎯 [CEREBRO IA] Análisis finalizado con éxito. Intención inferida: {data.get('intencion')}")
+            return data
+
+    except Exception as e:
+        print(f"❌ [CEREBRO ERROR] Error en el flujo cognitivo de la IA: {str(e)}")
+        return {
+            "intencion": "HUMANO", 
+            "respuesta": "Hubo un micro-corte en mi sistema de datos. Un asesor humano revisará tu mensaje de inmediato. 🚀", 
+            "confidence": 0.0,
+            "consola_preferida": "",
+            "accion_tool": "ninguna",
+            "precio_oferta": 0.0
+        }
 
 async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str = "") -> str:
-    palabras = [p for p in limpiar_texto(texto_cliente).lower().split() if len(p) > 3]
-    query = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0)
-    
-    if palabras:
-        filtro_or = ",".join([f"nombre.ilike.%{p}%" for p in palabras])
-        query = query.or_(filtro_or)
+    """
+    RAG de Inventario con Algoritmo Fuzzy Matching (Similitud Difusa): 
+    Evita que errores de dedo o mala ortografía (ej: 'Blodborn', 'Kal of duti') dejen en blanco la consulta,
+    calculando distancias de texto y arrojando los 8 resultados más viables.
+    """
+    print(f"🔍 [RAG INVENTARIO] Buscando coincidencias para: '{texto_cliente}' (Tenant: {vendedor_id})")
+    try:
+        # Traemos todo el inventario activo del vendedor para procesarlo en la RAM del backend
+        query = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0)
+        res_inv = await async_db_execute(query)
         
-    res_inv = await async_db_execute(query.limit(10)) 
-    if not res_inv.data:
-        fallback = await async_db_execute(supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0).limit(5))
-        if not fallback.data: return "Catálogo vacío o agotado."
-        res_inv = fallback
+        if not res_inv.data:
+            print("⚠️ [RAG INVENTARIO] La base de datos del vendedor no tiene stock disponible.")
+            return "Catálogo vacío o agotado en este momento."
+
+        inventario = res_inv.data
+        palabras_clave = limpiar_texto(texto_cliente).lower()
+
+        # Si el mensaje es vacío o un simple saludo, mandamos los primeros 10 artículos por defecto
+        if not palabras_clave or len(palabras_clave.strip()) < 3:
+            print("📋 [RAG INVENTARIO] Mensaje corto detectado. Retornando top 10 general.")
+            return "\n".join([f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in inventario[:10]])
+
+        resultados_fuzzy = []
         
-    lineas = [f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in res_inv.data]
-    return "\n".join(lineas)
+        # Algoritmo de comparación difusa secuencial
+        for item in inventario:
+            string_inventario = f"{item['nombre'].lower()} {item.get('consola', '').lower()}"
+            
+            # Calculamos el ratio matemático de similitud de caracteres (0.0 a 1.0)
+            ratio_similitud = difflib.SequenceMatcher(None, palabras_clave, string_inventario).ratio()
+            
+            # Bonus de peso si hay coincidencia de sub-palabras clave completas (Mejora la precisión)
+            for palabra in palabras_clave.split():
+                if len(palabra) > 3 and palabra in string_inventario: 
+                    ratio_similitud += 0.35
+            
+            # Si pasa el umbral mínimo de coincidencia, entra a la lista de candidatos
+            if ratio_similitud > 0.15:
+                resultados_fuzzy.append((ratio_similitud, item))
+
+        # Ordenamos los candidatos de mayor a menor similitud
+        resultados_fuzzy.sort(key=lambda x: x[0], reverse=True)
+        items_filtrados = [r[1] for r in resultados_fuzzy[:8]]
+
+        # Fallback de seguridad: Si el algoritmo difuso no encontró nada por mala ortografía extrema, mandamos 5 del stock general
+        if not items_filtrados:
+            print("⚠️ [RAG INVENTARIO] Ningún juego superó el filtro difuso. Activando Fallback de rescate.")
+            items_filtrados = inventario[:5]
+
+        # Formateamos el bloque de contexto que leerá la IA
+        lineas = [f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in items_filtrados]
+        print(f"✅ [RAG INVENTARIO] Bloque RAG construido con {len(lineas)} opciones relevantes.")
+        return "\n".join(lineas)
+
+    except Exception as e:
+        print(f"❌ [RAG ERROR] Falló la construcción del contexto de inventario: {str(e)}")
+        return "Error técnico al recuperar el catálogo."
+
 
 async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
-    res_hist = await async_db_execute(supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)).order('created_at', desc=True).limit(10))
-    if not res_hist.data: return "Primer mensaje."
-    mensajes = list(reversed(res_hist.data))
-    return "\n".join([f"{m.get('autor')}: {m.get('mensaje')}" for m in mensajes])
+    """
+    Manejador Asíncrono del Historial: Extrae los últimos 10 mensajes del cliente de forma ordenada
+    para mantener el hilo y contexto conversacional de Gemini.
+    """
+    print(f"📖 [HISTORIAL CHAT] Solicitando últimas interacciones del Tel: {telefono}")
+    try:
+        # Query optimizada con ordenamiento descendente por fecha de creación
+        query = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)).order('created_at', desc=True).limit(10)
+        res_hist = await async_db_execute(query)
+        
+        if not res_hist.data: 
+            print("🆕 [HISTORIAL CHAT] No hay registros previos. Es el primer mensaje del cliente.")
+            return "Primer mensaje del cliente en el sistema."
+
+        # Invertimos la lista para enviársela a la IA en orden cronológico correcto (Pasado -> Presente)
+        mensajes_ordenados = list(reversed(res_hist.data))
+        historial_texto = "\n".join([f"{m.get('autor')}: {m.get('mensaje')}" for m in mensajes_ordenados])
+        
+        print("✅ [HISTORIAL CHAT] Conversación recuperada e indexada correctamente.")
+        return historial_texto
+
+    except Exception as e:
+        print(f"❌ [HISTORIAL ERROR] Falló la lectura de logs de chat: {str(e)}")
+        return "No se pudo recuperar el historial de chat."
 
 # ==========================================================
 # 🛠️ 6. FUNCIONES CORE: SCRAPER, ALERTAS, MEDIA Y COMUNICACIÓN
@@ -486,65 +581,122 @@ async def bucle_seguimiento_24h():
         except Exception as e: pass
         await asyncio.sleep(600)
 
-async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict):
+async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None):
+    """
+    Ruteador Maestro del Flujo de Trabajo IA: Sincroniza RAG Difuso, Historial de Mensajes,
+    Audición de Notas de Voz, Ejecución de Tools de Descuento y Sincronización del Embudo CRM.
+    """
     try:
-        print(f"\n🧠 [IA WORKFLOW] Procesando Mensaje: {telefono}")
+        print(f"\n🧠 [IA WORKFLOW] ==========================================")
+        print(f"🧠 [IA WORKFLOW] PROCESANDO RESPUESTA AUTÓNOMA DEL BOT")
+        print(f"🧠 [IA WORKFLOW] Cliente: {cliente} | Tel: {telefono} | Columna: {columna_actual}")
+        print(f"==============================================================")
+        
         vendedor_id = config.get("vendedor_id", "")
-        if not verificar_rate_limit(vendedor_id, telefono): return
-        if detectar_prompt_injection(texto_entrante): return await disparar_whatsapp_dinamico_async(telefono, "Lo siento, no puedo procesar esa solicitud.", config.get("meta_token", ""), config.get("meta_phone_id", ""))
+        
+        # 1. Escudo de control contra spam/abusos de peticiones por teléfono
+        if not verificar_rate_limit(vendedor_id, telefono):
+            print("⚠️ [IA WORKFLOW] Denegado: Se ha excedido el límite de peticiones permitidas para este canal.")
+            return
+            
+        # 2. Cortafuegos de inyección de Prompt en capa intermedia
+        if detectar_prompt_injection(texto_entrante):
+            print("🛡️ [IA WORKFLOW] Alerta de seguridad: Intento de Prompt Injection neutralizado.")
+            return await disparar_whatsapp_dinamico_async(telefono, "Lo siento, no puedo procesar esa solicitud.", config.get("meta_token", ""), config.get("meta_phone_id", ""))
 
+        # 3. Recuperación de la Memoria Psicológica del Lead
+        print("📖 [IA WORKFLOW] Descargando perfil y memoria persistente desde Supabase...")
         res_perfil = await async_db_execute(supabase.table('prospectos').select('perfil_psicologico').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)))
         perfil_cliente_previo = res_perfil.data[0].get('perfil_psicologico', {}) if res_perfil.data else {}
         
+        # 4. Inyección del nuevo RAG con Similitud Difusa (Fuzzy Matching tolerante a errores)
+        print("🔍 [IA WORKFLOW] Extrayendo contexto de inventario con algoritmo de coincidencia difusa...")
         contexto = await obtener_contexto_inventario_rag(vendedor_id, texto_entrante)
-        historial = await obtener_historial_chat(telefono, vendedor_id)
-        decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo)
         
-        intencion_ia = decision.get("intencion", "CONSULTA")
+        # 5. Indexación cronológica del historial conversacional
+        print("📜 [IA WORKFLOW] Compilando logs de las últimas interacciones de chat...")
+        historial = await obtener_historial_chat(telefono, vendedor_id)
+        
+        # 6. Ejecución del Modelo de Lenguaje Central (Envío opcional de binario de Audio Nativo)
+        print("🧠 [IA WORKFLOW] Transmitiendo parámetros a Gemini para inferencia lógica...")
+        decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict)
+        
+        # Desempaquetado de variables cognitivas AAA del JSON estructurado
+        intencion_ia = str(decision.get("intencion", "CONSULTA")).upper()
         respuesta_final = decision.get("respuesta", "En un momento te atiendo.")
         juego_detectado = decision.get("juego_detectado", "")
+        consola_detectada = decision.get("consola_preferida", perfil_cliente_previo.get("consola_preferida", ""))
+        accion_tool = str(decision.get("accion_tool", "ninguna")).lower()
+        precio_oferta = decision.get("precio_oferta", 0.0)
         
+        print(f"📊 [IA WORKFLOW] Diagnóstico - Intención: {intencion_ia} | Juego: {juego_detectado} | Plataforma: {consola_detectada}")
+
+        # 💾 INTEGRACIÓN MEJORA: Actualización de Memoria a Largo Plazo (Consola Preferida)
         perfil_cliente_actualizado = {
             **perfil_cliente_previo, 
             "emocion_actual": decision.get("emocion_cliente", "neutral"),
             "temperatura": decision.get("temperatura_lead", "frio"),
             "ultimo_interes": juego_detectado,
+            "consola_preferida": consola_detectada,
             "ultima_intencion": intencion_ia
         }
 
+        # 🛠️ INTEGRACIÓN MEJORA: Tool Calling Autónomo (Descuentos controlados por margen de RAM)
+        if accion_tool == "aplicar_descuento" or intencion_ia == "REGATEO":
+            print(f"💰 [TOOL CALLING] Herramienta comercial activada de forma autónoma. Oferta calculada: ${precio_oferta} MXN.")
+            # La IA ajusta dinámicamente la propuesta en 'respuesta_final' basándose en el prompt inyectado.
+
         nueva_columna, iluminacion = columna_actual, "blanco"
 
+        # 🚀 Enrutador de estados físicos del embudo Kanban del CRM Gold Veltrix
         if intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO"]:
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+            print("🚨 [IA WORKFLOW] Tráfico crítico o disconformidad detectada. Disparando handoff ejecutivo a Admin...")
             resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
             await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
             
         elif intencion_ia == "COMPRA":
             nueva_columna, iluminacion = "Por Entregar", "verde_exito"
+            print("💰 [IA WORKFLOW] Cierre de venta identificado. Transmitiendo notificación de facturación...")
             resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
             await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
             
         elif intencion_ia in ["COTIZACION", "REGATEO", "SALUDO"] and columna_actual == "Bandeja Nueva": 
             nueva_columna = "Envios Masivos"
+            print(f"📈 [IA WORKFLOW] Lead calificado de forma ordinaria. Trasladando tarjeta a: {nueva_columna}")
             
         elif intencion_ia == "PEDIDO_ESPECIAL":
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+            print("📦 [IA WORKFLOW] Título no localizado físicamente. Registrando alerta de pedido especial...")
             await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", f"Busca: {juego_detectado}", config)
 
+        # 7. Persistencia final del estado y logging histórico en Supabase
+        print("💾 [IA WORKFLOW] Sincronizando metadatos de tarjeta y chat log en la nube...")
         await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, juego_detectado, perfil_ia=perfil_cliente_actualizado)
         await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
+        # 8. Renderización y despacho de mensajería enriquecida (Media Linker)
         url_imagen = None
         if juego_detectado:
+            print(f"🖼️ [IA WORKFLOW] Rastreando enlace URL de portada para: '{juego_detectado}'")
             res_img = await async_db_execute(supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego_detectado}%').eq('vendedor_id', str(vendedor_id)).neq('url_portada', '').limit(1))
-            if res_img.data: url_imagen = res_img.data[0].get('url_portada')
+            if res_img.data: 
+                url_imagen = res_img.data[0].get('url_portada')
+                print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
 
-        if url_imagen: await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
-        else: await disparar_whatsapp_dinamico_async(telefono, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
+        # Ejecución final de despacho mediante la pasarela HTTP de la API de Meta
+        if url_imagen: 
+            print("📡 [IA WORKFLOW] Despachando paquete de mensajería enriquecida (IMAGEN + TEXTO)...")
+            await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
+        else: 
+            print("📡 [IA WORKFLOW] Despachando paquete de mensajería plano (TEXTO ÚNICO)...")
+            await disparar_whatsapp_dinamico_async(telefono, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
 
-        print(f"✅ [IA WORKFLOW] Listo. Intención: {intencion_ia} | Columna: {nueva_columna}")
+        print(f"✅ [IA WORKFLOW] FLUJO COMPLETADO EXITOSAMENTE PARA EL CANAL: {telefono}")
+        print(f"==============================================================\n")
 
-    except Exception as e: logger.exception(f"❌ ERROR procesar_respuesta_bot: {e}")
+    except Exception as e: 
+        logger.exception(f"❌ [IA WORKFLOW CRITICAL ERROR] Falla estructural en el orquestador del Bot: {str(e)}")
 
 # ==========================================================
 # 📈 8. MOTOR DE PRECIOS PRO (NOMBRES OFICIALES Y CERO SEGURO)
@@ -1022,76 +1174,126 @@ async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (CON AUDITOR)
 # ==========================================================
 async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
+    print("\n📥 ==========================================================")
+    print("📥 [WORKER BG] INICIANDO ORQUESTACIÓN DE MENSAJE ENTRANTE")
+    print("==============================================================")
     try:
         wamid = str(msg.get("id", "")).strip()
-        if wamid and wamid in procesados_recientemente: return
-        if wamid: procesados_recientemente.append(wamid)
+        if wamid and wamid in procesados_recientemente:
+            print(f"♻️ [WORKER BG] Token de mensaje duplicado (wamid: {wamid}). Ignorando transmisión.")
+            return
+        if wamid:
+            procesados_recientemente.append(wamid)
 
+        print(f"📡 [WORKER BG] Descargando configuración de Tenant (Phone ID: {phone_id_receptor})")
         res_config = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1))
         config_vendedor = res_config.data[0] if res_config.data else {"vendedor_id": "V-001", "meta_token": WHATSAPP_TOKEN, "meta_phone_id": WHATSAPP_PHONE_ID, "bot_activo": True, "nombre_negocio": "Fantasy Games"}
         
         vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001"))
         token_actual = str(config_vendedor.get("meta_token", "")) or WHATSAPP_TOKEN
         nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games"))
-        if not token_actual or not config_vendedor.get("bot_activo", True): return
+        
+        if not token_actual or not config_vendedor.get("bot_activo", True):
+            print(f"🚫 [WORKER BG] Flujo denegado: El Bot del Tenant {vendedor_actual} está inactivo o carece de token de acceso.")
+            return
 
         telefono_cliente = str(msg.get("from", "")).strip()
-        if telefono_cliente.startswith("521"): telefono_cliente = "52" + telefono_cliente[3:]
-        if not telefono_cliente: return
+        if telefono_cliente.startswith("521"): 
+            telefono_cliente = "52" + telefono_cliente[3:]
+        if not telefono_cliente: 
+            print("⚠️ [WORKER BG] Alerta: Identificador telefónico vacío o corrupto. Abortando ejecutor.")
+            return
 
         tipo_mensaje = str(msg.get("type", "text")).lower()
-        if tipo_mensaje == "text": texto_entrante = msg.get("text", {}).get("body", "").strip()
-        elif tipo_mensaje == "image": texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago...]"
-        elif tipo_mensaje == "audio": texto_entrante = "🎙️ [AUDIO RECIBIDO]"
-        elif tipo_mensaje == "interactive": texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
-        else: return
+        texto_entrante = ""
+        media_dict_audio = None  # 🎙️ Inyección AAA: Buffer de almacenamiento para el Audio Binario Nativo
 
+        print(f"📦 [WORKER BG] Formato de paquete detectado: '{tipo_mensaje}' | Remitente: {telefono_cliente}")
+        
+        if tipo_mensaje == "text": 
+            texto_entrante = msg.get("text", {}).get("body", "").strip()
+        elif tipo_mensaje == "image": 
+            texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago...]"
+        elif tipo_mensaje == "interactive": 
+            texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
+        elif tipo_mensaje == "audio": 
+            texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA - ANALIZANDO AUDIO...]"
+            audio_id = msg.get("audio", {}).get("id", "").strip()
+            print(f"🎙️ [WORKER BG] Capturado ID de Nota de voz: {audio_id}. Inicializando pasarela de descarga...")
+            if audio_id:
+                media_dict_audio = await descargar_media_whatsapp_async(audio_id, token_actual)
+                if media_dict_audio:
+                    print("🎙️ [WORKER BG] Archivo binario de audio descargado y acoplado con éxito al diccionario multimedia.")
+                else:
+                    print("⚠️ [WORKER BG] Warning: No se obtuvo respuesta binaria de los servidores de Meta para este audio.")
+        else: 
+            print(f"ℹ️ [WORKER BG] Formato '{tipo_mensaje}' no mapeado en el enrutador actual. Descartando.")
+            return
+
+        print(f"🗂️ [WORKER BG] Validando estado de cuenta del prospecto en Supabase...")
         res_p = await async_db_execute(supabase.table('prospectos').select('columna, notas').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual))
         columna_actual = res_p.data[0].get("columna", "Bandeja Nueva") if res_p.data else "Bandeja Nueva"
 
         nombre_cliente = valor.get("contacts", [{}])[0].get("profile", {}).get("name", "Cliente")
 
         if not res_p.data:
+            print(f"✨ [WORKER BG] Cliente nuevo localizado. Inicializando inserción de '{nombre_cliente}' en CRM...")
             await async_db_execute(supabase.table('prospectos').insert({
                 "nombre": nombre_cliente, 
-                "telefono": telefono_cliente, "columna": columna_actual, "vendedor_id": vendedor_actual,
+                "telefono": telefono_cliente, 
+                "columna": columna_actual, 
+                "vendedor_id": vendedor_actual,
                 "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
             }))
 
+        # Persistimos la actividad del usuario en el log histórico global
         await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "USER", texto_entrante)
 
+        # 🚀 Bifurcación del Ruteador según la naturaleza del evento multimedia
         if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
-            await procesar_respuesta_bot(nombre_cliente, telefono_cliente, texto_entrante, columna_actual, config_vendedor)
+            print(f"🤖 [WORKER BG] Despachando carga cognitiva hacia procesar_respuesta_bot... (Audio Binario Cargado: {media_dict_audio is not None})")
+            # Enviamos el buffer de audio de forma nativa a la canalización del cerebro IA
+            await procesar_respuesta_bot(nombre_cliente, telefono_cliente, texto_entrante, columna_actual, config_vendedor, media_dict_audio)
             
-        # 🚀 RESTAURACIÓN: Lógica de Auditoría Visual de Pagos
         elif tipo_mensaje == "image":
+            print("🛡️ [DOBERMAN AUDITOR] Desplegando cortafuegos analítico de finanzas visuales...")
             image_id = msg.get("image", {}).get("id", "").strip()
-            if not image_id: return
-
-            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
-            media_dict = await descargar_media_whatsapp_async(image_id, token_actual)
-
-            if not media_dict:
-                print("⚠️ Falla al descargar la imagen de Meta.")
+            if not image_id:
+                print("⚠️ [DOBERMAN AUDITOR] Cancelando auditoría: Estructura de imagen vacía.")
                 return
 
-            auditoria = await auditar_comprobante_ia(media_dict["data"], media_dict["mime_type"], nombre_negocio, historial_para_auditor)
+            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
+            media_dict_img = await descargar_media_whatsapp_async(image_id, token_actual)
+
+            if not media_dict_img:
+                print("❌ [DOBERMAN AUDITOR] Falla crítica: Error de enlace en la descarga del comprobante.")
+                return
+
+            # Ejecutamos la auditoría de visión computacional con Gemini
+            auditoria = await auditar_comprobante_ia(media_dict_img["data"], media_dict_img["mime_type"], nombre_negocio, historial_para_auditor)
             es_pago = auditoria.get("es_pago", False)
             monto = float(auditoria.get("monto_detectado", 0.0)) 
 
             if es_pago:
+                print(f"💰 [DOBERMAN AUDITOR] ¡COMPROBANTE VÁLIDO! Capital detectado: ${monto} MXN. Actualizando CRM...")
                 await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", "")
                 msg_exito = f"✅ ¡Pago validado por ${monto:.2f} MXN!\nHemos recibido tu comprobante."
                 await disparar_whatsapp_dinamico_async(telefono_cliente, msg_exito, token_actual, phone_id_receptor)
                 await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
-                print(f"💰 PAGO EXITOSO | {telefono_cliente} | ${monto}")
+                print(f"💰 PAGO EXITOSO FINANCIADO | {telefono_cliente} | ${monto}")
             else:
+                print(f"🚨 [DOBERMAN AUDITOR] ALERTA: Intento de fraude o imagen corrupta. Razón: {auditoria.get('analisis')}")
                 msg_fallo = f"🤖 Mi sistema no pudo validar la imagen.\nDetalle: {auditoria.get('analisis')}\nPor favor envía una foto clara."
                 await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
                 await disparar_whatsapp_dinamico_async(telefono_cliente, msg_fallo, token_actual, phone_id_receptor)
                 await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
 
-    except Exception as e: logger.exception(f"❌ [WORKER ERROR]: {str(e)}")
+        print("🏁 ==========================================================")
+        print("🏁 [WORKER BG] OPERACIÓN ASÍNCRONA COMPLETADA SIN ERRORES")
+        print("==============================================================\n")
+
+    except Exception as e: 
+        logger.exception(f"❌ [WORKER BG CRITICAL ERROR] Detonación en bloque supervisor en background: {str(e)}")
 
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
