@@ -11,3 +11,4 @@ python-jose[cryptography]
 passlib[bcrypt]
 rapidfuzz==3.10.1
 google-generativeai
+orjson
