@@ -787,31 +787,36 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
     if not http_client: return ""
     
     ahora = time.time()
-    if ahora < CB_PRICECHARTING["bloqueado_hasta"]:
+    # Usamos .get() por si el diccionario no está inicializado
+    if ahora < CB_PRICECHARTING.get("bloqueado_hasta", 0):
         print("🛑 [CIRCUIT BREAKER] Dominio PriceCharting en enfriamiento.")
         return ""
     
     def es_html_valido(html_text: str) -> bool:
         texto = html_text.lower()
-        if any(b in texto for b in ["cloudflare", "just a moment", "security check"]): return False
-        if len(html_text) < 5000: return False
+        if any(b in texto for b in ["cloudflare", "just a moment", "security check", "verify you are human"]): return False
+        if len(html_text) < 2000: return False
+        
+        # 🔥 Validación Estructural Fuerte: Si no tiene tabla de precios, lo rechaza y reintenta
+        if es_busqueda and "games_table" not in texto and "search-results" not in texto: 
+            return False
+        if not es_busqueda and "product_name" not in texto and "price" not in texto: 
+            return False
         return True
 
-    url_codificada = urllib.parse.quote(url_objetivo)
+    # Usamos quote_plus para que los espacios sean "+" en vez de "%20" (Como lo pide PriceCharting)
+    url_codificada = urllib.parse.quote_plus(url_objetivo)
     estrategias = [
         ("Directo", url_objetivo),
-        # 🔥 EL SECRETO: Obligamos a ScraperAPI a usar modo Desktop
-        ("Proxy", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&device_type=desktop"),
-        ("Render JS", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true&device_type=desktop"),
+        ("Proxy Desktop", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&device_type=desktop"),
+        ("Render JS Desktop", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true&device_type=desktop"),
         ("Premium", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true&device_type=desktop")
     ]
     
     for intento, (nombre_fase, url_scraper) in enumerate(estrategias):
         try:
             if intento > 0: await asyncio.sleep(1.5 ** intento) 
-            
-            # Aumentamos el tiempo de lectura a 45s porque Render JS es pesado
-            timeout_seguro = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=10.0)
+            timeout_seguro = httpx.Timeout(connect=10.0, read=35.0, write=15.0, pool=10.0)
             res = await http_client.get(url_scraper, timeout=timeout_seguro)
             
             if res.status_code == 200 and es_html_valido(res.text): 
@@ -820,7 +825,7 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
         except Exception as e:
             print(f"❌ [SCRAPER] Fallo en {nombre_fase}: {str(e)[:50]}")
             
-    CB_PRICECHARTING["fallas"] += 1
+    CB_PRICECHARTING["fallas"] = CB_PRICECHARTING.get("fallas", 0) + 1
     if CB_PRICECHARTING["fallas"] >= 10:
         CB_PRICECHARTING["bloqueado_hasta"] = ahora + 600
         print("🚨 [CIRCUIT BREAKER] Activado. Scraper bloqueado 10m.")
@@ -841,7 +846,8 @@ def calcular_precio_venta_inteligente_aaa(precio_mercado_mxn: float, costo_compr
 
 @app.get("/api/consultar_precio")
 async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo", dias_inventario: int = 0, rareza: str = "comun"):
-    await lanzar_gc_si_toca() # Singleton de memoria segura
+    await lanzar_gc_si_toca() 
+    print(f"\n🏷️ [RADAR ENTERPRISE] Buscando: '{nombre}' ({consola}) | Operador: {vendedor_id}")
     
     llave_cache = generar_cache_key(nombre, consola)
     valores_cacheados = await obtener_precio_cache(llave_cache)
@@ -854,10 +860,15 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     nombre_normalizado = normalizar_nombre_busqueda(nombre)
-    url_search = f"https://www.pricecharting.com/search-products?q={urllib.parse.quote(nombre_normalizado + ' ' + consola_web)}&type=videogames"
+    
+    # 🚀 FIX URL DE BUSQUEDA: Usamos quote_plus y type=prices para que el navegador de Godot nunca se vaya al Home.
+    query = urllib.parse.quote_plus(nombre_normalizado + ' ' + consola_web)
+    url_search = f"https://www.pricecharting.com/search-products?q={query}&type=prices"
     
     html_search = await obtener_html_escalonado_async(url_search, es_busqueda=True)
-    if not html_search: return {"status": "error", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+    if not html_search: 
+        print(f"⚠️ [RADAR PRECIOS] Falló la búsqueda HTML. Devolviendo URL base.")
+        return {"status": "error", "mxn": {"loose": 0, "cib": 0, "new": 0}, "url_pc": url_search}
         
     soup = BeautifulSoup(html_search, 'html.parser')
     nodos_a_buscar = soup.find(id="games_table").find_all('a', href=True) if soup.find(id="games_table") else soup.find_all('a', href=True)
@@ -871,61 +882,81 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             score = 0.0
             if f"/{slug_esperado}/" in href: score += 40.0 
             
-            # 🚀 RapidFuzz Token Sort Ratio (Inmune al orden de las palabras)
             score += fuzz.token_sort_ratio(nombre_normalizado, normalizar_nombre_busqueda(a.text)) * 0.6
             
             if re.search(r'(-japan-|-jp-|-pal-|-eu-|-korea-)', href): score -= 50.0
             
-            if score > 50.0:
-                candidatos.append({"url": "https://www.pricecharting.com" + a['href'] if not a['href'].startswith("http") else a['href'], "score": score})
+            # 🚀 FIX: Umbral de IA bajado a 35.0 para no descartar nombres cortos como "FIFA 08"
+            if score > 35.0:
+                url_limpia = a['href'].strip()
+                if not url_limpia.startswith("http"):
+                    url_limpia = "https://www.pricecharting.com" + url_limpia
+                candidatos.append({"url": url_limpia, "score": score})
 
     nombre_oficial_pc, p_loose, p_cib, p_new = nombre, 0.0, 0.0, 0.0
+    link_juego = None
 
     if candidatos:
         mejor_candidato = max(candidatos, key=lambda x: x["score"])
-        html_juego = await obtener_html_escalonado_async(mejor_candidato["url"], es_busqueda=False)
+        link_juego = mejor_candidato["url"]
+        print(f"🎯 [MATCHING AAA] Score {round(mejor_candidato['score'], 2)}/100 -> {link_juego}")
+        
+        html_juego = await obtener_html_escalonado_async(link_juego, es_busqueda=False)
         if html_juego: 
             soup_juego = BeautifulSoup(html_juego, 'html.parser')
             h1_tag = soup_juego.find('h1', id='product_name')
             if h1_tag: nombre_oficial_pc = h1_tag.text.strip().replace('\n', ' ')
 
-            # 🔥 Extractor Matemático AAA (Inmune a layouts móviles o texto basura)
             def extraer_numero(id_css):
-                # Busca por ID (PC) o por Clase (Móvil)
                 nodo = soup_juego.find(id=id_css) or soup_juego.find(class_=id_css)
                 if not nodo: return 0.0
-                
                 texto_crudo = nodo.get_text(strip=True).replace(',', '')
-                # Extrae solo números y decimales usando Regex
                 coincidencias = re.findall(r'\d+\.\d+|\d+', texto_crudo)
-                
                 if coincidencias:
                     try: return float(coincidencias[0])
                     except: pass
                 return 0.0
 
-            p_loose, p_cib, p_new = extraer_numero("used_price"), extraer_numero("cib_price"), extraer_numero("new_price")
+            p_loose = extraer_numero("used_price")
+            p_cib = extraer_numero("cib_price")
+            p_new = extraer_numero("new_price")
+
+    # 🔥 FIX: Asignación robusta de la URL final para Godot
+    url_final_godot = link_juego if link_juego else url_search
 
     if p_loose == 0 and p_cib == 0:
-        return {"status": "warning_cero", "nombre_corregido": nombre_oficial_pc, "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, "rareza": "Manual"}
+        print(f"⚠️ [RADAR PRECIOS] Contingencia 0$ para: '{nombre_oficial_pc}'. URL: {url_final_godot}")
+        return {
+            "status": "warning_cero", 
+            "nombre_corregido": nombre_oficial_pc, 
+            "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, 
+            "usd": {"loose": 0, "cib": 0, "new": 0},
+            "rareza": "Manual",
+            "url_pc": url_final_godot
+        }
 
     mxn_loose_real = round(p_loose * tipo_cambio, 2)
     mxn_cib_real = round(p_cib * tipo_cambio, 2)
+    mxn_new_real = round(p_new * tipo_cambio, 2)
     
     respuesta_final = {
         "status": "ok",
         "nombre_corregido": nombre_oficial_pc,
-        "mxn_mercado": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": round(p_new * tipo_cambio, 2)},
+        "mxn_mercado": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": mxn_new_real},
         "mxn_venta": {
             "loose": calcular_precio_venta_inteligente_aaa(mxn_loose_real, 0, dias_inventario, rareza), 
             "cib": calcular_precio_venta_inteligente_aaa(mxn_cib_real, 0, dias_inventario, rareza), 
-            "new": calcular_precio_venta_inteligente_aaa(round(p_new * tipo_cambio, 2), 0, dias_inventario, rareza)
+            "new": calcular_precio_venta_inteligente_aaa(mxn_new_real, 0, dias_inventario, rareza)
         },
+        "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
         "tipo_cambio": tipo_cambio,
+        "rareza": rareza,
+        "url_pc": url_final_godot,
         "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0
     }
     
     await guardar_precio_cache(llave_cache, respuesta_final)
+    print(f"✅ [RADAR EXITO] Mercado CIB: ${mxn_cib_real} MXN | URL: {url_final_godot}")
     return respuesta_final
 
 # ==========================================================
