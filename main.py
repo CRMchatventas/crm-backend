@@ -704,73 +704,50 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 
 async def obtener_html_escalonado_async(url_objetivo: str) -> str:
     """
-    Motor de Scrapeo Avanzado en 4 Fases con Validación Estructural AAA.
-    Detecta bloqueos silenciosos (Soft-Blocks con código 200 OK y HTML vacío)
-    y escala de forma agresiva utilizando la infraestructura de ScraperAPI.
+    Motor de Scrapeo Inteligente en 4 Fases con Evasión de Bloqueos.
+    Primero intenta conexión directa sin tokens; si detecta denegación o Cloudflare,
+    escala secuencialmente a través de la infraestructura de ScraperAPI.
     """
     if not http_client: 
-        print("❌ [RADAR CORE] Error: Cliente HTTP no inicializado en el ciclo del motor.")
+        print("❌ [RADAR CORE] Error: Cliente HTTP no inicializado.")
         return ""
     
-    # 🛡️ Validación Estructural: Comprueba que la respuesta contenga datos legítimos y no páginas trampa
+    # 🛡️ Escudo Anti-Cloudflare/Bloqueos: Detecta si la respuesta es una pantalla de seguridad
     def es_html_valido(html_text: str) -> bool:
         texto = html_text.lower()
-        
-        # 1. Filtro explícito de firmas conocidas de CAPTCHAs y bloqueos habituales
-        bloqueos = [
-            "just a moment", "cloudflare", "security check", "access denied", 
-            "captcha", "robot check", "unusual traffic", "automated access",
-            "please turn on javascript", "enable cookies"
-        ]
-        if any(b in texto for b in bloqueos):
-            print("🛡️ [RADAR CORE] Bloqueo explícito interceptado en las firmas de texto.")
+        if "just a moment" in texto or "cloudflare" in texto or "security check" in texto or "access denied" in texto:
             return False
-            
-        # 2. Control Estructural: La respuesta legítima debe contener marcadores clave de PriceCharting
-        marcadores_reales = ["games_table", "product_name", "used_price", "cib_price", "price_data"]
-        if not any(m in texto for m in marcadores_reales):
-            print("🛡️ [RADAR CORE] Soft-Block Detectado: Estructura de datos vacía o protegida por JS.")
-            return False
-            
-        if "pricecharting" not in texto or len(html_text) < 3000:
-            print("🛡️ [RADAR CORE] HTML corrupto, incompleto o con tamaño de respuesta insuficiente.")
-            return False
-            
         return True
 
     print(f"🟢 [RADAR FASE 1] Intentando conexión directa gratuita -> {url_objetivo}")
     try:
-        res = await http_client.get(url_objetivo, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
-        })
+        res = await http_client.get(url_objetivo, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         if res.status_code == 200 and es_html_valido(res.text): 
-            print("✅ [RADAR FASE 1] Conexión limpia establecida sin costo de tokens.")
+            print("✅ [RADAR FASE 1] Conexión directa exitosa sin gastar tokens.")
             return res.text
     except Exception as e:
-        print(f"⚠️ [RADAR FASE 1] Error en conexión directa: {str(e)}")
+        print(f"⚠️ [RADAR FASE 1] Falló la conexión directa: {str(e)}")
 
-    # ⚙️ Preparación y codificación de URL para el enrutador de ScraperAPI
+    # ⚙️ Preparar URL codificada para la escalada de ScraperAPI
     url_codificada = urllib.parse.quote(url_objetivo)
     
-    # 🟡 FASES 2 A 4: Escalada de artillería mediante túneles residenciales y emulación headless
+    # 🟡 FASES 2 a 4: Escalada secuencial y agresiva de tokens anti-bloqueos
     estrategias = [
         ("Fase 2: Proxy Estándar (1 Token)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}"),
-        ("Fase 3: Renderizado JavaScript Headless (10 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
-        ("Fase 4: Proxy Ultra Residencial Premium (30 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
+        ("Fase 3: Renderizado JS (10 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
+        ("Fase 4: Premium Residencial (30 Tokens)", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
     ]
     
     for nombre_fase, url_scraper in estrategias:
         print(f"🟡 [RADAR ESCALACIÓN] Activando {nombre_fase}...")
         try:
-            res = await http_client.get(url_scraper, timeout=25.0)
-            if res.status_code == 200 and es_html_valido(res.text):
-                print(f"🔥 [RADAR ÉXITO] Bypass completado exitosamente usando {nombre_fase}!")
+            res = await http_client.get(url_scraper)
+            if res.status_code == 200 and es_html_valido(res.text): 
+                print(f"🔥 [RADAR ÉXITO] Bypass completado usando {nombre_fase}!")
                 return res.text
         except Exception as e:
-            print(f"❌ [RADAR ESCALACIÓN] Falla de ejecución en {nombre_fase}: {str(e)}")
+            print(f"❌ [RADAR ESCALACIÓN] Error en {nombre_fase}: {str(e)}")
         
-    print("🚨 [RADAR CRÍTICO] Las 4 fases de contingencia fallaron o la API Key no cuenta con créditos.")
     return ""
 
 async def obtener_dolar_hoy_async():
@@ -791,8 +768,8 @@ def calcular_precio_venta_inteligente(precio_mercado_mxn: float, costo_compra: f
 @app.get("/api/consultar_precio")
 async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo"):
     print(f"\n🏷️ [RADAR PRECIOS] ==========================================")
-    print(f"🏷️ [RADAR PRECIOS] PETICIÓN DE VALORACIÓN DESDE VISOR GODOT")
-    print(f"🏷️ [RADAR PRECIOS] Artículo: '{nombre}' | Consola: '{consola}' | ID Vendedor: {vendedor_id}")
+    print(f"🏷️ [RADAR PRECIOS] SOLICITUD DE VALORACIÓN DESDE VISOR GODOT 4.6")
+    print(f"🏷️ [RADAR PRECIOS] Buscando: '{nombre}' ({consola}) | Operador: {vendedor_id}")
     print(f"==============================================================")
     
     if vendedor_id != "ADMIN_VELTRIX":
@@ -813,29 +790,28 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
         registro_actividad_b2b[llave_spam] = estado
 
     tipo_cambio = await obtener_dolar_hoy_async()
-    print(f"💵 [RADAR PRECIOS] Tipo de Cambio Indexado: $1 USD = {tipo_cambio} MXN")
+    print(f"💵 [RADAR PRECIOS] Tipo de cambio financiero: $1 USD = {tipo_cambio} MXN")
     
     slugs_pc = {"PS5": "playstation-5", "PS4": "playstation-4", "PS3": "playstation-3", "PS2": "playstation-2", "PS1": "playstation", "Xbox One": "xbox-one", "Xbox 360": "xbox-360", "Xbox Clasico": "xbox", "Nintendo Switch": "nintendo-switch", "Nintendo 3DS": "nintendo-3ds", "Nintendo DS": "nintendo-ds", "Nintendo 64": "nintendo-64", "GameCube": "gamecube", "GameBoy Advance": "gameboy-advance", "GameBoy Color": "gameboy-color", "Wii": "wii", "Wii U": "wii-u", "SNES": "super-nintendo", "NES": "nes", "Genesis": "sega-genesis"}
     
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
-    query = nombre.replace(" ", "+")
-    url_search = f"https://www.pricecharting.com/search-products?q={query}+{consola_web}&type=videogames"
+    query = f"{nombre} {consola_web}".replace(" ", "+")
+    url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    print("🔍 [RADAR PRECIOS] Extrayendo listado maestro de coincidencias...")
+    print("🔍 [RADAR PRECIOS] Buscando listado maestro de coincidencias...")
     html_search = await obtener_html_escalonado_async(url_search)
     if not html_search: 
-        print("❌ [RADAR PRECIOS] Error crítico: No se obtuvo respuesta HTML. Abortando flujo.")
+        print("❌ [RADAR PRECIOS] No se pudo recuperar el HTML del catálogo de búsqueda.")
         return {"status": "error_precio_cero", "detalle": "Error Radar", "nombre_corregido": nombre, "url_pc": url_search, "mxn": {"loose": 0, "cib": 0, "new": 0}}
         
     soup = BeautifulSoup(html_search, 'html.parser')
     link_juego = None
     slug_esperado = slugs_pc.get(consola, consola_web.lower().replace(' ', '-'))
     etiqueta_busqueda = f"/game/{slug_esperado}/"
-    palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box', 'guide']
+    palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
     
     nodos_a_buscar = soup.find(id="games_table").find_all('a', href=True) if soup.find(id="games_table") else soup.find_all('a', href=True)
     
-    # Fase 1 de Mapeo: Búsqueda estricta que empareje el slug exacto de la consola
     for a in nodos_a_buscar:
         href = a['href'].lower()
         if '/game/' in href and not any(b in href for b in palabras_prohibidas):
@@ -843,7 +819,6 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
                 link_juego = a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href']
                 break
     
-    # Fase 2 de Mapeo: Fallback de emparejamiento por proximidad general si falla el slug estricto
     if not link_juego:
         for a in nodos_a_buscar:
             href = a['href'].lower()
@@ -855,7 +830,7 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     p_loose = p_cib = p_new = 0.0
 
     if link_juego:
-        print(f"🎯 [RADAR PRECIOS] Ficha localizada con éxito -> '{link_juego}'. Analizando métricas de valor...")
+        print(f"🎯 [RADAR PRECIOS] Ficha localizada -> '{link_juego}'. Inicializando extracción de valores...")
         html_juego = await obtener_html_escalonado_async(link_juego)
         if html_juego: 
             soup_juego = BeautifulSoup(html_juego, 'html.parser')
@@ -863,15 +838,13 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             if h1_tag: 
                 nombre_oficial_pc = h1_tag.text.strip().replace('\n', ' ')
 
-            # 🚀 Extractor Regex AAA: Aísla y extrae de forma limpia únicamente el primer float válido del nodo
+            # 🚀 TU FUNCIÓN ORIGINAL INTACTA (Restaurada al 100% por seguridad absoluta)
             def extraer_numero_puro(id_css):
                 nodo = soup_juego.find(id=id_css)
                 if nodo:
-                    texto_limpio = nodo.text.replace(',', '').strip()
-                    match = re.search(r'\d+(?:\.\d+)?', texto_limpio)
-                    if match:
-                        try: return float(match.group(0))
-                        except: pass
+                    texto_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
+                    try: return float(texto_limpio) if texto_limpio else 0.0
+                    except: pass
                 return 0.0
 
             p_loose = extraer_numero_puro("used_price")
@@ -879,10 +852,10 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             p_new = extraer_numero_puro("new_price")
 
     if p_loose == 0 and p_cib == 0:
-        print(f"⚠️ [RADAR PRECIOS] Indexación en $0 para: '{nombre}'. Transmitiendo bandera de contingencia manual a Godot.")
+        print(f"⚠️ [RADAR PRECIOS] Indexación en $0 para: '{nombre}'. Transmitiendo contingencia manual a Godot.")
         return {
             "status": "warning_cero",
-            "detalle": "Juego no encontrado o protegido. Cargado en $0 para revisión manual.",
+            "detalle": "Juego no encontrado. Cargado en $0 para revisión manual.",
             "nombre_corregido": nombre_oficial_pc,
             "mxn_venta": {"loose": 0, "cib": 0, "new": 0},
             "usd": {"loose": 0, "cib": 0, "new": 0},
@@ -890,12 +863,12 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             "rareza": "Revisión Manual"
         }
 
-    # Conversión limpia y formateo de monedas locales
+    # Procesamiento financiero de conversión de divisas
     mxn_loose_real = round(p_loose * tipo_cambio, 2)
     mxn_cib_real = round(p_cib * tipo_cambio, 2)
     mxn_new_real = round(p_new * tipo_cambio, 2)
 
-    print(f"✅ [RADAR ÉXITO] Nombre Oficial PC: '{nombre_oficial_pc}' | Mercado CIB: ${mxn_cib_real} MXN | Retail Sugerido Veltrix: ${calcular_precio_venta_inteligente(mxn_cib_real)} MXN")
+    print(f"✅ [RADAR EXITO] Nombre Oficial: '{nombre_oficial_pc}' | CIB Mercado: ${mxn_cib_real} MXN | Venta Veltrix: ${calcular_precio_venta_inteligente(mxn_cib_real)} MXN")
     print("==============================================================\n")
     
     return {
