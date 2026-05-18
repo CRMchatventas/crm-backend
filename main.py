@@ -800,17 +800,20 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
     url_codificada = urllib.parse.quote(url_objetivo)
     estrategias = [
         ("Directo", url_objetivo),
-        ("Proxy", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}"),
-        ("Render JS", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
-        ("Premium", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
+        # 🔥 EL SECRETO: Obligamos a ScraperAPI a usar modo Desktop
+        ("Proxy", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&device_type=desktop"),
+        ("Render JS", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true&device_type=desktop"),
+        ("Premium", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true&device_type=desktop")
     ]
     
     for intento, (nombre_fase, url_scraper) in enumerate(estrategias):
         try:
-            # Exponential Backoff (Aumenta el tiempo de espera si fallan las fases)
             if intento > 0: await asyncio.sleep(1.5 ** intento) 
             
-            res = await http_client.get(url_scraper, timeout=HTTP_TIMEOUTS)
+            # Aumentamos el tiempo de lectura a 45s porque Render JS es pesado
+            timeout_seguro = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=10.0)
+            res = await http_client.get(url_scraper, timeout=timeout_seguro)
+            
             if res.status_code == 200 and es_html_valido(res.text): 
                 CB_PRICECHARTING["fallas"] = 0
                 return res.text
@@ -819,7 +822,7 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
             
     CB_PRICECHARTING["fallas"] += 1
     if CB_PRICECHARTING["fallas"] >= 10:
-        CB_PRICECHARTING["bloqueado_hasta"] = ahora + 600 # Ban 10 minutos
+        CB_PRICECHARTING["bloqueado_hasta"] = ahora + 600
         print("🚨 [CIRCUIT BREAKER] Activado. Scraper bloqueado 10m.")
     return ""
 
@@ -886,11 +889,18 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             h1_tag = soup_juego.find('h1', id='product_name')
             if h1_tag: nombre_oficial_pc = h1_tag.text.strip().replace('\n', ' ')
 
+            # 🔥 Extractor Matemático AAA (Inmune a layouts móviles o texto basura)
             def extraer_numero(id_css):
-                nodo = soup_juego.find(id=id_css)
-                if nodo:
-                    text_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
-                    try: return float(text_limpio) if text_limpio else 0.0
+                # Busca por ID (PC) o por Clase (Móvil)
+                nodo = soup_juego.find(id=id_css) or soup_juego.find(class_=id_css)
+                if not nodo: return 0.0
+                
+                texto_crudo = nodo.get_text(strip=True).replace(',', '')
+                # Extrae solo números y decimales usando Regex
+                coincidencias = re.findall(r'\d+\.\d+|\d+', texto_crudo)
+                
+                if coincidencias:
+                    try: return float(coincidencias[0])
                     except: pass
                 return 0.0
 
