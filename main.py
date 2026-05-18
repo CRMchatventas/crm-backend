@@ -1,5 +1,5 @@
 # ==========================================================
-# 🚀 SISTEMA BACKEND: VELTRIX ENGINE V20.1 (MASTER PIECE)
+# 🚀 SISTEMA BACKEND: VELTRIX ENGINE V20.2 (AAA ENTERPRISE)
 # Godot 4.6 Ready • Auditor IA • Scraper • Remarketing
 # ==========================================================
 
@@ -15,6 +15,7 @@ import httpx
 import urllib.parse
 import re
 import unicodedata
+import orjson
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +28,8 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict, deque
 import google.generativeai as genai
 from passlib.context import CryptContext
-from rapidfuzz import fuzz
+from rapidfuzz import process, fuzz
+
 
 load_dotenv()
 
@@ -67,6 +69,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "").strip()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+genai.configure(api_key=GENAI_KEY) # 🔥 FIX AAA: Se configura solo una vez globalmente
 
 async def async_db_execute(query_builder):
     """Wrapper Asíncrono para Supabase (Evita congelar Godot/FastAPI)"""
@@ -76,13 +79,16 @@ registro_actividad_b2b = {}
 procesados_recientemente = deque(maxlen=1000)
 cache_respuestas_ia = {}
 
-# MICRO-LOCKS
+# MICRO-LOCKS Y TRACKING
 locks_por_conversacion = defaultdict(asyncio.Lock)
+tracking_locks_uso = defaultdict(float) # 🔥 FIX AAA: Para limpiar memoria
 gemini_bloqueado_hasta = 0.0 
 rate_limit_tenant = defaultdict(list)
 rate_limit_phone = defaultdict(list)
 rate_limit_global = []
 http_client: Optional[httpx.AsyncClient] = None
+mensajes_procesados_meta = set() # 🔥 FIX AAA: Idempotencia para Webhooks
+background_tasks_activas = set() # 🔥 FIX AAA: Tracking de Tareas
 
 # ==========================================================
 # 🛡️ 2. ESCUDO IA Y ARRANQUE DE APLICACIÓN
@@ -96,6 +102,12 @@ def detectar_prompt_injection(texto: str) -> bool:
 def generar_hash_cache(*args) -> str:
     return hashlib.sha256("|".join([str(a) for a in args]).encode()).hexdigest()
 
+def lanzar_tarea_segura(coro):
+    """Lanza tareas en background sin generar Zombies en la RAM"""
+    task = asyncio.create_task(coro)
+    background_tasks_activas.add(task)
+    task.add_done_callback(background_tasks_activas.discard)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
@@ -103,18 +115,19 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(connect=10.0, read=35.0, write=20.0, pool=10.0)
     http_client = httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True, http2=True)
     print("\n" + "="*50)
-    print("🚀 [SISTEMA] Motor Central Veltrix V20.1 Iniciado")
+    print("🚀 [SISTEMA] Motor Central Veltrix V20.2 Iniciado (AAA Enterprise)")
     print("🤖 [MÓDULO IA] Listo y cargado (Con Auditor Activo)")
     print("="*50 + "\n")
     
-    seguimiento_task = asyncio.create_task(bucle_seguimiento_24h())
+    lanzar_tarea_segura(bucle_seguimiento_24h())
+    lanzar_tarea_segura(limpiador_background_rutinario()) # 🔥 FIX AAA: Garbage Collector
+    
     try: yield
     finally:
-        seguimiento_task.cancel()
         if http_client: await http_client.aclose()
         print("🛑 [SISTEMA] Apagado Seguro Completado")
 
-app = FastAPI(title="Veltrix Cognitive OS", version="20.1", lifespan=lifespan)
+app = FastAPI(title="Veltrix Cognitive OS", version="20.2", lifespan=lifespan)
 router = APIRouter()
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -159,6 +172,23 @@ class RenombrarColumnaAction(BaseModel): viejo_nombre: str; nuevo_nombre: str; v
 class NotasUpdate(BaseModel): nombre: str = ""; telefono: str = ""; notas: str = ""; etiquetas: str = ""; vendedor_id: str = ""
 class EstadoUpdate(BaseModel): nombre: str; telefono: str = ""; nueva_columna: str
 class NuevoArticulo(BaseModel): nombre: str; categoria: str = "General"; precio_compra: float = 0.0; precio: float = 0.0; stock: int = 1; vendedor_id: str = ""
+class PreciosDetalle(BaseModel):
+    loose: float
+    cib: float
+    new: float
+
+class PrecioResponse(BaseModel):
+    status: str
+    api_version: str = "v3"  # Control de versión sugerido en auditoría
+    nombre_corregido: str
+    mxn: PreciosDetalle      # Retrocompatibilidad asegurada para la interfaz clásica
+    mxn_mercado: PreciosDetalle
+    mxn_venta: PreciosDetalle
+    usd: PreciosDetalle
+    tipo_cambio: float
+    rareza: str
+    url_pc: str
+    confidence_score: float
 
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
@@ -200,9 +230,11 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
     if now_ts() < gemini_bloqueado_hasta:
         return {"respuesta": "En este momento estoy atendiendo a varios clientes, denme un momento. 🎮", "intencion": "HUMANO", "confidence": 1.0}
 
-    genai.configure(api_key=GENAI_KEY)
     modelos = ['gemini-2.5-flash', 'gemini-1.5-flash'] 
     tokens_estimados = len(str(prompt)) // 4
+    
+    # 🔥 FIX AAA: Sumador Seguro
+    tokens_consumidos_tenant.setdefault(vendedor_id, 0)
     tokens_consumidos_tenant[vendedor_id] += tokens_estimados
 
     for nombre_modelo in modelos:
@@ -213,16 +245,27 @@ async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperatur
                 if media_dict and "data" in media_dict: 
                     contenido.append({"mime_type": media_dict.get("mime_type", "image/jpeg"), "data": media_dict["data"]})
                 
-                response = await asyncio.to_thread(model.generate_content, contenido, generation_config=genai.types.GenerationConfig(temperature=temperature))
-                texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
-                inicio, fin = texto_limpio.find('{'), texto_limpio.rfind('}')
-                if inicio != -1 and fin != -1: return json.loads(texto_limpio[inicio:fin+1])
+                # 🔥 FIX AAA: Timeout seguro para evitar congelar servidor
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(model.generate_content, contenido, generation_config=genai.types.GenerationConfig(temperature=temperature)),
+                    timeout=20.0
+                )
                 
+                texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
+                
+                # 🔥 FIX AAA: Parser JSON Ultra-Robusto con Regex y orjson
+                match = re.search(r'\{.*\}', texto_limpio, re.DOTALL)
+                if match: 
+                    return orjson.loads(match.group())
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ [GEMINI] Timeout en intento {intento+1}")
             except Exception as e:
                 if "429" in str(e) or "Quota" in str(e):
                     gemini_bloqueado_hasta = now_ts() + 60.0
                     break
                 await asyncio.sleep(2)
+                
     return {"respuesta": "Tuve un micro-corte. ¿Me repites tu mensaje por favor?", "intencion": "HUMANO", "confidence": 0.1}
 
 def validar_respuesta_ia(data: dict) -> dict:
@@ -245,20 +288,15 @@ def validar_respuesta_ia(data: dict) -> dict:
     }
 
 async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict, perfil_cliente_previo: dict = None, media_dict: dict = None):
-    """
-    Cerebro Central IA Veltrix: Evalúa intenciones, gestiona la memoria de consola preferida,
-    procesa audios entrantes y activa el Tool Calling para aplicar descuentos de forma autónoma.
-    """
     try:
         vendedor_id = config.get("vendedor_id", "V-001")
         giro_comercial = config.get("giro_comercial", "Videojuegos y Consolas")
         tono_ia = config.get("tono_ia", "Persuasivo y experto")
         
-        # Micro-locking para evitar colisiones de peticiones paralelas del mismo cliente
         lock_id = hashlib.sha256(f"{vendedor_id}:{texto_cliente[:50]}".encode()).hexdigest()
-        if lock_id not in locks_por_conversacion: 
-            locks_por_conversacion[lock_id] = asyncio.Lock()
-
+        
+        # 🔥 FIX AAA: Tracking de locks para garbage collection
+        tracking_locks_uso[lock_id] = now_ts()
         async with locks_por_conversacion[lock_id]:
             print(f"🔮 [CEREBRO IA] Iniciando análisis cognitivo para Vendedor: {vendedor_id}")
             perfil_str = json.dumps(perfil_cliente_previo) if perfil_cliente_previo else "Cliente nuevo sin historial de consolas."
@@ -305,7 +343,6 @@ Responde estrictamente en un formato JSON plano, válido y limpio:
 """]}
             ]
             
-            # Si el webhook detectó una nota de voz, media_dict traerá los bytes binarios del audio nativo
             if media_dict and "data" in media_dict:
                 print(f"🎙️ [CEREBRO IA] Inyectando Audio Nativo Base64 al modelo generativo.")
                 prompt_estructurado.append({
@@ -313,8 +350,12 @@ Responde estrictamente en un formato JSON plano, válido y limpio:
                     "data": media_dict["data"]
                 })
 
-            # Llamada al distribuidor de Gemini
             data = await consultar_gemini_json(prompt_estructurado, vendedor_id=vendedor_id)
+            
+            # 🔥 FIX AAA: Validador Estricto de Tools
+            TOOLS_VALIDAS = ["ninguna", "aplicar_descuento"]
+            if data.get("accion_tool") not in TOOLS_VALIDAS: data["accion_tool"] = "ninguna"
+            
             print(f"🎯 [CEREBRO IA] Análisis finalizado con éxito. Intención inferida: {data.get('intencion')}")
             return data
 
@@ -330,15 +371,9 @@ Responde estrictamente en un formato JSON plano, válido y limpio:
         }
 
 async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str = "") -> str:
-    """
-    RAG de Inventario con Algoritmo Fuzzy Matching (Similitud Difusa): 
-    Evita que errores de dedo o mala ortografía (ej: 'Blodborn', 'Kal of duti') dejen en blanco la consulta,
-    calculando distancias de texto y arrojando los 8 resultados más viables.
-    """
     print(f"🔍 [RAG INVENTARIO] Buscando coincidencias para: '{texto_cliente}' (Tenant: {vendedor_id})")
     try:
-        # Traemos todo el inventario activo del vendedor para procesarlo en la RAM del backend
-        query = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0)
+        query = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0).limit(300)
         res_inv = await async_db_execute(query)
         
         if not res_inv.data:
@@ -348,39 +383,28 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str =
         inventario = res_inv.data
         palabras_clave = limpiar_texto(texto_cliente).lower()
 
-        # Si el mensaje es vacío o un simple saludo, mandamos los primeros 10 artículos por defecto
         if not palabras_clave or len(palabras_clave.strip()) < 3:
             print("📋 [RAG INVENTARIO] Mensaje corto detectado. Retornando top 10 general.")
             return "\n".join([f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in inventario[:10]])
 
-        resultados_fuzzy = []
+        # 🔥 FIX AAA: Sustitución del bucle O(N) por Búsqueda Vectorial Simulada con RapidFuzz
+        diccionario_opciones = {f"{i['nombre']} {i.get('consola','')}".strip().lower(): i for i in inventario}
+        matches = process.extract(
+            palabras_clave, 
+            diccionario_opciones.keys(), 
+            scorer=fuzz.token_sort_ratio, 
+            limit=8
+        )
         
-        # Algoritmo de comparación difusa secuencial
-        for item in inventario:
-            string_inventario = f"{item['nombre'].lower()} {item.get('consola', '').lower()}"
-            
-            # Calculamos el ratio matemático de similitud de caracteres (0.0 a 1.0)
-            ratio_similitud = difflib.SequenceMatcher(None, palabras_clave, string_inventario).ratio()
-            
-            # Bonus de peso si hay coincidencia de sub-palabras clave completas (Mejora la precisión)
-            for palabra in palabras_clave.split():
-                if len(palabra) > 3 and palabra in string_inventario: 
-                    ratio_similitud += 0.35
-            
-            # Si pasa el umbral mínimo de coincidencia, entra a la lista de candidatos
-            if ratio_similitud > 0.15:
-                resultados_fuzzy.append((ratio_similitud, item))
+        items_filtrados = []
+        for match_str, score, _ in matches:
+            if score > 20.0: # Umbral tolerante
+                items_filtrados.append(diccionario_opciones[match_str])
 
-        # Ordenamos los candidatos de mayor a menor similitud
-        resultados_fuzzy.sort(key=lambda x: x[0], reverse=True)
-        items_filtrados = [r[1] for r in resultados_fuzzy[:8]]
-
-        # Fallback de seguridad: Si el algoritmo difuso no encontró nada por mala ortografía extrema, mandamos 5 del stock general
         if not items_filtrados:
             print("⚠️ [RAG INVENTARIO] Ningún juego superó el filtro difuso. Activando Fallback de rescate.")
             items_filtrados = inventario[:5]
 
-        # Formateamos el bloque de contexto que leerá la IA
         lineas = [f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in items_filtrados]
         print(f"✅ [RAG INVENTARIO] Bloque RAG construido con {len(lineas)} opciones relevantes.")
         return "\n".join(lineas)
@@ -389,15 +413,9 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str =
         print(f"❌ [RAG ERROR] Falló la construcción del contexto de inventario: {str(e)}")
         return "Error técnico al recuperar el catálogo."
 
-
 async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
-    """
-    Manejador Asíncrono del Historial: Extrae los últimos 10 mensajes del cliente de forma ordenada
-    para mantener el hilo y contexto conversacional de Gemini.
-    """
     print(f"📖 [HISTORIAL CHAT] Solicitando últimas interacciones del Tel: {telefono}")
     try:
-        # Query optimizada con ordenamiento descendente por fecha de creación
         query = supabase.table('mensajes_chat').select('autor, mensaje').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)).order('created_at', desc=True).limit(10)
         res_hist = await async_db_execute(query)
         
@@ -405,10 +423,14 @@ async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
             print("🆕 [HISTORIAL CHAT] No hay registros previos. Es el primer mensaje del cliente.")
             return "Primer mensaje del cliente en el sistema."
 
-        # Invertimos la lista para enviársela a la IA en orden cronológico correcto (Pasado -> Presente)
         mensajes_ordenados = list(reversed(res_hist.data))
-        historial_texto = "\n".join([f"{m.get('autor')}: {m.get('mensaje')}" for m in mensajes_ordenados])
         
+        # 🔥 FIX AAA: Truncado inteligente para no romper tokens con historiales largos
+        historial_texto = "\n".join([f"{m.get('autor')}: {m.get('mensaje')}" for m in mensajes_ordenados])
+        MAX_CHARS = 3500
+        if len(historial_texto) > MAX_CHARS:
+            historial_texto = "... [Trunk] ...\n" + historial_texto[-MAX_CHARS:]
+            
         print("✅ [HISTORIAL CHAT] Conversación recuperada e indexada correctamente.")
         return historial_texto
 
@@ -428,12 +450,37 @@ async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mens
     await async_db_execute(supabase.table('mensajes_chat').insert({'telefono': telefono, 'vendedor_id': str(vendedor_id), 'autor': autor, 'mensaje': mensaje}))
 
 async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
-    try: await http_client.post(f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json={"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}})
-    except: pass
+    if not http_client: return False
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
+    
+    # 🔥 FIX AAA: Retries con status check
+    for intento in range(2):
+        try: 
+            res = await http_client.post(url, headers=headers, json=payload, timeout=10.0)
+            if res.status_code in [200, 201]: return True
+            if res.status_code == 429: await asyncio.sleep(2); continue
+            logger.error(f"❌ [META ERROR] Status {res.status_code}: {res.text}")
+            return False
+        except asyncio.TimeoutError: pass
+        except Exception as e: 
+            logger.exception(f"🚨 [WHATSAPP CRÍTICO] {e}")
+            break
+    return False
 
 async def disparar_whatsapp_imagen_async(telefono_destino: str, url_imagen: str, texto_mensaje: str, token: str, phone_id: str):
-    try: await http_client.post(f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json={"messaging_product": "whatsapp", "to": telefono_destino, "type": "image", "image": {"link": url_imagen, "caption": texto_mensaje}})
-    except Exception: pass
+    if not http_client: return False
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "image", "image": {"link": url_imagen, "caption": texto_mensaje}}
+    
+    for intento in range(2):
+        try: 
+            res = await http_client.post(url, headers=headers, json=payload, timeout=12.0)
+            if res.status_code in [200, 201]: return True
+        except: pass
+    return False
 
 async def generar_resumen_handoff_ia(cliente: str, intencion: str, historial_str: str):
     try:
@@ -478,7 +525,14 @@ async def descargar_media_whatsapp_async(media_id: str, token: str) -> Optional[
         if not media_url: return None
         res_media = await http_client.get(media_url, headers=headers)
         if res_media.status_code != 200: return None
-        return {"mime_type": data_info.get("mime_type"), "data": res_media.content}
+        
+        # 🔥 FIX AAA: Validar MIME types permitidos
+        mime_type = data_info.get("mime_type", "")
+        if mime_type not in ["image/jpeg", "image/png", "audio/ogg", "audio/mp4", "audio/mpeg"]:
+            logger.warning(f"⚠️ [MEDIA] Tipo MIME no soportado: {mime_type}")
+            return None
+            
+        return {"mime_type": mime_type, "data": res_media.content}
     except Exception: return None
 
 # 🚀 RESTAURACIÓN: El "Dóberman" (Auditor IA de Comprobantes)
@@ -505,7 +559,7 @@ Responde en JSON: {{"es_pago": true/false, "monto_detectado": 0.0, "analisis": "
     except Exception as e: return {"es_pago": False, "monto_detectado": 0.0, "analisis": "Error interno del auditor."}
 
 # 🚀 RESTAURACIÓN: Scraper Automático de Portadas al Storage
-async def obtener_html_escalonado_async(url_objetivo: str) -> str:
+async def obtener_html_escalonado_async_portadas(url_objetivo: str) -> str:
     if not http_client: return ""
     estrategias = [
         ("Ligera", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={urllib.parse.quote(url_objetivo)}"),
@@ -513,11 +567,11 @@ async def obtener_html_escalonado_async(url_objetivo: str) -> str:
     ]
     for _, url_scraper in estrategias:
         try:
-            res = await http_client.get(url_scraper)
+            res = await http_client.get(url_scraper, timeout=20.0)
             if res.status_code == 200 and "price" in res.text.lower(): return res.text
         except: pass
     try:
-        res = await http_client.get(url_objetivo, headers={"User-Agent": "Mozilla/5.0"})
+        res = await http_client.get(url_objetivo, headers={"User-Agent": "Mozilla/5.0"}, timeout=15.0)
         if res.status_code == 200: return res.text
     except: pass
     return ""
@@ -529,7 +583,7 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
         query = f"{nombre_juego} {consola_web}".replace(" ", "+")
         url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
         
-        html_search = await obtener_html_escalonado_async(url_search)
+        html_search = await obtener_html_escalonado_async_portadas(url_search)
         if not html_search: return
         
         soup = BeautifulSoup(html_search, 'html.parser')
@@ -540,10 +594,13 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
         if not imagen_url.startswith("http"):
             imagen_url = "https:" + imagen_url if imagen_url.startswith("//") else "https://www.pricecharting.com" + imagen_url
             
-        res_img = await http_client.get(imagen_url)
+        res_img = await http_client.get(imagen_url, timeout=15.0)
         if res_img.status_code != 200: return
         
-        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{int(now_ts())}.jpg"
+        # 🔥 FIX AAA: Hashing SHA256 para evitar duplicados en el Storage
+        hash_img = hashlib.sha256(res_img.content).hexdigest()[:10]
+        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{hash_img}.jpg"
+        
         await async_db_execute(supabase.storage.from_("portadas").upload(nombre_archivo, res_img.content, {"content-type": "image/jpeg"}))
         url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
         await async_db_execute(supabase.table('inventario').update({"url_portada": url_publica}).eq('id', juego_id_supabase))
@@ -553,6 +610,22 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
 # ==========================================================
 # ⏰ 7. WATCHDOG B2B Y FLUJO PRINCIPAL IA
 # ==========================================================
+async def limpiador_background_rutinario():
+    """🔥 FIX AAA: Garbage Collector Inmortal para limpiar fugas de memoria RAM"""
+    print("🧹 [GC] Iniciando Recolector de Basura de Memoria RAM...")
+    while True:
+        try:
+            ahora = now_ts()
+            locks_a_borrar = [k for k, v in tracking_locks_uso.items() if ahora - v > 900] # Limpia despues de 15 min inactivos
+            for k in locks_a_borrar:
+                if k in locks_por_conversacion: del locks_por_conversacion[k]
+                del tracking_locks_uso[k]
+            if locks_a_borrar:
+                logger.info(f"🧹 [GC] Liberados {len(locks_a_borrar)} micro-locks inactivos.")
+        except Exception as e:
+            logger.exception(f"🚨 [GC ERROR] {e}")
+        await asyncio.sleep(600) # Revisa cada 10 minutos
+
 async def bucle_seguimiento_24h():
     print("⏰ [WATCHDOG] Iniciando bucle de Remarketing 24H...")
     while True:
@@ -579,15 +652,22 @@ async def bucle_seguimiento_24h():
                         await asyncio.sleep(5) 
                 except Exception as e:
                     if "429" in str(e): await asyncio.sleep(60)
-        except Exception as e: pass
+        except Exception as e: 
+            logger.error(f"⚠️ [WATCHDOG] Error no fatal: {e}")
+            pass
         await asyncio.sleep(600)
 
-async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None):
-    """
-    Ruteador Maestro del Flujo de Trabajo IA: Sincroniza RAG Difuso, Historial de Mensajes,
-    Audición de Notas de Voz, Ejecución de Tools de Descuento y Sincronización del Embudo CRM.
-    """
+async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None, id_mensaje_meta: str = None):
+    """Ruteador Maestro del Flujo de Trabajo IA"""
     try:
+        # 🔥 FIX AAA: Bloqueo Anti-Duplicación de Webhooks (Idempotencia)
+        if id_mensaje_meta:
+            if id_mensaje_meta in mensajes_procesados_meta:
+                logger.info(f"♻️ [WEBHOOK IGNORED] Mensaje duplicado de Meta ignorado en capa IA.")
+                return
+            mensajes_procesados_meta.add(id_mensaje_meta)
+            if len(mensajes_procesados_meta) > 1000: mensajes_procesados_meta.clear()
+
         print(f"\n🧠 [IA WORKFLOW] ==========================================")
         print(f"🧠 [IA WORKFLOW] PROCESANDO RESPUESTA AUTÓNOMA DEL BOT")
         print(f"🧠 [IA WORKFLOW] Cliente: {cliente} | Tel: {telefono} | Columna: {columna_actual}")
@@ -595,34 +675,27 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         
         vendedor_id = config.get("vendedor_id", "")
         
-        # 1. Escudo de control contra spam/abusos de peticiones por teléfono
         if not verificar_rate_limit(vendedor_id, telefono):
-            print("⚠️ [IA WORKFLOW] Denegado: Se ha excedido el límite de peticiones permitidas para este canal.")
+            print("⚠️ [IA WORKFLOW] Denegado: Se ha excedido el límite de peticiones.")
             return
             
-        # 2. Cortafuegos de inyección de Prompt en capa intermedia
         if detectar_prompt_injection(texto_entrante):
             print("🛡️ [IA WORKFLOW] Alerta de seguridad: Intento de Prompt Injection neutralizado.")
             return await disparar_whatsapp_dinamico_async(telefono, "Lo siento, no puedo procesar esa solicitud.", config.get("meta_token", ""), config.get("meta_phone_id", ""))
 
-        # 3. Recuperación de la Memoria Psicológica del Lead
         print("📖 [IA WORKFLOW] Descargando perfil y memoria persistente desde Supabase...")
         res_perfil = await async_db_execute(supabase.table('prospectos').select('perfil_psicologico').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)))
         perfil_cliente_previo = res_perfil.data[0].get('perfil_psicologico', {}) if res_perfil.data else {}
         
-        # 4. Inyección del nuevo RAG con Similitud Difusa (Fuzzy Matching tolerante a errores)
-        print("🔍 [IA WORKFLOW] Extrayendo contexto de inventario con algoritmo de coincidencia difusa...")
+        print("🔍 [IA WORKFLOW] Extrayendo contexto de inventario con algoritmo RAG...")
         contexto = await obtener_contexto_inventario_rag(vendedor_id, texto_entrante)
         
-        # 5. Indexación cronológica del historial conversacional
         print("📜 [IA WORKFLOW] Compilando logs de las últimas interacciones de chat...")
         historial = await obtener_historial_chat(telefono, vendedor_id)
         
-        # 6. Ejecución del Modelo de Lenguaje Central (Envío opcional de binario de Audio Nativo)
         print("🧠 [IA WORKFLOW] Transmitiendo parámetros a Gemini para inferencia lógica...")
         decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict)
         
-        # Desempaquetado de variables cognitivas AAA del JSON estructurado
         intencion_ia = str(decision.get("intencion", "CONSULTA")).upper()
         respuesta_final = decision.get("respuesta", "En un momento te atiendo.")
         juego_detectado = decision.get("juego_detectado", "")
@@ -632,7 +705,6 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
         
         print(f"📊 [IA WORKFLOW] Diagnóstico - Intención: {intencion_ia} | Juego: {juego_detectado} | Plataforma: {consola_detectada}")
 
-        # 💾 INTEGRACIÓN MEJORA: Actualización de Memoria a Largo Plazo (Consola Preferida)
         perfil_cliente_actualizado = {
             **perfil_cliente_previo, 
             "emocion_actual": decision.get("emocion_cliente", "neutral"),
@@ -642,14 +714,11 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             "ultima_intencion": intencion_ia
         }
 
-        # 🛠️ INTEGRACIÓN MEJORA: Tool Calling Autónomo (Descuentos controlados por margen de RAM)
         if accion_tool == "aplicar_descuento" or intencion_ia == "REGATEO":
             print(f"💰 [TOOL CALLING] Herramienta comercial activada de forma autónoma. Oferta calculada: ${precio_oferta} MXN.")
-            # La IA ajusta dinámicamente la propuesta en 'respuesta_final' basándose en el prompt inyectado.
 
         nueva_columna, iluminacion = columna_actual, "blanco"
 
-        # 🚀 Enrutador de estados físicos del embudo Kanban del CRM Gold Veltrix
         if intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO"]:
             nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
             print("🚨 [IA WORKFLOW] Tráfico crítico o disconformidad detectada. Disparando handoff ejecutivo a Admin...")
@@ -671,12 +740,10 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             print("📦 [IA WORKFLOW] Título no localizado físicamente. Registrando alerta de pedido especial...")
             await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", f"Busca: {juego_detectado}", config)
 
-        # 7. Persistencia final del estado y logging histórico en Supabase
         print("💾 [IA WORKFLOW] Sincronizando metadatos de tarjeta y chat log en la nube...")
         await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, juego_detectado, perfil_ia=perfil_cliente_actualizado)
         await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
-        # 8. Renderización y despacho de mensajería enriquecida (Media Linker)
         url_imagen = None
         if juego_detectado:
             print(f"🖼️ [IA WORKFLOW] Rastreando enlace URL de portada para: '{juego_detectado}'")
@@ -685,7 +752,6 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 url_imagen = res_img.data[0].get('url_portada')
                 print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
 
-        # Ejecución final de despacho mediante la pasarela HTTP de la API de Meta
         if url_imagen: 
             print("📡 [IA WORKFLOW] Despachando paquete de mensajería enriquecida (IMAGEN + TEXTO)...")
             await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
@@ -753,6 +819,11 @@ async def obtener_precio_cache(llave: str) -> dict | None:
     datos = cache_precios_ram.get(llave)
     if datos and datetime.now() < datos["expira"]:
         print(f"⚡ [CACHE HIT] Precio recuperado en O(1).")
+        
+        # Redundancia estructural defensiva para asegurar compatibilidad si el formato en RAM es antiguo
+        if "mxn" not in datos["valores"] and "mxn_mercado" in datos["valores"]:
+            datos["valores"]["mxn"] = datos["valores"]["mxn_mercado"]
+        
         return datos["valores"]
     return None
 
@@ -787,8 +858,7 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
     if not http_client: return ""
     
     ahora = time.time()
-    # Usamos .get() por si el diccionario no está inicializado
-    if ahora < CB_PRICECHARTING.get("bloqueado_hasta", 0):
+    if ahora < CB_PRICECHARTING.get("bloqueado_hasta", 0.0):
         print("🛑 [CIRCUIT BREAKER] Dominio PriceCharting en enfriamiento.")
         return ""
     
@@ -797,15 +867,15 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
         if any(b in texto for b in ["cloudflare", "just a moment", "security check", "verify you are human"]): return False
         if len(html_text) < 2000: return False
         
-        # 🔥 Validación Estructural Fuerte: Si no tiene tabla de precios, lo rechaza y reintenta
         if es_busqueda and "games_table" not in texto and "search-results" not in texto: 
             return False
         if not es_busqueda and "product_name" not in texto and "price" not in texto: 
             return False
         return True
 
-    # Usamos quote_plus para que los espacios sean "+" en vez de "%20" (Como lo pide PriceCharting)
-    url_codificada = urllib.parse.quote_plus(url_objetivo)
+    # 🔥 CORRECCIÓN CRÍTICA: Usamos quote estándar conservando caracteres limpios,
+    # evitando la doble codificación del símbolo '%' que rompe el bypass de ScraperAPI.
+    url_codificada = urllib.parse.quote(url_objetivo, safe='')
     estrategias = [
         ("Directo", url_objetivo),
         ("Proxy Desktop", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&device_type=desktop"),
@@ -817,7 +887,9 @@ async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = T
         try:
             if intento > 0: await asyncio.sleep(1.5 ** intento) 
             timeout_seguro = httpx.Timeout(connect=10.0, read=35.0, write=15.0, pool=10.0)
-            res = await http_client.get(url_scraper, timeout=timeout_seguro)
+            
+            target_url = url_objetivo if nombre_fase == "Directo" else url_scraper
+            res = await http_client.get(target_url, timeout=timeout_seguro)
             
             if res.status_code == 200 and es_html_valido(res.text): 
                 CB_PRICECHARTING["fallas"] = 0
@@ -866,8 +938,21 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     
     html_search = await obtener_html_escalonado_async(url_search, es_busqueda=True)
     if not html_search: 
-        print(f"⚠️ [RADAR PRECIOS] Falló la búsqueda HTML. Devolviendo URL base.")
-        return {"status": "error", "mxn": {"loose": 0, "cib": 0, "new": 0}, "url_pc": url_search}
+        print(f"⚠️ [RADAR PRECIOS] Falló la búsqueda HTML. Devolviendo contrato de error estruturado.")
+        # 🔥 FIX AUDITORÍA: Respuesta de error con compatibilidad contractual íntegra
+        return {
+            "status": "error",
+            "api_version": "v3",
+            "nombre_corregido": nombre,
+            "mxn": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_mercado": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_venta": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "usd": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "tipo_cambio": tipo_cambio,
+            "rareza": rareza,
+            "url_pc": url_search,
+            "confidence_score": 0.0
+        }
         
     soup = BeautifulSoup(html_search, 'html.parser')
     nodos_a_buscar = soup.find(id="games_table").find_all('a', href=True) if soup.find(id="games_table") else soup.find_all('a', href=True)
@@ -906,17 +991,13 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             # 🔥 EXTRACTOR MATEMÁTICO BLINDADO MULTI-CAPA
             def extraer_numero(id_css, clase_css=None):
                 try:
-                    # Intenta buscar por ID o por Clase
                     nodo = soup_juego.find(id=id_css)
                     if not nodo and clase_css:
                         nodo = soup_juego.find(class_=clase_css)
                         
                     if not nodo: return 0.0
                     
-                    # Limpieza agresiva de HTML interno antes de extraer el texto
                     texto_crudo = nodo.get_text(separator=' ', strip=True).replace(',', '')
-                    
-                    # Regex para atrapar cualquier número con o sin decimales (ej: "$12.50" -> "12.50")
                     coincidencias = re.findall(r'\d+\.\d+|\d+', texto_crudo)
                     if coincidencias:
                         return float(coincidencias[0])
@@ -929,28 +1010,30 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             p_new = extraer_numero("new_price", "price_new")
 
             # 🧠 PRICING DE RESPALDO (Fallback Pricing)
-            # Si el juego no tiene precio CIB registrado en PriceCharting, deducimos uno lógico.
             if p_cib == 0.0:
                 if p_loose > 0:
-                    p_cib = round(p_loose * 1.30, 2) # CIB suele ser 30% más caro que Loose
+                    p_cib = round(p_loose * 1.30, 2)
                     print(f"🧠 [FALLBACK PRICING] Precio CIB deducido desde Loose: ${p_cib} USD")
                 elif p_new > 0:
-                    p_cib = round(p_new * 0.70, 2) # CIB suele ser 30% más barato que Nuevo
+                    p_cib = round(p_new * 0.70, 2)
                     print(f"🧠 [FALLBACK PRICING] Precio CIB deducido desde New: ${p_cib} USD")
 
     url_final_godot = link_juego if link_juego else url_search
 
+    # 🔥 FIX AUDITORÍA: Inyección de contratos de equivalencia total en contingencias de cero dólares
     if p_loose == 0 and p_cib == 0:
         print(f"⚠️ [RADAR PRECIOS] Contingencia 0$ Absoluta para: '{nombre_oficial_pc}'.")
-        # 🔥 IMPORTANTE: Forzamos el guardado en caché de esta contingencia por 2 horas
-        # para no seguir gastando llamadas de ScraperAPI en un juego que realmente no tiene precio.
         respuesta_fallida = {
             "status": "warning_cero", 
+            "api_version": "v3",
             "nombre_corregido": nombre_oficial_pc, 
-            "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, 
-            "usd": {"loose": 0, "cib": 0, "new": 0},
+            "mxn": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_mercado": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_venta": {"loose": 0.0, "cib": 0.0, "new": 0.0}, 
+            "usd": {"loose": 0.0, "cib": 0.0, "new": 0.0},
             "rareza": "Manual",
-            "url_pc": url_final_godot
+            "url_pc": url_final_godot,
+            "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0
         }
         await guardar_precio_cache(llave_cache, respuesta_fallida)
         return respuesta_fallida
@@ -959,10 +1042,25 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     mxn_cib_real = round(p_cib * tipo_cambio, 2)
     mxn_new_real = round(p_new * tipo_cambio, 2)
     
+    # 🔥 FIX AUDITORÍA: Duplicación paralela de la estructura clásica 'mxn' + versión de API
     respuesta_final = {
         "status": "ok",
+        "api_version": "v3",
         "nombre_corregido": nombre_oficial_pc,
-        "mxn_mercado": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": mxn_new_real},
+        
+        # Estructura Legacy nativa para Godot
+        "mxn": {
+            "loose": mxn_loose_real,
+            "cib": mxn_cib_real,
+            "new": mxn_new_real
+        },
+        
+        # Nuevas capas funcionales analíticas AAA
+        "mxn_mercado": {
+            "loose": mxn_loose_real,
+            "cib": mxn_cib_real,
+            "new": mxn_new_real
+        },
         "mxn_venta": {
             "loose": calcular_precio_venta_inteligente_aaa(mxn_loose_real, 0, dias_inventario, rareza), 
             "cib": calcular_precio_venta_inteligente_aaa(mxn_cib_real, 0, dias_inventario, rareza), 
