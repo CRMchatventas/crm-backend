@@ -8,6 +8,6 @@ beautifulsoup4
 python-dotenv
 bcrypt==3.2.2
 python-jose[cryptography]
-google-generativeai
+google-genai
 passlib[bcrypt]
 rapidfuzz==3.10.1
