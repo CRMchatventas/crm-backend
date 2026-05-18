@@ -162,7 +162,15 @@ class InventarioItem(BaseModel):
     @classmethod
     def validar_texto(cls, value: str): return limpiar_texto(value)
 
-class VentaItem(BaseModel): id: Optional[int] = None; nombre: str; consola: str; estado_general: str = ""; nuevo_stock: int; vendedor_id: str = ""
+class VentaItem(BaseModel): 
+    id: Optional[int] = None
+    nombre: str
+    consola: str
+    estado_general: str = ""
+    nuevo_stock: Optional[int] = None      # Mantenido para Godot Legacy
+    cantidad_vendida: Optional[int] = None # Nuevo estándar AAA Backend
+    vendedor_id: str = ""
+    
 class LoginUpdate(BaseModel): email: str; password: str
 class MobileMessageRequest(BaseModel): to: str; msg: str
 class ClienteIdentificador(BaseModel): nombre: str = ""; telefono: str = ""
@@ -1262,16 +1270,20 @@ async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_
     except Exception as e: raise HTTPException(status_code=500, detail="Error interno")
 
 # ==========================================================
-# 📦 11. INVENTARIO Y GESTIÓN DE COLUMNAS
+# 📦 11. INVENTARIO Y GESTIÓN DE COLUMNAS (AAA ENTERPRISE)
 # ==========================================================
 @app.post("/api/crear_inventario")
 async def crear_inventario(datos: NuevoArticulo, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 1. Insertamos el juego en la base de datos
+        if datos.precio < 0 or datos.stock < 0:
+            raise HTTPException(400, "Valores de precio o stock inválidos.")
+
+        # 1. Insertamos el juego en la base de datos (🔥 FIX: Se guarda 'consola')
         res = await async_db_execute(supabase.table('inventario').insert({
             'vendedor_id': str(_sesion), 
             'nombre': datos.nombre, 
             'categoria': datos.categoria, 
+            'consola': datos.categoria, # <- CRÍTICO PARA EL SCRAPER Y RADAR
             'precio_compra': datos.precio_compra, 
             'precio': datos.precio, 
             'stock': datos.stock
@@ -1284,13 +1296,20 @@ async def crear_inventario(datos: NuevoArticulo, background_tasks: BackgroundTas
             background_tasks.add_task(cazar_portada_y_guardar_background, juego_id_creado, datos.nombre, datos.categoria)
             
         return {"status": "ok"}
+    except HTTPException: raise
     except Exception as e: 
-        raise HTTPException(status_code=500, detail="Error en DB")
+        raise HTTPException(status_code=500, detail="Error en DB al crear inventario")
 
 @app.get("/api/cargar_inventario")
 async def cargar_inventario(offset: int = 0, limit: int = 500, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res = await async_db_execute(supabase.table('inventario').select("*").eq('vendedor_id', str(_sesion)).range(offset, offset + limit - 1))
+        limit_seguro = min(limit, 500) # 🔥 FIX: Límite duro para proteger la RAM
+        res = await async_db_execute(
+            supabase.table('inventario').select("*")
+            .eq('vendedor_id', str(_sesion))
+            .order('id', desc=True)
+            .range(offset, offset + limit_seguro - 1)
+        )
         return {"status": "ok", "inventario": res.data or []}
     except Exception as e: raise HTTPException(status_code=500, detail="Error carga de inventario")
 
@@ -1298,22 +1317,29 @@ async def cargar_inventario(offset: int = 0, limit: int = 500, _sesion: str = De
 async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
-        precio_final = item.nuevo_precio if item.nuevo_precio is not None else item.precio
-        stock_final = item.nuevo_stock if item.nuevo_stock is not None else item.stock
+        # 🔥 FIX: Validaciones para evitar precios o stocks negativos inyectados desde UI
+        precio_final = max(0.0, float(item.nuevo_precio if item.nuevo_precio is not None else item.precio))
+        stock_final = max(0, int(item.nuevo_stock if item.nuevo_stock is not None else item.stock))
 
-        if item.id: await async_db_execute(supabase.table("inventario").update({"nombre": item.nombre, "precio": precio_final, "stock": stock_final, "consola": item.consola}).eq("id", item.id).eq("vendedor_id", vid_str))
-        else: await async_db_execute(supabase.table("inventario").update({"precio": precio_final, "stock": stock_final}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+        if item.id: 
+            await async_db_execute(supabase.table("inventario").update({"nombre": item.nombre, "precio": precio_final, "stock": stock_final, "consola": item.consola}).eq("id", item.id).eq("vendedor_id", vid_str))
+        else: 
+            await async_db_execute(supabase.table("inventario").update({"precio": precio_final, "stock": stock_final}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail="Error editar item")
 
 @app.get("/api/buscar_maestro")
 async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
+        # 🔥 FIX: Normalización de búsqueda para evadir errores de ortografía en UI
+        q_limpio = normalizar_nombre_busqueda(q) if q else ""
+        if not q_limpio: return {"status": "ok", "resultados": []}
+
         res = await async_db_execute(
             supabase.table('inventario')
             .select('*')
             .eq('vendedor_id', str(_sesion))
-            .ilike('nombre', f'%{q}%')
+            .ilike('nombre', f'%{q_limpio}%')
             .limit(50)
         )
         return {"status": "ok", "resultados": res.data or []}
@@ -1323,52 +1349,79 @@ async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/borrar_item")
 async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        if item.id: await async_db_execute(supabase.table("inventario").delete().eq("id", item.id).eq("vendedor_id", str(_sesion)))
-        else: await async_db_execute(supabase.table("inventario").delete().eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", str(_sesion)))
+        if item.id: 
+            await async_db_execute(supabase.table("inventario").delete().eq("id", item.id).eq("vendedor_id", str(_sesion)))
+        else: 
+            # Fallback Legacy (Se recomienda fuertemente migrar a borrado solo por ID en Godot)
+            await async_db_execute(supabase.table("inventario").delete().eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", str(_sesion)))
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail="Error borrar item")
 
-# 🚀 RESTAURACIÓN: Endpoint para descontar stock en ventas
+# 🚀 RESTAURACIÓN AAA: Endpoint Atómico para descontar stock en ventas
 @app.post("/api/actualizar_stock")
 async def actualizar_stock(item: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
         
-        # 1. Consultar el precio actual del juego para saber de cuánto fue la venta
-        precio_venta = 0.0
-        if item.id:
-            res_inv = await async_db_execute(supabase.table("inventario").select("precio").eq("id", item.id).eq("vendedor_id", vid_str))
-        else:
-            res_inv = await async_db_execute(supabase.table("inventario").select("precio").eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+        # 1. 🛡️ LEER LA FUENTE DE VERDAD (Transaccionalidad simulada)
+        query = supabase.table("inventario").select("id, precio, stock")
+        if item.id: query = query.eq("id", item.id)
+        else: query = query.eq("nombre", item.nombre).eq("consola", item.consola)
+        
+        res_inv = await async_db_execute(query.eq("vendedor_id", vid_str).limit(1))
+        
+        if not res_inv.data:
+            raise HTTPException(status_code=404, detail="Juego no localizado en base de datos.")
             
-        if res_inv.data:
-            precio_venta = float(res_inv.data[0].get("precio", 0.0))
+        db_item = res_inv.data[0]
+        stock_actual = int(db_item.get("stock", 0))
+        precio_venta = float(db_item.get("precio", 0.0))
+        item_id_db = db_item.get("id")
 
-        # 2. Descontar el Stock del inventario
-        if item.id:
-            await async_db_execute(supabase.table("inventario").update({"stock": item.nuevo_stock}).eq("id", item.id).eq("vendedor_id", vid_str))
+        # 2. 🛡️ CÁLCULO DEL DELTA (No confía ciegamente en el stock que manda Godot)
+        if item.cantidad_vendida is not None:
+            cantidad_descontar = max(1, item.cantidad_vendida)
         else:
-            await async_db_execute(supabase.table("inventario").update({"stock": item.nuevo_stock}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+            nuevo_req = item.nuevo_stock if item.nuevo_stock is not None else stock_actual
+            cantidad_descontar = max(0, stock_actual - nuevo_req)
+
+        if cantidad_descontar <= 0:
+            return {"status": "ok", "msg": "Sin cambios reales en stock"}
+
+        nuevo_stock_seguro = max(0, stock_actual - cantidad_descontar)
+
+        # 3. 🛡️ ACTUALIZAR STOCK EN DB
+        await async_db_execute(supabase.table("inventario").update({"stock": nuevo_stock_seguro}).eq("id", item_id_db))
             
-        # 3. 🚀 Registrar el ingreso en la tabla 'ventas' para que el Dashboard Móvil lo sume
+        # 4. 🚀 REGISTRAR VENTA (Sumando el total correcto según cantidad vendida)
+        ingreso_total = precio_venta * cantidad_descontar
         await async_db_execute(supabase.table("ventas").insert({
             "vendedor_id": vid_str,
             "articulo": item.nombre,
             "consola": item.consola,
-            "monto": precio_venta,
+            "monto": ingreso_total,
             "created_at": datetime.now(timezone.utc).isoformat()
         }))
         
-        return {"status": "ok"}
+        return {"status": "ok", "nuevo_stock": nuevo_stock_seguro}
+    except HTTPException: raise
     except Exception as e:
         logger.error(f"❌ Error al vender/actualizar stock: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al actualizar stock")
+        raise HTTPException(status_code=500, detail="Error al actualizar stock de manera segura")
 
 @app.post("/api/crear_columna")
 async def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        await async_db_execute(supabase.table('configuracion').insert({'vendedor_id': str(_sesion), 'nombre_columna': datos.nombre}))
+        nombre_norm = limpiar_texto(datos.nombre).strip()
+        if not nombre_norm: raise HTTPException(400, "Nombre inválido.")
+        
+        # 🔥 FIX: Prevenir duplicados (rompe el Kanban visual en Godot)
+        res_check = await async_db_execute(supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', str(_sesion)).ilike('nombre_columna', nombre_norm))
+        if res_check.data: raise HTTPException(400, "La columna ya existe.")
+        
+        await async_db_execute(supabase.table('configuracion').insert({'vendedor_id': str(_sesion), 'nombre_columna': nombre_norm}))
         return {"status": "ok"}
+    except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail="Error crear columna")
 
 @app.post("/api/renombrar_columna")
@@ -1383,6 +1436,9 @@ async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depend
 @app.post("/api/borrar_columna")
 async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
+        # 🔥 FIX CRÍTICO: Mueve los leads a una bandeja segura para que no se vuelvan "invisibles" en el CRM
+        await async_db_execute(supabase.table('prospectos').update({"columna": "Bandeja Nueva"}).eq('columna', datos.nombre).eq('vendedor_id', str(_sesion)))
+        
         await async_db_execute(supabase.table('configuracion').delete().eq('vendedor_id', str(_sesion)).eq('nombre_columna', datos.nombre))
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail="Error borrar columna")
