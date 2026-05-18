@@ -861,7 +861,6 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
     nombre_normalizado = normalizar_nombre_busqueda(nombre)
     
-    # 🚀 FIX URL DE BUSQUEDA: Usamos quote_plus y type=prices para que el navegador de Godot nunca se vaya al Home.
     query = urllib.parse.quote_plus(nombre_normalizado + ' ' + consola_web)
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=prices"
     
@@ -883,14 +882,11 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             if f"/{slug_esperado}/" in href: score += 40.0 
             
             score += fuzz.token_sort_ratio(nombre_normalizado, normalizar_nombre_busqueda(a.text)) * 0.6
-            
             if re.search(r'(-japan-|-jp-|-pal-|-eu-|-korea-)', href): score -= 50.0
             
-            # 🚀 FIX: Umbral de IA bajado a 35.0 para no descartar nombres cortos como "FIFA 08"
             if score > 35.0:
                 url_limpia = a['href'].strip()
-                if not url_limpia.startswith("http"):
-                    url_limpia = "https://www.pricecharting.com" + url_limpia
+                if not url_limpia.startswith("http"): url_limpia = "https://www.pricecharting.com" + url_limpia
                 candidatos.append({"url": url_limpia, "score": score})
 
     nombre_oficial_pc, p_loose, p_cib, p_new = nombre, 0.0, 0.0, 0.0
@@ -907,26 +903,48 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             h1_tag = soup_juego.find('h1', id='product_name')
             if h1_tag: nombre_oficial_pc = h1_tag.text.strip().replace('\n', ' ')
 
-            def extraer_numero(id_css):
-                nodo = soup_juego.find(id=id_css) or soup_juego.find(class_=id_css)
-                if not nodo: return 0.0
-                texto_crudo = nodo.get_text(strip=True).replace(',', '')
-                coincidencias = re.findall(r'\d+\.\d+|\d+', texto_crudo)
-                if coincidencias:
-                    try: return float(coincidencias[0])
-                    except: pass
+            # 🔥 EXTRACTOR MATEMÁTICO BLINDADO MULTI-CAPA
+            def extraer_numero(id_css, clase_css=None):
+                try:
+                    # Intenta buscar por ID o por Clase
+                    nodo = soup_juego.find(id=id_css)
+                    if not nodo and clase_css:
+                        nodo = soup_juego.find(class_=clase_css)
+                        
+                    if not nodo: return 0.0
+                    
+                    # Limpieza agresiva de HTML interno antes de extraer el texto
+                    texto_crudo = nodo.get_text(separator=' ', strip=True).replace(',', '')
+                    
+                    # Regex para atrapar cualquier número con o sin decimales (ej: "$12.50" -> "12.50")
+                    coincidencias = re.findall(r'\d+\.\d+|\d+', texto_crudo)
+                    if coincidencias:
+                        return float(coincidencias[0])
+                except Exception as e:
+                    print(f"⚠️ [EXTRACTOR] Error parseando {id_css}: {e}")
                 return 0.0
 
-            p_loose = extraer_numero("used_price")
-            p_cib = extraer_numero("cib_price")
-            p_new = extraer_numero("new_price")
+            p_loose = extraer_numero("used_price", "price_used")
+            p_cib = extraer_numero("cib_price", "price_cib")
+            p_new = extraer_numero("new_price", "price_new")
 
-    # 🔥 FIX: Asignación robusta de la URL final para Godot
+            # 🧠 PRICING DE RESPALDO (Fallback Pricing)
+            # Si el juego no tiene precio CIB registrado en PriceCharting, deducimos uno lógico.
+            if p_cib == 0.0:
+                if p_loose > 0:
+                    p_cib = round(p_loose * 1.30, 2) # CIB suele ser 30% más caro que Loose
+                    print(f"🧠 [FALLBACK PRICING] Precio CIB deducido desde Loose: ${p_cib} USD")
+                elif p_new > 0:
+                    p_cib = round(p_new * 0.70, 2) # CIB suele ser 30% más barato que Nuevo
+                    print(f"🧠 [FALLBACK PRICING] Precio CIB deducido desde New: ${p_cib} USD")
+
     url_final_godot = link_juego if link_juego else url_search
 
     if p_loose == 0 and p_cib == 0:
-        print(f"⚠️ [RADAR PRECIOS] Contingencia 0$ para: '{nombre_oficial_pc}'. URL: {url_final_godot}")
-        return {
+        print(f"⚠️ [RADAR PRECIOS] Contingencia 0$ Absoluta para: '{nombre_oficial_pc}'.")
+        # 🔥 IMPORTANTE: Forzamos el guardado en caché de esta contingencia por 2 horas
+        # para no seguir gastando llamadas de ScraperAPI en un juego que realmente no tiene precio.
+        respuesta_fallida = {
             "status": "warning_cero", 
             "nombre_corregido": nombre_oficial_pc, 
             "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, 
@@ -934,6 +952,8 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             "rareza": "Manual",
             "url_pc": url_final_godot
         }
+        await guardar_precio_cache(llave_cache, respuesta_fallida)
+        return respuesta_fallida
 
     mxn_loose_real = round(p_loose * tipo_cambio, 2)
     mxn_cib_real = round(p_cib * tipo_cambio, 2)
