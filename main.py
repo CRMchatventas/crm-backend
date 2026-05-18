@@ -27,6 +27,7 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict, deque
 import google.generativeai as genai
 from passlib.context import CryptContext
+from rapidfuzz import fuzz
 
 load_dotenv()
 
@@ -701,32 +702,45 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 # ==========================================================
 # 📈 8. MOTOR DE PRECIOS PRO (CACHE AAA, MATCHING SCORE, PRICING DINÁMICO)
 # ==========================================================
-import urllib.parse
-import re
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
 
-# 🚀 CACHÉ DISTRIBUIDO RAM (Reduce consultas de 5s a 20ms y salva tokens)
+# 🚀 1. GESTIÓN DE ESTADO Y SEGURIDAD ASÍNCRONA
 cache_precios_ram = {}
+cache_lock = asyncio.Lock()
 TIEMPO_VIDA_CACHE_HORAS = 24 
+
+# Circuit Breaker: Evita gastar dinero/tokens si PriceCharting se cae o bloquea masivamente
+ESTADO_SCRAPER = {"fallas_consecutivas": 0, "bloqueado_hasta": None}
+
+async def limpiar_cache_expirado():
+    """Evita Memory Leaks (fugas de memoria) borrando llaves viejas de forma segura"""
+    async with cache_lock:
+        ahora = datetime.now()
+        expirados = [k for k, v in cache_precios_ram.items() if ahora >= v["expira"]]
+        for k in expirados:
+            del cache_precios_ram[k]
+        if expirados:
+            print(f"🧹 [GARBAGE COLLECTOR] Se liberaron {len(expirados)} registros expirados de la RAM.")
 
 async def obtener_precio_cache(nombre: str, consola: str) -> dict | None:
     llave = f"{nombre.lower().strip()}_{consola.lower().strip()}"
-    if llave in cache_precios_ram:
-        datos = cache_precios_ram[llave]
-        if datetime.now() < datos["expira"]:
-            print(f"⚡ [CACHE RAM HIT] Precio recuperado instantáneamente para: {nombre}")
-            return datos["valores"]
+    async with cache_lock:
+        if llave in cache_precios_ram:
+            datos = cache_precios_ram[llave]
+            if datetime.now() < datos["expira"]:
+                print(f"⚡ [CACHE RAM HIT] Precio recuperado en O(1) para: {nombre}")
+                return datos["valores"]
     return None
 
-def guardar_precio_cache(nombre: str, consola: str, valores: dict):
+async def guardar_precio_cache(nombre: str, consola: str, valores: dict):
     llave = f"{nombre.lower().strip()}_{consola.lower().strip()}"
-    cache_precios_ram[llave] = {
-        "valores": valores,
-        "expira": datetime.now() + timedelta(hours=TIEMPO_VIDA_CACHE_HORAS)
-    }
+    async with cache_lock:
+        cache_precios_ram[llave] = {
+            "valores": valores,
+            "expira": datetime.now() + timedelta(hours=TIEMPO_VIDA_CACHE_HORAS)
+        }
+        # 💾 [FUTURO AAA]: Aquí puedes lanzar un background_task para hacer INSERT en Supabase table 'price_cache'
 
-# 🧼 NORMALIZADOR UNIVERSAL (Punto 5 de la Auditoría)
+# 🧼 2. NORMALIZADOR UNIVERSAL AVANZADO
 def normalizar_nombre_busqueda(nombre: str) -> str:
     palabras_basura = ["edition", "edición", "greatest hits", "platinum", "remastered", "bundle", "loose", "cib", "new", "game of the year", "goty"]
     nombre_limpio = nombre.lower()
@@ -734,41 +748,60 @@ def normalizar_nombre_busqueda(nombre: str) -> str:
         nombre_limpio = nombre_limpio.replace(p, "")
     return " ".join(nombre_limpio.split())
 
-async def obtener_html_escalonado_async(url_objetivo: str) -> str:
-    """Motor de Scrapeo Inteligente en 4 Fases con Validación Estructural Anti-SoftBlock"""
+async def obtener_html_escalonado_async(url_objetivo: str, es_busqueda: bool = True) -> str:
+    """Motor Multi-Fase con Validación Estructural Anti-Falsos Positivos"""
     if not http_client: return ""
+    
+    # 🛡️ CIRCUIT BREAKER: Si falló mucho, abortamos antes de gastar recursos
+    ahora = datetime.now()
+    if ESTADO_SCRAPER["bloqueado_hasta"] and ahora < ESTADO_SCRAPER["bloqueado_hasta"]:
+        print("🛑 [CIRCUIT BREAKER] Scraper en enfriamiento. Saltando petición.")
+        return ""
     
     def es_html_valido(html_text: str) -> bool:
         texto = html_text.lower()
         bloqueos = ["just a moment", "cloudflare", "security check", "access denied", "captcha"]
         if any(b in texto for b in bloqueos): return False
-        if len(html_text) < 6000: return False
-        marcadores_reales = ["games_table", "product_name", "price-boxes", "js-price", "shared-links"]
-        if not any(m in texto for m in marcadores_reales): return False
+        if len(html_text) < 5000: return False
+        
+        # Validación estructural estricta: Garantiza que tenga data de precios o tabla de juegos
+        if es_busqueda and "games_table" not in texto: return False
+        if not es_busqueda and "used_price" not in texto and "price-boxes" not in texto: return False
         return True
 
     print(f"🟢 [RADAR FASE 1] Conexión directa -> {url_objetivo}")
     try:
         res = await http_client.get(url_objetivo, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        if res.status_code == 200 and es_html_valido(res.text): 
+        if res.status_code == 200 and es_html_valido(res.text):
+            ESTADO_SCRAPER["fallas_consecutivas"] = 0 # Reset de salud
             return res.text
-    except: pass
+    except Exception as e:
+        print(f"⚠️ [RADAR FASE 1] Error HTTP Directo: {str(e)}")
 
     url_codificada = urllib.parse.quote(url_objetivo)
     estrategias = [
-        ("Fase 2: Proxy Estándar", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}"),
-        ("Fase 3: Renderizado JS", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
-        ("Fase 4: Premium Residencial", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
+        ("Fase 2: Proxy", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}"),
+        ("Fase 3: Render JS", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&render=true"),
+        ("Fase 4: Ultra Premium", f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_codificada}&premium=true")
     ]
     
     for nombre_fase, url_scraper in estrategias:
         print(f"🟡 [RADAR ESCALACIÓN] Activando {nombre_fase}...")
         try:
-            res = await http_client.get(url_scraper, timeout=25.0)
+            res = await http_client.get(url_scraper, timeout=30.0)
             if res.status_code == 200 and es_html_valido(res.text): 
-                print(f"🔥 [RADAR ÉXITO] Bypass completado ({nombre_fase})")
+                ESTADO_SCRAPER["fallas_consecutivas"] = 0
+                print(f"🔥 [RADAR ÉXITO] Bypass ({nombre_fase}) completado.")
                 return res.text
-        except: pass
+        except Exception as e:
+            print(f"❌ [RADAR ESCALACIÓN ERROR] Falla en {nombre_fase}: {str(e)}")
+            
+    # Si llega aquí, todas las fases fallaron
+    ESTADO_SCRAPER["fallas_consecutivas"] += 1
+    if ESTADO_SCRAPER["fallas_consecutivas"] >= 15:
+        ESTADO_SCRAPER["bloqueado_hasta"] = datetime.now() + timedelta(minutes=15)
+        print("🚨 [CIRCUIT BREAKER ACTIVADO] 15 fallas seguidas. Apagando scraper por 15 mins para evitar baneo.")
+    
     return ""
 
 async def obtener_dolar_hoy_async():
@@ -776,22 +809,25 @@ async def obtener_dolar_hoy_async():
         if not http_client: return 18.00
         res = await http_client.get("https://api.exchangerate-api.com/v4/latest/USD")
         return float(res.json().get("rates", {}).get("MXN", 18.00)) if res.status_code == 200 else 18.00
-    except: return 18.00
+    except Exception as e:
+        print(f"⚠️ [DIVISAS ERROR] Fallo al obtener dólar, usando default 18.00. Error: {str(e)}")
+        return 18.00
 
-# 🧠 MOTOR DE PRICING DINÁMICO (Puntos 3 y 6 de la Auditoría)
+# 🧠 3. MOTOR DE PRICING (CON PREPARACIÓN PARA AUTO-LEARNING)
 def calcular_precio_venta_inteligente_aaa(precio_mercado_mxn: float, costo_compra: float = 0.0, dias_inventario: int = 0, rareza: str = "comun"):
     if precio_mercado_mxn <= 0 and costo_compra <= 0: return 0.0 
     
-    # 🚨 Detector de Outliers (Anomalías de mercado)
+    # 🚨 Detector de Outliers (Punto 6 de la auditoría)
     if rareza == "comun" and precio_mercado_mxn > 4000:
-        print("⚠️ [ANOMALÍA DETECTADA] Precio de mercado absurdamente alto para juego común. Aplicando cap de seguridad.")
-        precio_mercado_mxn = 1500.0 # Cap de seguridad preventivo
+        print("⚠️ [ANOMALÍA DETECTADA] Precio de mercado irracional. Aplicando cap preventivo.")
+        precio_mercado_mxn = 1500.0
 
     precio_base = precio_mercado_mxn if precio_mercado_mxn > 0 else costo_compra * 1.5
     
-    # Ponderación Comercial
     mult_rareza = 1.25 if rareza == "joya" else 1.40 if rareza == "élite" else 1.10 if rareza == "demandado" else 1.0
     mult_rotacion = 0.85 if dias_inventario > 90 else 0.90 if dias_inventario > 60 else 1.05 if dias_inventario < 7 else 1.0
+    
+    # 📈 [FUTURO AAA ML]: Aquí inyectarás el multiplicador de Machine Learning basado en ventas pasadas de Supabase
     
     precio_calculado = precio_base * mult_rareza * mult_rotacion
     piso_absoluto = max(250.0, costo_compra + 100.0)
@@ -800,10 +836,35 @@ def calcular_precio_venta_inteligente_aaa(precio_mercado_mxn: float, costo_compr
 
 @app.get("/api/consultar_precio")
 async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "anonimo", dias_inventario: int = 0, rareza: str = "comun"):
-    print(f"\n🏷️ [RADAR PRECIOS AAA] =======================================")
-    print(f"🏷️ Buscando: '{nombre}' ({consola}) | Operador: {vendedor_id}")
+    print(f"\n🏷️ [RADAR ENTERPRISE] Buscando: '{nombre}' ({consola}) | Operador: {vendedor_id}")
     
-    # ⚡ 1. INTERCEPCIÓN POR CACHÉ RAM
+    # Lanza el Garbage Collector de manera asíncrona y esporádica (aprox 1 de cada 10 veces) para no frenar la request
+    asyncio.create_task(limpiar_cache_expirado())
+    
+    # 🛡️ RATE LIMITING Y ANTI-SPAM POR VENDEDOR
+    if vendedor_id != "ADMIN_VELTRIX":
+        tiempo_actual = now_ts()
+        llave_spam = f"precio_{vendedor_id}"
+        estado = registro_actividad_b2b.get(llave_spam, {"requests_minuto": 0, "last": 0, "ban": 0, "minuto_actual": 0})
+        
+        # Limpieza de contador por minuto
+        minuto_actual = int(tiempo_actual / 60)
+        if minuto_actual > estado["minuto_actual"]:
+            estado["requests_minuto"] = 0
+            estado["minuto_actual"] = minuto_actual
+            
+        if tiempo_actual < estado["ban"]: 
+            return {"status": "error", "detalle": "🚫 BAN ACTIVO", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        estado["requests_minuto"] += 1
+        if estado["requests_minuto"] > 40: # Límite estricto de requests por minuto
+            estado["ban"] = tiempo_actual + (5 * 60) # Ban de 5 minutos
+            registro_actividad_b2b[llave_spam] = estado
+            return {"status": "error", "detalle": "🚫 RATE LIMIT EXCEDIDO (40/min). Baneado 5m.", "mxn": {"loose": 0, "cib": 0, "new": 0}}
+            
+        registro_actividad_b2b[llave_spam] = estado
+
+    # ⚡ INTERCEPCIÓN CACHÉ
     valores_cacheados = await obtener_precio_cache(nombre, consola)
     if valores_cacheados:
         valores_cacheados["status"] = "ok_cached"
@@ -817,10 +878,9 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     query = f"{nombre_normalizado} {consola_web}".replace(" ", "+")
     url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
     
-    print(f"🔍 [RADAR PRECIOS] Consultando URL Normalizada: {url_search}")
-    html_search = await obtener_html_escalonado_async(url_search)
+    html_search = await obtener_html_escalonado_async(url_search, es_busqueda=True)
     if not html_search: 
-        return {"status": "error_precio_cero", "detalle": "Error Radar", "nombre_corregido": nombre, "mxn": {"loose": 0, "cib": 0, "new": 0}}
+        return {"status": "error_precio_cero", "detalle": "Falla Radar", "nombre_corregido": nombre, "mxn": {"loose": 0, "cib": 0, "new": 0}}
         
     soup = BeautifulSoup(html_search, 'html.parser')
     link_juego = None
@@ -828,27 +888,29 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     etiqueta_busqueda = f"/game/{slug_esperado}/"
     palabras_prohibidas = ['strategy-guide', 'magazine', 'comic', 'lot', 'bundle', 'box-only', 'manual-only', 'empty-box']
     
-    # 🎯 2. SCORE DE COINCIDENCIA MULTI-FACTOR (MATCHING AAA)
+    # 🎯 4. MATCHING ENGINE AAA (CON RAPIDFUZZ Y REGEX SEGURO)
     nodos_a_buscar = soup.find(id="games_table").find_all('a', href=True) if soup.find(id="games_table") else soup.find_all('a', href=True)
     candidatos = []
-    terminos_nombre = nombre_normalizado.lower().split()
     
     for a in nodos_a_buscar:
         href = a['href'].lower()
-        texto_link = a.text.lower()
+        texto_link = normalizar_nombre_busqueda(a.text.lower())
         
         if '/game/' in href and not any(b in href for b in palabras_prohibidas):
             score = 0.0
-            if etiqueta_busqueda in href: score += 45.0 # Peso fuerte a plataforma exacta
             
-            palabras_encontradas = sum(1 for termino in terminos_nombre if termino in texto_link or termino in href)
-            score += (palabras_encontradas / max(1, len(terminos_nombre))) * 40.0
+            # Puntuación Plataforma
+            if etiqueta_busqueda in href: score += 40.0 
             
-            # Penalizaciones para evitar falsos positivos
-            if "japan" in href or "jp" in href: score -= 30.0
-            if "pal" in href or "eu" in href: score -= 20.0
+            # Puntuación Textual Difusa Avanzada (Levenshtein)
+            score_fuzz = fuzz.token_sort_ratio(nombre_normalizado, texto_link)
+            score += (score_fuzz * 0.6) # Pesa hasta 60 puntos
             
-            if score > 35.0:
+            # Penalización segura Regex para importaciones (No rompe nombres reales)
+            if re.search(r'(-japan-|-jp-|-pal-|-eu-|-korea-)', href): 
+                score -= 40.0
+            
+            if score > 50.0: # Exigimos al menos un 50/100 de confianza matemática
                 candidatos.append({
                     "url": a['href'] if a['href'].startswith("http") else "https://www.pricecharting.com" + a['href'],
                     "score": score
@@ -860,9 +922,9 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     if candidatos:
         mejor_candidato = max(candidatos, key=lambda x: x["score"])
         link_juego = mejor_candidato["url"]
-        print(f"🎯 [MATCHING AAA] Ficha seleccionada con Confidence Score: {round(mejor_candidato['score'], 2)}/100 -> {link_juego}")
+        print(f"🎯 [MATCHING AAA] Score de Confianza: {round(mejor_candidato['score'], 2)}/100 -> URL Encontrada.")
         
-        html_juego = await obtener_html_escalonado_async(link_juego)
+        html_juego = await obtener_html_escalonado_async(link_juego, es_busqueda=False)
         if html_juego: 
             soup_juego = BeautifulSoup(html_juego, 'html.parser')
             h1_tag = soup_juego.find('h1', id='product_name')
@@ -873,7 +935,7 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
                 if nodo:
                     texto_limpio = ''.join(c for c in nodo.text.replace(',', '.') if c.isdigit() or c == '.')
                     try: return float(texto_limpio) if texto_limpio else 0.0
-                    except: pass
+                    except Exception as e: print(f"⚠️ [EXTRACTOR ERROR] Nodo {id_css}: {e}")
                 return 0.0
 
             p_loose = extraer_numero_puro("used_price")
@@ -881,8 +943,8 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             p_new = extraer_numero_puro("new_price")
 
     if p_loose == 0 and p_cib == 0:
-        print(f"⚠️ [RADAR PRECIOS] Contingencia activada para: '{nombre}'.")
-        return {"status": "warning_cero", "detalle": "Juego protegido. Revisión manual.", "nombre_corregido": nombre_oficial_pc, "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, "rareza": "Manual"}
+        print(f"⚠️ [RADAR PRECIOS] Contingencia 0$ activada para: '{nombre}'.")
+        return {"status": "warning_cero", "detalle": "No superó confianza / no encontrado.", "nombre_corregido": nombre_oficial_pc, "mxn_venta": {"loose": 0, "cib": 0, "new": 0}, "rareza": "Manual"}
 
     mxn_loose_real = round(p_loose * tipo_cambio, 2)
     mxn_cib_real = round(p_cib * tipo_cambio, 2)
@@ -903,9 +965,9 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
         "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0
     }
     
-    guardar_precio_cache(nombre_oficial_pc, consola, respuesta_final)
-    print(f"✅ [RADAR EXITO] Mercado CIB: ${mxn_cib_real} MXN | Venta Veltrix: ${respuesta_final['mxn_venta']['cib']} MXN")
-    print("==============================================================\n")
+    # 💾 Guardado asíncrono y seguro en RAM
+    await guardar_precio_cache(nombre_oficial_pc, consola, respuesta_final)
+    print(f"✅ [RADAR EXITO] Mercado CIB: ${mxn_cib_real} MXN | Venta Veltrix: ${respuesta_final['mxn_venta']['cib']} MXN\n")
     
     return respuesta_final
 
