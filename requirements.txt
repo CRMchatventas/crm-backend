@@ -10,3 +10,4 @@ bcrypt==3.2.2
 python-jose[cryptography]
 google-generativeai
 passlib[bcrypt]
+rapidfuzz==3.10.1
