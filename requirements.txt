@@ -7,7 +7,6 @@ httpx
 beautifulsoup4
 python-dotenv
 bcrypt==3.2.2
-python-jose[cryptography]
 passlib[bcrypt]
 rapidfuzz==3.10.1
 google-generativeai
@@ -16,3 +15,6 @@ cachetools
 phonenumbers
 bleach
 Pillow==10.3.0
+email-validator
+pyjwt
+starlette
