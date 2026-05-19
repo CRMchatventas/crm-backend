@@ -1317,6 +1317,7 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
     logger.info(f"🔑 [LOGIN] Autenticando: {email_normalizado} desde {ip_cliente}")
     
     try:
+        # DB Lookup con Timeout de seguridad
         res = await asyncio.wait_for(
             async_db_execute(supabase.table('usuarios_veltrix').select('*').eq('email', email_normalizado).limit(1)),
             timeout=10.0
@@ -1325,13 +1326,12 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
         usuario_existe = bool(res.data)
         usuario = res.data[0] if usuario_existe else {}
         
-        # 🛡️ FIX AAA: Prevención de Timing Attack
+        # 🛡️ FIX AAA: Prevención de Timing Attack (Respuesta igual de lenta aunque no exista el usuario)
         password_guardada = str(usuario.get('password', DUMMY_HASH))
         
         if not password_guardada.startswith('$2b$'):
             if usuario_existe:
                 logger.critical(f"🚨 [RIESGO DE SEGURIDAD] Cuenta con password legacy detectada: {email_normalizado}")
-            # Se encripta contra el hash para consumir CPU y emparejar tiempos
             password_guardada = DUMMY_HASH
             usuario_existe = False 
 
@@ -1345,24 +1345,24 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
                 LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1 
             raise HTTPException(status_code=401, detail="Credenciales inválidas.")
             
-        # --- FIX AAA: Normalización estricta del estado ---
-        # Convertimos a minúsculas y quitamos espacios antes de comparar
+        # --- 🛡️ VALIDACIÓN DE ESTADO (ACCOUNT HEALTH) ---
+        # Normalizamos a minúsculas y eliminamos espacios para evitar errores de DB
         estado_usuario = str(usuario.get('estado', '')).lower().strip()
-        
-        # Ahora comparamos contra 'activo' (minúscula)
         if estado_usuario != 'activo':
-            logger.warning(f"🚫 [LOGIN] Ingreso denegado. Estado DB: '{estado_usuario}'")
-            # Mantenemos el 401 para seguridad (Anti-Enumeration)
-            raise HTTPException(status_code=401, detail="Credenciales inválidas.")
+            logger.warning(f"🚫 [LOGIN] Ingreso denegado. Usuario '{email_normalizado}' con estado: '{estado_usuario}'")
+            raise HTTPException(status_code=401, detail="Cuenta no activa o suspendida.")
 
-        suscripcion_valida = True
+        # --- 💳 VALIDACIÓN UNIFICADA DE SUSCRIPCIÓN (BILLING HEALTH) ---
+        suscripcion_activa_db = usuario.get('suscripcion_activa', False)
         fecha_pago_str = usuario.get('fecha_proximo_pago')
+        fecha_vencida = False
+        
         if fecha_pago_str:
             try:
                 from datetime import date
                 if date.today() > date.fromisoformat(fecha_pago_str):
-                    suscripcion_valida = False
-                    # 🛡️ FIX AAA: Costo de red movido a Background Task para no penalizar el tiempo de Login
+                    fecha_vencida = True
+                    # Actualizamos a False en background para no bloquear el login
                     background_tasks.add_task(
                         async_db_execute,
                         supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id'])
@@ -1370,6 +1370,11 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
             except ValueError: 
                 logger.error(f"❌ Formato de fecha de pago corrupto: {email_normalizado}")
 
+        if not suscripcion_activa_db or fecha_vencida:
+            logger.warning(f"💳 [LOGIN] Ingreso denegado. Usuario '{email_normalizado}' sin suscripción activa.")
+            raise HTTPException(status_code=402, detail="Suscripción inactiva. Por favor realiza tu pago.")
+
+        # Finalizamos el rate limit exitoso
         async with rate_limit_login_lock:
             LOGIN_RATE_LIMIT[llave_limite] = max(0, intentos_previos - 1)
 
@@ -1387,9 +1392,6 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
             "exp": ahora + timedelta(days=1)
         }
         
-        # Opcional AAA: Guardar sesión JTI en DB con background task (Para revocación futura)
-        # background_tasks.add_task(guardar_sesion_db, payload_jwt['jti'], vendedor_id, ip_cliente)
-        
         token_jwt = jwt.encode(payload_jwt, JWT_SECRET, algorithm="HS256")
         logger.info(f"✅ [LOGIN EXITOSO] {vendedor_id} autenticado desde {ip_cliente}.")
 
@@ -1400,7 +1402,7 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
                 "email": usuario['email'],
                 "estado": estado_usuario,
                 "pais": usuario.get('pais', 'México'),
-                "suscripcion_activa": suscripcion_valida,
+                "suscripcion_activa": True,
                 "token": token_jwt 
             },
             "access_token": token_jwt,
