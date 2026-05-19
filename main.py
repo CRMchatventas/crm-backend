@@ -1345,10 +1345,15 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
                 LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1 
             raise HTTPException(status_code=401, detail="Credenciales inválidas.")
             
-        estado_usuario = usuario.get('estado', 'Activo')
-        if estado_usuario != 'Activo':
-            logger.warning(f"🚫 [LOGIN] Ingreso denegado a cuenta inactiva: {email_normalizado}")
-            raise HTTPException(status_code=401, detail="Credenciales inválidas.") # Anti-Enumeration
+        # --- FIX AAA: Normalización estricta del estado ---
+        # Convertimos a minúsculas y quitamos espacios antes de comparar
+        estado_usuario = str(usuario.get('estado', '')).lower().strip()
+        
+        # Ahora comparamos contra 'activo' (minúscula)
+        if estado_usuario != 'activo':
+            logger.warning(f"🚫 [LOGIN] Ingreso denegado. Estado DB: '{estado_usuario}'")
+            # Mantenemos el 401 para seguridad (Anti-Enumeration)
+            raise HTTPException(status_code=401, detail="Credenciales inválidas.")
 
         suscripcion_valida = True
         fecha_pago_str = usuario.get('fecha_proximo_pago')
