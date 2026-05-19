@@ -13,3 +13,5 @@ rapidfuzz==3.10.1
 google-generativeai
 orjson
 cachetools
+phonenumbers
+bleach
