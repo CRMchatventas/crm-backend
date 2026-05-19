@@ -30,7 +30,7 @@ from collections import defaultdict, deque
 import google.generativeai as genai
 from passlib.context import CryptContext
 from rapidfuzz import process, fuzz
-
+from cachetools import TTLCache
 
 load_dotenv()
 
@@ -1525,153 +1525,247 @@ async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_
     except Exception as e: raise HTTPException(status_code=500, detail="Error borrar columna")
 
 # ==========================================================
-# ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (CON AUDITOR)
+# ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
 # ==========================================================
-async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
-    print("\n📥 ==========================================================")
-    print("📥 [WORKER BG] INICIANDO ORQUESTACIÓN DE MENSAJE ENTRANTE")
-    print("==============================================================")
-    try:
-        wamid = str(msg.get("id", "")).strip()
-        if wamid and wamid in procesados_recientemente:
-            print(f"♻️ [WORKER BG] Token de mensaje duplicado (wamid: {wamid}). Ignorando transmisión.")
-            return
-        if wamid:
-            procesados_recientemente.append(wamid)
+import uuid
+import json
+import asyncio
+from cachetools import TTLCache
 
-        print(f"📡 [WORKER BG] Descargando configuración de Tenant (Phone ID: {phone_id_receptor})")
-        res_config = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1))
-        config_vendedor = res_config.data[0] if res_config.data else {"vendedor_id": "V-001", "meta_token": WHATSAPP_TOKEN, "meta_phone_id": WHATSAPP_PHONE_ID, "bot_activo": True, "nombre_negocio": "Fantasy Games"}
+# 🛡️ CACHÉS Y LOCKS DISTRIBUIDOS EN MEMORIA
+procesados_recientemente = TTLCache(maxsize=20000, ttl=600)
+wamid_lock = asyncio.Lock()
+
+RATE_LIMIT_CLIENTES = TTLCache(maxsize=10000, ttl=10)
+rate_limit_lock = asyncio.Lock()
+
+RATE_LIMIT_MEDIA = TTLCache(maxsize=10000, ttl=60)
+media_limit_lock = asyncio.Lock()
+
+# 🛡️ SEMÁFOROS DIVIDIDOS (Evita que la lentitud de un área paralice todo el SaaS)
+SEMAFORO_IA = asyncio.Semaphore(15)      # Máximo 15 conexiones concurrentes a Gemini Chat
+SEMAFORO_MEDIA = asyncio.Semaphore(10)   # Máximo 10 procesamientos de imágenes/audios concurrentes
+
+async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
+    trace_id = str(uuid.uuid4())[:8]
+    logger.info(f"📥 [TRACE:{trace_id}] === INICIANDO ORQUESTACIÓN DE MENSAJE ===")
+    
+    # Declaramos el diccionario multimedia aquí para asegurar su limpieza en el bloque finally
+    media_dict_audio = None
+    media_dict_img = None
+    
+    try:
+        # 1. 🛡️ ANTI-LOOP Y RESPUESTAS DEL SISTEMA
+        if msg.get("from_me") or valor.get("statuses"):
+            logger.info(f"♻️ [TRACE:{trace_id}] Mensaje de sistema o retorno. Ignorado.")
+            return
+
+        wamid = str(msg.get("id", "")).strip()
         
-        vendedor_actual = str(config_vendedor.get("vendedor_id", "V-001"))
+        # 2. 🛡️ DEDUPLICACIÓN ATÓMICA
+        async with wamid_lock:
+            if wamid and procesados_recientemente.get(wamid):
+                logger.warning(f"♻️ [TRACE:{trace_id}] Webhook duplicado bloqueado: {wamid}")
+                return
+            if wamid:
+                procesados_recientemente[wamid] = True
+
+        # 3. 🛡️ AISLAMIENTO DE TENANT (Multi-Tenant Estricto)
+        res_config = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_id_receptor).limit(1))
+        
+        if not res_config.data:
+            logger.error(f"🚨 [TRACE:{trace_id}] Tenant no encontrado para Phone ID: {phone_id_receptor}. Abortando.")
+            return
+
+        config_vendedor = res_config.data[0]
+        vendedor_actual = str(config_vendedor.get("vendedor_id", ""))
         token_actual = str(config_vendedor.get("meta_token", "")) or WHATSAPP_TOKEN
         nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games"))
         
         if not token_actual or not config_vendedor.get("bot_activo", True):
-            print(f"🚫 [WORKER BG] Flujo denegado: El Bot del Tenant {vendedor_actual} está inactivo o carece de token de acceso.")
+            logger.warning(f"🚫 [TRACE:{trace_id}] Flujo denegado: Bot inactivo o sin token para {vendedor_actual}.")
             return
 
         telefono_cliente = str(msg.get("from", "")).strip()
-        if telefono_cliente.startswith("521"): 
-            telefono_cliente = "52" + telefono_cliente[3:]
-        if not telefono_cliente: 
-            print("⚠️ [WORKER BG] Alerta: Identificador telefónico vacío o corrupto. Abortando ejecutor.")
-            return
+        if telefono_cliente.startswith("521"): telefono_cliente = "52" + telefono_cliente[3:]
+        if not telefono_cliente: return
+
+        # 4. 🛡️ RATE LIMIT POR TELÉFONO (Anti-Spam)
+        async with rate_limit_lock:
+            peticiones_recientes = RATE_LIMIT_CLIENTES.get(telefono_cliente, 0)
+            if peticiones_recientes > 8:
+                logger.warning(f"⚠️ [TRACE:{trace_id}] [RATE LIMIT] Spam detectado de {telefono_cliente}.")
+                return
+            RATE_LIMIT_CLIENTES[telefono_cliente] = peticiones_recientes + 1
 
         tipo_mensaje = str(msg.get("type", "text")).lower()
         texto_entrante = ""
-        media_dict_audio = None  # 🎙️ Inyección AAA: Buffer de almacenamiento para el Audio Binario Nativo
 
-        print(f"📦 [WORKER BG] Formato de paquete detectado: '{tipo_mensaje}' | Remitente: {telefono_cliente}")
+        logger.info(f"📦 [TRACE:{trace_id}] Formato: '{tipo_mensaje}' | Remitente: {telefono_cliente}")
         
+        # 5. 🛡️ EXTRACCIÓN Y VALIDACIÓN MULTIMEDIA
         if tipo_mensaje == "text": 
             texto_entrante = msg.get("text", {}).get("body", "").strip()
-        elif tipo_mensaje == "image": 
-            texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago...]"
         elif tipo_mensaje == "interactive": 
             texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
-        elif tipo_mensaje == "audio": 
-            texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA - ANALIZANDO AUDIO...]"
-            audio_id = msg.get("audio", {}).get("id", "").strip()
-            print(f"🎙️ [WORKER BG] Capturado ID de Nota de voz: {audio_id}. Inicializando pasarela de descarga...")
-            if audio_id:
-                media_dict_audio = await descargar_media_whatsapp_async(audio_id, token_actual)
-                if media_dict_audio:
-                    print("🎙️ [WORKER BG] Archivo binario de audio descargado y acoplado con éxito al diccionario multimedia.")
-                else:
-                    print("⚠️ [WORKER BG] Warning: No se obtuvo respuesta binaria de los servidores de Meta para este audio.")
+            
+        elif tipo_mensaje in ["image", "audio"]:
+            # 🛡️ RATE LIMIT MULTIMEDIA (Protege costos de APIs de IA)
+            async with media_limit_lock:
+                media_count = RATE_LIMIT_MEDIA.get(telefono_cliente, 0)
+                if media_count > 5:
+                    logger.warning(f"⚠️ [TRACE:{trace_id}] Abuso multimedia detectado de {telefono_cliente}.")
+                    return
+                RATE_LIMIT_MEDIA[telefono_cliente] = media_count + 1
+
+            if tipo_mensaje == "audio":
+                texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA - ANALIZANDO AUDIO...]"
+                audio_id = msg.get("audio", {}).get("id", "").strip()
+                if audio_id:
+                    media_dict_audio = await descargar_media_whatsapp_async(audio_id, token_actual)
+                    if media_dict_audio and len(media_dict_audio.get("data", b"")) > 15_000_000:
+                        logger.warning(f"⚠️ [TRACE:{trace_id}] Audio demasiado pesado (>15MB). Abortando.")
+                        return
+                        
+            elif tipo_mensaje == "image":
+                texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago...]"
+                image_id = msg.get("image", {}).get("id", "").strip()
+                if image_id:
+                    media_dict_img = await descargar_media_whatsapp_async(image_id, token_actual)
+                    if not media_dict_img: return
+                    
+                    # 🛡️ VALIDACIÓN MIME ESTRICTA (Protege contra inyecciones de código disfrazadas de imágenes)
+                    mime = media_dict_img.get("mime_type", "")
+                    if mime not in ["image/jpeg", "image/png", "image/webp"]:
+                        logger.warning(f"🚨 [TRACE:{trace_id}] Formato MIME no permitido: {mime}")
+                        return
         else: 
-            print(f"ℹ️ [WORKER BG] Formato '{tipo_mensaje}' no mapeado en el enrutador actual. Descartando.")
+            logger.info(f"ℹ️ [TRACE:{trace_id}] Formato '{tipo_mensaje}' descartado.")
             return
 
-        print(f"🗂️ [WORKER BG] Validando estado de cuenta del prospecto en Supabase...")
+        # 6. 🛡️ GESTIÓN DE CRM (Manejo de Race Conditions en inserción)
         res_p = await async_db_execute(supabase.table('prospectos').select('columna, notas').eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_actual))
         columna_actual = res_p.data[0].get("columna", "Bandeja Nueva") if res_p.data else "Bandeja Nueva"
-
         nombre_cliente = valor.get("contacts", [{}])[0].get("profile", {}).get("name", "Cliente")
 
         if not res_p.data:
-            print(f"✨ [WORKER BG] Cliente nuevo localizado. Inicializando inserción de '{nombre_cliente}' en CRM...")
-            await async_db_execute(supabase.table('prospectos').insert({
-                "nombre": nombre_cliente, 
-                "telefono": telefono_cliente, 
-                "columna": columna_actual, 
-                "vendedor_id": vendedor_actual,
-                "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
-            }))
+            try:
+                await async_db_execute(supabase.table('prospectos').insert({
+                    "nombre": nombre_cliente, 
+                    "telefono": telefono_cliente, 
+                    "columna": columna_actual, 
+                    "vendedor_id": vendedor_actual,
+                    "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
+                }))
+            except Exception as db_e:
+                # Capturamos fallo de restricción UNIQUE en caso de inserción concurrente
+                logger.warning(f"⚠️ [TRACE:{trace_id}] Posible colisión en inserción CRM (Ignorada de forma segura): {db_e}")
 
-        # Persistimos la actividad del usuario en el log histórico global
-        await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "USER", texto_entrante)
+        # Guardado de mensaje en BD (Aislado para no romper el flujo si falla)
+        try:
+            await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "USER", texto_entrante)
+        except Exception as e:
+            logger.error(f"⚠️ [TRACE:{trace_id}] Falla aisalada guardando chat: {e}")
 
-        # 🚀 Bifurcación del Ruteador según la naturaleza del evento multimedia
+        # 7. 🚀 ENRUTAMIENTO CON TIMEOUTS DUROS Y SEMÁFOROS
         if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
-            print(f"🤖 [WORKER BG] Despachando carga cognitiva hacia procesar_respuesta_bot... (Audio Binario Cargado: {media_dict_audio is not None})")
-            # Enviamos el buffer de audio de forma nativa a la canalización del cerebro IA
-            await procesar_respuesta_bot(nombre_cliente, telefono_cliente, texto_entrante, columna_actual, config_vendedor, media_dict_audio)
-            
-        elif tipo_mensaje == "image":
-            print("🛡️ [DOBERMAN AUDITOR] Desplegando cortafuegos analítico de finanzas visuales...")
-            image_id = msg.get("image", {}).get("id", "").strip()
-            if not image_id:
-                print("⚠️ [DOBERMAN AUDITOR] Cancelando auditoría: Estructura de imagen vacía.")
-                return
+            async with SEMAFORO_IA:
+                logger.info(f"🤖 [TRACE:{trace_id}] Despachando a IA Chat...")
+                # 🛡️ FIX AAA: Timeout crítico general para evitar que la IA congele el worker
+                await asyncio.wait_for(
+                    procesar_respuesta_bot(nombre_cliente, telefono_cliente, texto_entrante, columna_actual, config_vendedor, media_dict_audio, id_mensaje_meta=wamid),
+                    timeout=90.0
+                )
+                
+        elif tipo_mensaje == "image" and media_dict_img:
+            async with SEMAFORO_MEDIA:
+                logger.info(f"🛡️ [TRACE:{trace_id}] [DOBERMAN] Analizando finanzas visuales...")
+                historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
 
-            historial_para_auditor = await obtener_historial_chat(telefono_cliente, vendedor_actual)
-            media_dict_img = await descargar_media_whatsapp_async(image_id, token_actual)
+                try:
+                    auditoria = await asyncio.wait_for(
+                        auditar_comprobante_ia(media_dict_img["data"], media_dict_img["mime_type"], nombre_negocio, historial_para_auditor),
+                        timeout=45.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"⏱️ [TRACE:{trace_id}] Timeout excedido en Doberman Vision (45s).")
+                    return
 
-            if not media_dict_img:
-                print("❌ [DOBERMAN AUDITOR] Falla crítica: Error de enlace en la descarga del comprobante.")
-                return
+                es_pago = auditoria.get("es_pago", False)
+                monto = float(auditoria.get("monto_detectado", 0.0)) 
 
-            # Ejecutamos la auditoría de visión computacional con Gemini
-            auditoria = await auditar_comprobante_ia(media_dict_img["data"], media_dict_img["mime_type"], nombre_negocio, historial_para_auditor)
-            es_pago = auditoria.get("es_pago", False)
-            monto = float(auditoria.get("monto_detectado", 0.0)) 
+                if es_pago:
+                    logger.info(f"💰 [TRACE:{trace_id}] ¡PAGO VÁLIDO! ${monto} MXN.")
+                    await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", "")
+                    msg_exito = f"✅ ¡Pago validado por ${monto:.2f} MXN!\nHemos recibido tu comprobante."
+                    await disparar_whatsapp_dinamico_async(telefono_cliente, msg_exito, token_actual, phone_id_receptor)
+                    await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
+                else:
+                    logger.warning(f"🚨 [TRACE:{trace_id}] FRAUDE O ERROR: {auditoria.get('analisis')}")
+                    msg_fallo = f"🤖 Mi sistema no pudo validar la imagen.\nDetalle: {auditoria.get('analisis')}\nPor favor envía una foto clara."
+                    await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
+                    await disparar_whatsapp_dinamico_async(telefono_cliente, msg_fallo, token_actual, phone_id_receptor)
+                    await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
 
-            if es_pago:
-                print(f"💰 [DOBERMAN AUDITOR] ¡COMPROBANTE VÁLIDO! Capital detectado: ${monto} MXN. Actualizando CRM...")
-                await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", "")
-                msg_exito = f"✅ ¡Pago validado por ${monto:.2f} MXN!\nHemos recibido tu comprobante."
-                await disparar_whatsapp_dinamico_async(telefono_cliente, msg_exito, token_actual, phone_id_receptor)
-                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
-                print(f"💰 PAGO EXITOSO FINANCIADO | {telefono_cliente} | ${monto}")
-            else:
-                print(f"🚨 [DOBERMAN AUDITOR] ALERTA: Intento de fraude o imagen corrupta. Razón: {auditoria.get('analisis')}")
-                msg_fallo = f"🤖 Mi sistema no pudo validar la imagen.\nDetalle: {auditoria.get('analisis')}\nPor favor envía una foto clara."
-                await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
-                await disparar_whatsapp_dinamico_async(telefono_cliente, msg_fallo, token_actual, phone_id_receptor)
-                await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
+        logger.info(f"🏁 [TRACE:{trace_id}] === OPERACIÓN COMPLETADA EXITOSAMENTE ===")
 
-        print("🏁 ==========================================================")
-        print("🏁 [WORKER BG] OPERACIÓN ASÍNCRONA COMPLETADA SIN ERRORES")
-        print("==============================================================\n")
-
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [TRACE:{trace_id}] TIMEOUT GLOBAL. Proceso cancelado para liberar worker.")
     except Exception as e: 
-        logger.exception(f"❌ [WORKER BG CRITICAL ERROR] Detonación en bloque supervisor en background: {str(e)}")
+        logger.exception(f"❌ [TRACE:{trace_id}] CRÍTICO: Falla del supervisor background: {str(e)}")
+    finally:
+        # 8. 🧹 RECOLECCIÓN DE BASURA EXPLÍCITA (Previene Memory Leaks de Archivos Binarios)
+        if media_dict_audio: media_dict_audio.clear()
+        if media_dict_img: media_dict_img.clear()
+
 
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
     params = request.query_params
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WEBHOOK_SECRET:
-        print("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
+        logger.info("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
         return int(params.get("hub.challenge"))
-    raise HTTPException(status_code=403, detail="Token inválido")
+    raise HTTPException(status_code=403, detail="Token de validación de Meta inválido")
 
 @app.post("/webhook")
-async def recibir_mensajes(request: Request, background_tasks: BackgroundTasks):
-    await validar_firma_meta(request)
+async def recibir_mensajes(request: Request):
     try:
-        body = await request.json()
-        if not body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages"): return {"status": "ignored"}
-        print("\n--- 📥 [NUEVO MENSAJE DE META] ---")
-        value = body["entry"][0]["changes"][0]["value"]
-        background_tasks.add_task(gestionar_mensaje_entrante_bg, value, value.get("messages", [{}])[0], value.get("metadata", {}).get("phone_number_id", WHATSAPP_PHONE_ID))
+        await asyncio.wait_for(validar_firma_meta(request), timeout=5.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=408, detail="Timeout validando firma")
+
+    try:
+        # 🛡️ FIX AAA: Limitador estricto de Payload (Protección DDoS)
+        body_bytes = await request.body()
+        if len(body_bytes) > 2_000_000: # 2MB Max Payload
+            raise HTTPException(413, "Payload demasiado grande")
+            
+        # 🛡️ FIX AAA: Captura de JSONDecodeError
+        try:
+            body = json.loads(body_bytes)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "JSON corrupto o inválido")
+            
+        # 🛡️ FIX AAA: Navegación Profunda y Segura (Anti-Crash)
+        entry = body.get("entry", [{}])
+        changes = entry[0].get("changes", [{}])
+        if not changes: return {"status": "ignored"}
+        
+        value = changes[0].get("value", {})
+        messages = value.get("messages", [])
+        if not messages: return {"status": "ignored"}
+        
+        # Lanzamiento Seguro Asíncrono
+        lanzar_tarea_segura(gestionar_mensaje_entrante_bg(value, messages[0], value.get("metadata", {}).get("phone_number_id", WHATSAPP_PHONE_ID)))
+        
         return {"status": "ok"}
-    except Exception as e: return {"status": "error", "reason": str(e)}
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error en Webhook Entrypoint: {e}")
+        return {"status": "error", "reason": str(e)}
 
 app.include_router(router)
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), reload=False)
-            
