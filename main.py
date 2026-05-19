@@ -16,6 +16,7 @@ import urllib.parse
 import re
 import unicodedata
 import orjson
+import uuid
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -1270,77 +1271,138 @@ async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_
     except Exception as e: raise HTTPException(status_code=500, detail="Error interno")
 
 # ==========================================================
-# 📦 11. INVENTARIO Y GESTIÓN DE COLUMNAS (AAA ENTERPRISE)
+# 📦 BLOQUE 11: INVENTARIO Y GESTIÓN DE COLUMNAS (AAA ENTERPRISE)
 # ==========================================================
+
+# 🛡️ 1. SEGURIDAD Y REGLAS DE NEGOCIO
+COLUMNAS_SISTEMA_RESERVADAS = {"requiere asistencia", "por entregar", "bandeja nueva", "envios masivos", "null", "undefined", "delete"}
+
+def sanitizar_nombre_columna(nombre: str) -> str:
+    limpio = limpiar_texto(nombre).strip()
+    if limpio.lower() in COLUMNAS_SISTEMA_RESERVADAS:
+        raise HTTPException(400, "Nombre de columna reservado por el sistema. Elige otro.")
+    return limpio
+
 @app.post("/api/crear_inventario")
 async def crear_inventario(datos: NuevoArticulo, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
+        nombre_limpio = limpiar_texto(datos.nombre)
+        
+        # 🔥 FIX AAA: Límite de longitud y protección de variables numéricas
+        if len(nombre_limpio) > 120:
+            raise HTTPException(400, "Nombre de artículo demasiado largo. Máximo 120 caracteres.")
         if datos.precio < 0 or datos.stock < 0:
             raise HTTPException(400, "Valores de precio o stock inválidos.")
 
-        # 1. Insertamos el juego en la base de datos (🔥 FIX: Se guarda 'consola')
+        vid_str = str(_sesion)
+        consola_limpia = limpiar_texto(datos.categoria) 
+
+        res_check = await async_db_execute(
+            supabase.table('inventario').select('id')
+            .eq('vendedor_id', vid_str)
+            .ilike('nombre', nombre_limpio)
+            .ilike('consola', consola_limpia)
+            .limit(1)
+        )
+        if res_check.data:
+            raise HTTPException(400, "Este título ya existe en esta plataforma para tu inventario.")
+
         res = await async_db_execute(supabase.table('inventario').insert({
-            'vendedor_id': str(_sesion), 
-            'nombre': datos.nombre, 
-            'categoria': datos.categoria, 
-            'consola': datos.categoria, # <- CRÍTICO PARA EL SCRAPER Y RADAR
+            'vendedor_id': vid_str, 
+            'nombre': nombre_limpio, 
+            'categoria': consola_limpia, 
+            'consola': consola_limpia, 
             'precio_compra': datos.precio_compra, 
             'precio': datos.precio, 
             'stock': datos.stock
         }))
         
-        # 2. 🚀 Disparamos el Scraper en Segundo Plano (Sin congelar Godot)
         if res.data:
             juego_id_creado = str(res.data[0]['id'])
-            # Usamos 'categoria' como el equivalente a la 'consola' para la búsqueda
+            # 🚀 Scraper Inteligente: Ahora verifica URL antes en un entorno real, aquí se manda directo al background
             background_tasks.add_task(cazar_portada_y_guardar_background, juego_id_creado, datos.nombre, datos.categoria)
             
         return {"status": "ok"}
     except HTTPException: raise
     except Exception as e: 
-        raise HTTPException(status_code=500, detail="Error en DB al crear inventario")
+        logger.error(f"❌ Error DB Crear Inventario: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al crear artículo")
 
 @app.get("/api/cargar_inventario")
-async def cargar_inventario(offset: int = 0, limit: int = 500, _sesion: str = Depends(verificar_sesion_b2b)):
+async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        limit_seguro = min(limit, 500) # 🔥 FIX: Límite duro para proteger la RAM
+        limit_seguro = min(limit, 100) 
+        # 🔥 FIX AAA: Corrección del nombre del campo a 'precio_compra'
         res = await async_db_execute(
-            supabase.table('inventario').select("*")
+            supabase.table('inventario')
+            .select("id, nombre, consola, precio, precio_compra, stock, url_portada, estado_general, rareza")
             .eq('vendedor_id', str(_sesion))
             .order('id', desc=True)
             .range(offset, offset + limit_seguro - 1)
         )
-        return {"status": "ok", "inventario": res.data or []}
+        
+        # 🔥 FIX AAA: Normalización estricta de JSON para evitar crashes en Godot por culpa de NULLs
+        inventario_limpio = []
+        for row in (res.data or []):
+            inventario_limpio.append({
+                "id": row.get("id"),
+                "nombre": row.get("nombre") or "",
+                "consola": row.get("consola") or "",
+                "precio": float(row.get("precio") or 0.0),
+                "precio_compra": float(row.get("precio_compra") or 0.0),
+                "stock": int(row.get("stock") or 0),
+                "url_portada": row.get("url_portada") or "",
+                "estado_general": row.get("estado_general") or "Bueno",
+                "rareza": row.get("rareza") or "comun"
+            })
+            
+        return {"status": "ok", "inventario": inventario_limpio}
     except Exception as e: raise HTTPException(status_code=500, detail="Error carga de inventario")
 
 @app.post("/api/editar_item_visor")
 async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
-        # 🔥 FIX: Validaciones para evitar precios o stocks negativos inyectados desde UI
+        if not item.id:
+            raise HTTPException(400, "ID Requerido. Operación cancelada.")
+
+        nombre_limpio = limpiar_texto(item.nombre)
         precio_final = max(0.0, float(item.nuevo_precio if item.nuevo_precio is not None else item.precio))
         stock_final = max(0, int(item.nuevo_stock if item.nuevo_stock is not None else item.stock))
 
-        if item.id: 
-            await async_db_execute(supabase.table("inventario").update({"nombre": item.nombre, "precio": precio_final, "stock": stock_final, "consola": item.consola}).eq("id", item.id).eq("vendedor_id", vid_str))
-        else: 
-            await async_db_execute(supabase.table("inventario").update({"precio": precio_final, "stock": stock_final}).eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", vid_str))
+        # 🔥 FIX AAA: Leer el estado anterior para limpiar el caché de forma efectiva
+        res_old = await async_db_execute(supabase.table("inventario").select("nombre, consola").eq("id", item.id).eq("vendedor_id", vid_str).limit(1))
+        
+        nombre_anterior = res_old.data[0].get("nombre", "") if res_old.data else ""
+        consola_anterior = res_old.data[0].get("consola", "") if res_old.data else ""
+
+        await async_db_execute(
+            supabase.table("inventario")
+            .update({"nombre": nombre_limpio, "precio": precio_final, "stock": stock_final, "consola": limpiar_texto(item.consola)})
+            .eq("id", item.id).eq("vendedor_id", vid_str)
+        )
+        
+        # 🔥 FIX AAA: Invalidación Doble de Caché (El nombre viejo y el nuevo)
+        async with cache_lock:
+            if nombre_anterior: cache_precios_ram.pop(generar_cache_key(nombre_anterior, consola_anterior), None)
+            cache_precios_ram.pop(generar_cache_key(nombre_limpio, item.consola), None)
+
         return {"status": "ok"}
+    except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail="Error editar item")
 
 @app.get("/api/buscar_maestro")
 async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🔥 FIX: Normalización de búsqueda para evadir errores de ortografía en UI
         q_limpio = normalizar_nombre_busqueda(q) if q else ""
         if not q_limpio: return {"status": "ok", "resultados": []}
 
         res = await async_db_execute(
             supabase.table('inventario')
-            .select('*')
+            .select('id, nombre, consola, precio, stock, url_portada')
             .eq('vendedor_id', str(_sesion))
             .ilike('nombre', f'%{q_limpio}%')
-            .limit(50)
+            .limit(25)
         )
         return {"status": "ok", "resultados": res.data or []}
     except Exception as e: 
@@ -1349,77 +1411,92 @@ async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/borrar_item")
 async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        if item.id: 
-            await async_db_execute(supabase.table("inventario").delete().eq("id", item.id).eq("vendedor_id", str(_sesion)))
-        else: 
-            # Fallback Legacy (Se recomienda fuertemente migrar a borrado solo por ID en Godot)
-            await async_db_execute(supabase.table("inventario").delete().eq("nombre", item.nombre).eq("consola", item.consola).eq("vendedor_id", str(_sesion)))
+        if not item.id: raise HTTPException(400, "ID Requerido. Borrado bloqueado.")
+        await async_db_execute(supabase.table("inventario").delete().eq("id", item.id).eq("vendedor_id", str(_sesion)))
         return {"status": "ok"}
+    except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail="Error borrar item")
 
-# 🚀 RESTAURACIÓN AAA: Endpoint Atómico para descontar stock en ventas
+# 🚀 ENDPOINT ATÓMICO DE VENTAS (Cero Race Conditions / Auditoría UUID)
 @app.post("/api/actualizar_stock")
 async def actualizar_stock(item: VentaItem, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
+        if not item.id: raise HTTPException(400, "ID requerido para transacción segura.")
         
-        # 1. 🛡️ LEER LA FUENTE DE VERDAD (Transaccionalidad simulada)
-        query = supabase.table("inventario").select("id, precio, stock")
-        if item.id: query = query.eq("id", item.id)
-        else: query = query.eq("nombre", item.nombre).eq("consola", item.consola)
+        res_inv = await async_db_execute(
+            supabase.table("inventario").select("id, nombre, consola, precio, stock")
+            .eq("id", item.id).eq("vendedor_id", vid_str).limit(1)
+        )
         
-        res_inv = await async_db_execute(query.eq("vendedor_id", vid_str).limit(1))
-        
-        if not res_inv.data:
-            raise HTTPException(status_code=404, detail="Juego no localizado en base de datos.")
+        if not res_inv.data: raise HTTPException(status_code=404, detail="Juego no localizado.")
             
         db_item = res_inv.data[0]
         stock_actual = int(db_item.get("stock", 0))
         precio_venta = float(db_item.get("precio", 0.0))
-        item_id_db = db_item.get("id")
+        nombre_real_db = db_item.get("nombre", item.nombre)
+        consola_real_db = db_item.get("consola", item.consola)
 
-        # 2. 🛡️ CÁLCULO DEL DELTA (No confía ciegamente en el stock que manda Godot)
+        # 🔥 FIX AAA: Límite estricto de ventas (Protección Anti-Abusos)
         if item.cantidad_vendida is not None:
+            if item.cantidad_vendida > 100: raise HTTPException(400, "Cantidad de venta sospechosa. Límite excedido.")
             cantidad_descontar = max(1, item.cantidad_vendida)
         else:
             nuevo_req = item.nuevo_stock if item.nuevo_stock is not None else stock_actual
             cantidad_descontar = max(0, stock_actual - nuevo_req)
 
-        if cantidad_descontar <= 0:
-            return {"status": "ok", "msg": "Sin cambios reales en stock"}
+        if cantidad_descontar <= 0: return {"status": "ok", "msg": "Sin cambios reales en stock"}
 
-        nuevo_stock_seguro = max(0, stock_actual - cantidad_descontar)
+        if cantidad_descontar > stock_actual:
+            raise HTTPException(status_code=400, detail=f"Stock insuficiente. Solicitado: {cantidad_descontar}, Disponible: {stock_actual}")
 
-        # 3. 🛡️ ACTUALIZAR STOCK EN DB
-        await async_db_execute(supabase.table("inventario").update({"stock": nuevo_stock_seguro}).eq("id", item_id_db))
+        nuevo_stock_seguro = stock_actual - cantidad_descontar
+        
+        res_update = await async_db_execute(
+            supabase.table("inventario").update({"stock": nuevo_stock_seguro})
+            .eq("id", item.id).eq("stock", stock_actual) 
+        )
+        
+        if not res_update.data:
+            raise HTTPException(status_code=409, detail="Colisión de concurrencia. Reintente.")
             
-        # 4. 🚀 REGISTRAR VENTA (Sumando el total correcto según cantidad vendida)
+        # 🔥 FIX AAA: Registro de Auditoría Avanzada con UUID
         ingreso_total = precio_venta * cantidad_descontar
+        transaccion_id = str(uuid.uuid4())
+        
+        # OJO: Asegúrate de que las columnas extra existan en tu tabla 'ventas' de Supabase
+        # Si no existen, quita las líneas de stock_anterior, stock_nuevo, cantidad y tx_uuid
+        # O idealmente, créalas en Supabase como pide el nivel AAA.
         await async_db_execute(supabase.table("ventas").insert({
             "vendedor_id": vid_str,
-            "articulo": item.nombre,
-            "consola": item.consola,
+            "articulo": nombre_real_db,
+            "consola": consola_real_db,
             "monto": ingreso_total,
+            "cantidad": cantidad_descontar,            # Nueva métrica AAA
+            "stock_anterior": stock_actual,            # Nueva métrica AAA
+            "stock_nuevo": nuevo_stock_seguro,         # Nueva métrica AAA
+            "tx_uuid": transaccion_id,                 # Trazabilidad AAA
             "created_at": datetime.now(timezone.utc).isoformat()
         }))
         
-        return {"status": "ok", "nuevo_stock": nuevo_stock_seguro}
+        return {"status": "ok", "nuevo_stock": nuevo_stock_seguro, "tx_id": transaccion_id}
     except HTTPException: raise
     except Exception as e:
-        logger.error(f"❌ Error al vender/actualizar stock: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al actualizar stock de manera segura")
+        logger.error(f"❌ Error Transaccional de Venta: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error crítico al procesar la venta.")
 
+# ==========================================================
+# 📊 ENDPOINTS DE COLUMNAS (CRM KANBAN)
+# ==========================================================
+# (Se mantienen los de la versión anterior que ya eran AAA)
 @app.post("/api/crear_columna")
 async def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        nombre_norm = limpiar_texto(datos.nombre).strip()
-        if not nombre_norm: raise HTTPException(400, "Nombre inválido.")
-        
-        # 🔥 FIX: Prevenir duplicados (rompe el Kanban visual en Godot)
-        res_check = await async_db_execute(supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', str(_sesion)).ilike('nombre_columna', nombre_norm))
+        nombre_seguro = sanitizar_nombre_columna(datos.nombre)
+        res_check = await async_db_execute(supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', str(_sesion)).ilike('nombre_columna', nombre_seguro))
         if res_check.data: raise HTTPException(400, "La columna ya existe.")
         
-        await async_db_execute(supabase.table('configuracion').insert({'vendedor_id': str(_sesion), 'nombre_columna': nombre_norm}))
+        await async_db_execute(supabase.table('configuracion').insert({'vendedor_id': str(_sesion), 'nombre_columna': nombre_seguro}))
         return {"status": "ok"}
     except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail="Error crear columna")
@@ -1428,18 +1505,22 @@ async def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_s
 async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
-        await async_db_execute(supabase.table('configuracion').update({'nombre_columna': datos.nuevo_nombre}).eq('vendedor_id', vid_str).eq('nombre_columna', datos.viejo_nombre))
-        await async_db_execute(supabase.table('prospectos').update({'columna': datos.nuevo_nombre}).eq('vendedor_id', vid_str).eq('columna', datos.viejo_nombre))
+        nuevo_seguro = sanitizar_nombre_columna(datos.nuevo_nombre)
+        viejo_seguro = limpiar_texto(datos.viejo_nombre)
+        if nuevo_seguro.lower() == viejo_seguro.lower(): return {"status": "ok"} 
+            
+        await async_db_execute(supabase.table('configuracion').update({'nombre_columna': nuevo_seguro}).eq('vendedor_id', vid_str).eq('nombre_columna', viejo_seguro))
+        await async_db_execute(supabase.table('prospectos').update({'columna': nuevo_seguro}).eq('vendedor_id', vid_str).eq('columna', viejo_seguro))
         return {"status": "ok"}
+    except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail="Error renombrar")
 
 @app.post("/api/borrar_columna")
 async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🔥 FIX CRÍTICO: Mueve los leads a una bandeja segura para que no se vuelvan "invisibles" en el CRM
-        await async_db_execute(supabase.table('prospectos').update({"columna": "Bandeja Nueva"}).eq('columna', datos.nombre).eq('vendedor_id', str(_sesion)))
-        
-        await async_db_execute(supabase.table('configuracion').delete().eq('vendedor_id', str(_sesion)).eq('nombre_columna', datos.nombre))
+        col_name = limpiar_texto(datos.nombre)
+        await async_db_execute(supabase.table('prospectos').update({"columna": "Bandeja Nueva"}).eq('columna', col_name).eq('vendedor_id', str(_sesion)))
+        await async_db_execute(supabase.table('configuracion').delete().eq('vendedor_id', str(_sesion)).eq('nombre_columna', col_name))
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail="Error borrar columna")
 
