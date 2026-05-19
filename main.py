@@ -17,6 +17,7 @@ import re
 import unicodedata
 import orjson
 import uuid
+import html
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,7 @@ import google.generativeai as genai
 from passlib.context import CryptContext
 from rapidfuzz import process, fuzz
 from cachetools import TTLCache
+from starlette.concurrency import run_in_threadpool
 
 load_dotenv()
 
@@ -90,6 +92,29 @@ rate_limit_global = []
 http_client: Optional[httpx.AsyncClient] = None
 mensajes_procesados_meta = set() # 🔥 FIX AAA: Idempotencia para Webhooks
 background_tasks_activas = set() # 🔥 FIX AAA: Tracking de Tareas
+
+import html
+
+# 🔥 CONFIGURACIÓN DE SEGURIDAD AVANZADA (AUDITORÍA BLOQUES 9 Y 10)
+LOGIN_RATE_LIMIT = TTLCache(maxsize=10000, ttl=300)
+RATE_LIMIT_MOBILE_OUTBOUND = TTLCache(maxsize=10000, ttl=60)
+rate_limit_login_lock = asyncio.Lock()
+rate_limit_mobile_lock = asyncio.Lock()
+
+def normalizar_telefono(tel: str) -> str:
+    """Standardizes phone numbers globally, correcting the Mexican mobile digit injection (521 -> 52)"""
+    if not tel: return ""
+    # Remover cualquier caracter no numérico
+    limpio = "".join(filter(str.isdigit, str(tel)))
+    
+    # Manejo específico para México (Meta envía 521, Godot/CRM puede enviar 52)
+    if limpio.startswith("521") and len(limpio) == 13:
+        limpio = "52" + limpio[3:]
+    elif limpio.startswith("52") and len(limpio) == 12:
+        pass
+    elif len(limpio) == 10:
+        limpio = "52" + limpio
+    return limpio
 
 # ==========================================================
 # 🛡️ 2. ESCUDO IA Y ARRANQUE DE APLICACIÓN
@@ -1087,29 +1112,63 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     return respuesta_final
 
 # ==========================================================
-# 🔐 9. AUTENTICACIÓN Y LOGIN B2B
+# 🔐 9. AUTENTICACIÓN Y LOGIN B2B (MIGRACIÓN COMPLETA Y RATE LIMIT HARDENING)
 # ==========================================================
+
 @app.post("/api/login")
-async def login_b2b(datos: LoginUpdate):
-    print(f"🔑 [LOGIN B2B] Intento de acceso: {datos.email}")
+async def login_b2b(datos: LoginUpdate, request: Request):
+    # 🔥 FIX AUDITORÍA: Extracción segura de la IP real detrás de Reverse Proxies (Render/Cloudflare)
+    ip_cliente = request.headers.get("x-forwarded-for", request.client.host)
+    ip_cliente = ip_cliente.split(",")[0].strip()
+    
+    email_normalizado = datos.email.lower().strip()
+    llave_limite = f"{ip_cliente}:{email_normalizado}"
+    
+    # 🛡️ CONTROL CONCURRENTE CONTRA FUERZA BRUTA
+    async with rate_limit_login_lock:
+        intentos_previos = LOGIN_RATE_LIMIT.get(llave_limite, 0)
+        if intentos_previos >= 5:
+            logger.warning(f"🔒 [ANTI-BRUTEFORCE] Acceso bloqueado preventivamente para IP/Email: {llave_limite}")
+            raise HTTPException(status_code=429, detail="Demasiados intentos de inicio de sesión. Cuenta bloqueada por 5 minutos.")
+
+    logger.info(f"🔑 [LOGIN] Procesando solicitud de autenticación para: {email_normalizado}")
     try:
-        res = await async_db_execute(supabase.table('usuarios_veltrix').select('*').eq('email', datos.email.lower()).limit(1))
-        if not res.data or len(res.data) == 0: return {"status": "error", "detalle": "Usuario no registrado."}
+        res = await async_db_execute(supabase.table('usuarios_veltrix').select('*').eq('email', email_normalizado).limit(1))
+        
+        # 🛡️ FIX AUDITORÍA: Respuesta genérica para mitigar vectores de enumeración de cuentas
+        if not res.data: 
+            async with rate_limit_login_lock:
+                LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1
+            raise HTTPException(status_code=401, detail="Credenciales inválidas.")
             
         usuario = res.data[0]
-        password_guardada = str(usuario.get('password', ''))
         
+        # Validación de estado administrativo de la cuenta
+        if usuario.get('estado', 'Activo') != 'Activo':
+            logger.warning(f"🚫 [LOGIN] Intento de ingreso a cuenta suspendida o inactiva: {email_normalizado}")
+            raise HTTPException(status_code=403, detail="Esta cuenta se encuentra suspendida o inactiva.")
+
+        password_guardada = str(usuario.get('password', ''))
         password_valida = False
+        
+        # Verificación criptográfica con migración transparente de texto plano a Bcrypt
         if not password_guardada.startswith('$2b$'):
+            logger.warning(f"⚠️ [MIGRACIÓN REQUERIDA] Contraseña plaintext detectada en base de datos para: {email_normalizado}")
             if datos.password == password_guardada:
-                nuevo_hash = pwd_context.hash(datos.password)
+                nuevo_hash = await run_in_threadpool(pwd_context.hash, datos.password)
                 await async_db_execute(supabase.table('usuarios_veltrix').update({"password": nuevo_hash}).eq('id', usuario['id']))
                 password_valida = True
         else:
-            password_valida = pwd_context.verify(datos.password, password_guardada)
+            # CPU-Bound Task delegada al Threadpool para mantener la fluidez del lazo asíncrono
+            password_valida = await run_in_threadpool(pwd_context.verify, datos.password, password_guardada)
             
-        if not password_valida: return {"status": "error", "detalle": "Contraseña incorrecta."}
+        if not password_valida: 
+            async with rate_limit_login_lock:
+                # El contador decrementa de forma inteligente ante fallas secuenciales, no se limpia completamente
+                LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1
+            raise HTTPException(status_code=401, detail="Credenciales inválidas.")
             
+        # Validación temporal de la pasarela de pagos / Suscripción activa
         suscripcion_valida = True
         fecha_pago_str = usuario.get('fecha_proximo_pago')
         if fecha_pago_str:
@@ -1118,11 +1177,27 @@ async def login_b2b(datos: LoginUpdate):
                 if date.today() > date.fromisoformat(fecha_pago_str):
                     suscripcion_valida = False
                     await async_db_execute(supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id']))
-            except ValueError: pass 
+            except ValueError: 
+                logger.error(f"❌ Formato de fecha de pago corrupto para el usuario {email_normalizado}")
+
+        # Remoción parcial/progresiva del castigo de intentos si la autenticación culmina con éxito
+        async with rate_limit_login_lock:
+            LOGIN_RATE_LIMIT[llave_limite] = max(0, intentos_previos - 1)
 
         vendedor_id = str(usuario.get('vendedor_id', 'V-001'))
-        token_jwt = crear_token_jwt(vendedor_id, usuario['email'])
-        print(f"✅ [LOGIN EXITO] Bienvenido {vendedor_id}")
+        ahora = datetime.now(timezone.utc)
+        
+        # 🔥 FIX AUDITORÍA: Re-estructuración completa del Payload JWT con claims iat y nbf
+        payload_jwt = {
+            "sub": vendedor_id,
+            "email": usuario['email'],
+            "jti": str(uuid.uuid4()),
+            "iat": ahora,
+            "nbf": ahora,
+            "exp": ahora + timedelta(days=1)
+        }
+        token_jwt = jwt.encode(payload_jwt, JWT_SECRET, algorithm="HS256")
+        logger.info(f"✅ [LOGIN EXITOSO] Vendedor autenticado: {vendedor_id}")
 
         return {
             "status": "ok",
@@ -1140,135 +1215,245 @@ async def login_b2b(datos: LoginUpdate):
             "nombre": usuario.get('nombre', 'Vendedor'),
             "rol": usuario.get('rol', 'vendedor')
         }
+    except HTTPException: raise
     except Exception as e:
-        logger.exception("❌ [LOGIN ERROR]")
-        raise HTTPException(status_code=500, detail="Error interno.")
+        logger.exception(f"❌ [LOGIN CRITICAL ERROR] Falla estructural: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor de acceso.")
+
 
 # ==========================================================
-# 🌐 10. RUTAS CRM Y MÓVIL (COMPLETAS Y RESTAURADAS)
+# 🌐 10. RUTAS CRM Y MÓVIL (DATA CLEANING & CONTRASTES DE ERROR UNIFORMES)
 # ==========================================================
+
 @app.get("/api/cargar_todo")
-async def cargar_todo(_sesion: str = Depends(verificar_sesion_b2b)):
+async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         columnas_izq = ["Bandeja Nueva", "Envios Masivos", "Con Descuento", "Requiere Asistencia"]
         columnas_der = ["Por Entregar", "Vendidos", "Papelera"]
+        
+        # Selección limpia de columnas específicas
         res_cols = await async_db_execute(supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', str(_sesion)))
         
+        # 🔥 FIX AUDITORÍA: Si no hay columnas personalizadas, devolvemos lista vacía y manejamos el "+" en la interfaz
         columnas_custom = [r['nombre_columna'] for r in (res_cols.data or []) if r['nombre_columna'].upper() not in [c.upper() for c in (columnas_izq + columnas_der)]]
-        if not columnas_custom: columnas_custom = ["+"]
         
-        res_prospectos = await async_db_execute(supabase.table('prospectos').select('*').eq('vendedor_id', str(_sesion)).order('ultima_interaccion_ia', desc=True).limit(500))
+        limit_seguro = min(limit, 300)
+        res_prospectos = await async_db_execute(
+            supabase.table('prospectos')
+            .select('id, nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas')
+            .eq('vendedor_id', str(_sesion))
+            .order('ultima_interaccion_ia', desc=True)
+            .range(offset, offset + limit_seguro - 1)
+        )
         
         ultimos = {}
-        for fila in sorted(res_prospectos.data or [], key=lambda x: (x.get('telefono') is None or x.get('telefono') == "")):
-            nombre = fila.get('nombre', 'Desconocido')
-            tel = fila.get('telefono')
-            if nombre not in ultimos or (tel and not ultimos[nombre].get('telefono')):
-                ultimos[nombre] = fila
+        # Ordenamiento defensivo aplicando normalización estricta sobre las claves telefónicas
+        for fila in (res_prospectos.data or []):
+            tel_norm = normalizar_telefono(fila.get('telefono', ''))
+            key_identificador = tel_norm if tel_norm else fila.get('nombre', 'Desconocido')
+            
+            if key_identificador not in ultimos:
+                ultimos[key_identificador] = fila
                 
         return {"columnas": columnas_izq + columnas_custom + columnas_der, "prospectos": list(ultimos.values())}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error conectando a Nube B2B")
+    except Exception as e:
+        logger.error(f"❌ Error en cargar_todo CRM: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al recuperar tarjetas del embudo.")
 
-# 🚀 RESTAURACIÓN: Endpoint de Perfil de Cliente
 @app.get("/api/perfil_cliente")
 async def obtener_perfil_cliente(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
     try:
-        res = await async_db_execute(supabase.table("prospectos").select("notas, etiquetas, columna, perfil_psicologico").eq("telefono", telefono).eq("vendedor_id", str(vendedor_id)))
+        tel_norm = normalizar_telefono(telefono)
+        if not tel_norm:
+            raise HTTPException(status_code=400, detail="Parámetro telefónico inválido.")
+            
+        res = await async_db_execute(
+            supabase.table("prospectos").select("id, notas, etiquetas, columna, perfil_psicologico")
+            .eq("telefono", tel_norm).eq("vendedor_id", str(vendedor_id)).limit(1)
+        )
         if res.data: return {"status": "ok", "datos": res.data[0]}
-        return {"status": "error", "datos": {}}
-    except Exception as e: return {"status": "error", "detail": str(e)}
+        raise HTTPException(status_code=404, detail="Prospecto no localizado.")
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error en perfil_cliente: {e}")
+        raise HTTPException(status_code=500, detail="Fallo interno en consulta de perfil.")
 
-# 🚀 RESTAURACIÓN: Endpoint de Columnas Activas
 @app.get("/api/columnas")
 async def obtener_columnas(vendedor_id: str = Depends(verificar_sesion_b2b)):
     try:
         res = await async_db_execute(supabase.table("configuracion").select("nombre_columna").eq("vendedor_id", str(vendedor_id)))
         return {"status": "ok", "columnas": [item["nombre_columna"] for item in (res.data or [])]}
-    except Exception as e: return {"status": "error", "detail": str(e)}
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail="Error al solicitar columnas configuradas.")
 
 @app.get("/api/mobile/chat_history")
-async def get_mobile_chat_history(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
+async def get_mobile_chat_history(telefono: str, limit: int = 50, offset: int = 0, vendedor_id: str = Depends(verificar_sesion_b2b)):
     try:
-        res = await async_db_execute(supabase.table("mensajes_chat").select("*").eq("vendedor_id", str(vendedor_id)).eq("telefono", telefono).order("created_at", desc=False))
+        tel_norm = normalizar_telefono(telefono)
+        if not tel_norm: return {"status": "ok", "historial": []}
+        
+        limit_seguro = min(limit, 100)
+        res = await async_db_execute(
+            supabase.table("mensajes_chat")
+            .select("mensaje, autor, created_at")
+            .eq("vendedor_id", str(vendedor_id))
+            .eq("telefono", tel_norm)
+            .order("created_at", desc=True) # Traemos los más recientes primero para paginar con scrolls
+            .range(offset, offset + limit_seguro - 1)
+        )
+        
         historial_formateado = []
-        for m in (res.data or []):
+        for m in reversed(res.data or []): # Invertimos para entregar orden pasado -> presente a Godot
             historial_formateado.append({
-                "contenido": str(m.get("mensaje") or m.get("contenido") or m.get("texto") or ""),
+                "contenido": str(m.get("mensaje") or ""),
                 "es_mio": str(m.get("autor", "")).upper() in ["BOT", "ASESOR", "HUMANO", "SISTEMA", "BOT_REMARKETING", "VENDEDOR"],
                 "fecha": str(m.get("created_at", ""))
             })
         return {"status": "ok", "historial": historial_formateado}
-    except Exception as e: return {"status": "error", "historial": []}
+    except Exception as e: 
+        logger.error(f"❌ Error chat_history: {e}")
+        raise HTTPException(status_code=500, detail="Error al recuperar logs de conversación.")
 
 @app.post("/api/mobile/send_message")
 async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Depends(verificar_sesion_b2b)):
+    tel_norm = normalizar_telefono(data.to)
+    if not tel_norm or not data.msg:
+        raise HTTPException(status_code=400, detail="Datos de envío incompletos o teléfono erróneo.")
+        
+    # 🛡️ FIX AUDITORÍA: Rate limit de salida por combinación de vendedor/destino (Anti-Spam / Meta Bans)
+    llave_outbound = f"{vendedor_id}:{tel_norm}"
+    async with rate_mobile_lock:
+        envios_recientes = RATE_LIMIT_MOBILE_OUTBOUND.get(llave_outbound, 0)
+        if envios_recientes > 10: # Límite de 10 mensajes por minuto al mismo número desde la app móvil
+            raise HTTPException(status_code=429, detail="Límite de envío masivo excedido para este canal. Espera un momento.")
+        RATE_LIMIT_MOBILE_OUTBOUND[llave_outbound] = envios_recientes + 1
+
     try:
-        res_conf = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('vendedor_id', str(vendedor_id)).limit(1))
-        if not res_conf.data: raise HTTPException(status_code=404, detail="Configuración no encontrada")
+        res_conf = await async_db_execute(supabase.table('configuracion_bot').select('meta_token, meta_phone_id').eq('vendedor_id', str(vendedor_id)).limit(1))
+        if not res_conf.data: raise HTTPException(status_code=404, detail="Configuración no encontrada para el canal.")
         config = res_conf.data[0]
-        await disparar_whatsapp_dinamico_async(data.to, data.msg, config.get('meta_token') or WHATSAPP_TOKEN, config.get('meta_phone_id') or WHATSAPP_PHONE_ID)
-        await guardar_mensaje_chat(data.to, str(vendedor_id), 'ASESOR', data.msg)
-        await actualizar_estado_crm(data.to, str(vendedor_id), "En Seguimiento", "azul", "")
+        
+        await disparar_whatsapp_dinamico_async(tel_norm, data.msg, config.get('meta_token') or WHATSAPP_TOKEN, config.get('meta_phone_id') or WHATSAPP_PHONE_ID)
+        await guardar_mensaje_chat(tel_norm, str(vendedor_id), 'ASESOR', data.msg)
+        await actualizar_estado_crm(tel_norm, str(vendedor_id), "En Seguimiento", "azul", "")
         return {"status": "ok", "message": "Enviado"}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error enviando WhatsApp")
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error de retransmisión manual: {e}")
+        raise HTTPException(status_code=500, detail="Fallo crítico al despachar WhatsApp.")
 
 @app.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
     try:
         hoy_inicio = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        total_hoy = 0.0
+        
+        # SQL aggregation / Cálculo de suma delegada a través del mapeo rápido
         ventas_res = await async_db_execute(supabase.table("ventas").select("monto").eq("vendedor_id", str(vendedor_id)).gte("created_at", hoy_inicio))
-        if ventas_res.data: total_hoy = sum(float(v.get("monto", 0)) for v in ventas_res.data)
+        total_hoy = sum(float(v.get("monto") or 0.0) for v in (ventas_res.data or []))
 
-        prospectos_res = await async_db_execute(supabase.table("prospectos").select("nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas").eq("vendedor_id", str(vendedor_id)).order("ultima_interaccion_ia", desc=True).limit(50))
-        return {"status": "ok", "vendedor": vendedor_id, "ventas_hoy": total_hoy, "prospectos": prospectos_res.data or []}
-    except Exception as e: return {"status": "error", "message": str(e), "prospectos": []}
+        prospectos_res = await async_db_execute(
+            supabase.table("prospectos")
+            .select("id, nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas")
+            .eq("vendedor_id", str(vendedor_id))
+            .order("ultima_interaccion_ia", desc=True)
+            .limit(50)
+        )
+        
+        # Sanitización de nulos al vuelo antes de inyectar al cliente móvil/Godot
+        prospectos_limpios = []
+        for p in (prospectos_res.data or []):
+            prospectos_limpios.append({
+                "id": p.get("id"),
+                "nombre": p.get("nombre") or "Cliente",
+                "telefono": normalizar_telefono(p.get("telefono", "")),
+                "columna": p.get("columna") or "Bandeja Nueva",
+                "ultima_interaccion_ia": p.get("ultima_interaccion_ia") or "",
+                "ultimo_msj": p.get("ultimo_msj") or "",
+                "notas": p.get("notas") or "",
+                "etiquetas": p.get("etiquetas") or ""
+            })
+            
+        return {"status": "ok", "vendedor": vendedor_id, "ventas_hoy": total_hoy, "prospectos": prospectos_limpios}
+    except Exception as e: 
+        logger.error(f"❌ Error en mobile_dashboard pipeline: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al compilar dashboard.")
 
 @app.post("/api/actualizar_estado")
 async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        query = supabase.table('prospectos').update({'columna': datos.nueva_columna}).eq('vendedor_id', str(_sesion))
-        query = query.eq('telefono', datos.telefono) if datos.telefono and datos.telefono != "Sin registrar" else query.eq('nombre', datos.nombre)
-        resultado = await async_db_execute(query)
+        tel_norm = normalizar_telefono(datos.telefono)
+        if not tel_norm:
+            raise HTTPException(status_code=400, detail="Identificador telefónico obligatorio para el movimiento.")
+            
+        col_segura = sanitizar_nombre_columna(datos.nueva_columna)
+        
+        resultado = await async_db_execute(
+            supabase.table('prospectos').update({'columna': col_segura})
+            .eq('vendedor_id', str(_sesion))
+            .eq('telefono', tel_norm)
+        )
         if resultado.data: return {"status": "ok"}
-        return {"status": "error", "mensaje": "No se encontró el registro"}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error actualizando tarjeta")
+        raise HTTPException(status_code=404, detail="No se encontró registro con los datos provistos.")
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error actualizando tarjeta: {e}")
+        raise HTTPException(status_code=500, detail="Fallo interno de actualización.")
 
 @app.post("/api/historial_chat")
 async def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        res_prospecto = await async_db_execute(supabase.table('prospectos').select('telefono').eq('nombre', datos.nombre).eq('vendedor_id', str(_sesion)))
-        tel_oficial = res_prospecto.data[0]['telefono'] if res_prospecto.data and res_prospecto.data[0].get('telefono') else ""
-        query = supabase.table('mensajes_chat').select('autor, mensaje').eq('vendedor_id', str(_sesion))
-        query = query.eq('telefono', tel_oficial) if tel_oficial else query.eq('nombre', datos.nombre) 
-        res = await async_db_execute(query.order('created_at', desc=False).limit(50))
-        return {"historial": [{"texto": f.get('mensaje', ''), "es_mio": f.get('autor', 'USER') != 'USER'} for f in (res.data or [])], "telefono_oficial": tel_oficial}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error en historial")
+        tel_norm = normalizar_telefono(datos.telefono)
+        if not tel_norm:
+            raise HTTPException(status_code=400, detail="Se requiere número telefónico válido para el historial clásico.")
+            
+        res = await async_db_execute(
+            supabase.table('mensajes_chat').select('autor, mensaje')
+            .eq('vendedor_id', str(_sesion))
+            .eq('telefono', tel_norm)
+            .order('created_at', desc=False)
+            .limit(50)
+        )
+        return {"historial": [{"texto": f.get('mensaje', ''), "es_mio": f.get('autor', 'USER') != 'USER'} for f in (res.data or [])], "telefono_oficial": tel_norm}
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error consultando historial clasico: {e}")
+        raise HTTPException(status_code=500, detail="Error en consulta histórica.")
 
 @app.post("/api/mover_prospecto")
 async def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        col_final = datos.nueva_columna if datos.nueva_columna else datos.columna
-        if datos.telefono and datos.telefono.lower() not in ["", "sin registrar", "null", "none"]:
-            await async_db_execute(supabase.table('prospectos').update({"columna": col_final}).eq('telefono', datos.telefono).eq('vendedor_id', str(_sesion)))
-        else:
-            await async_db_execute(supabase.table('prospectos').update({"columna": col_final}).eq('nombre', datos.nombre).eq('vendedor_id', str(_sesion)))
+        tel_norm = normalizar_telefono(datos.telefono)
+        if not tel_norm:
+            raise HTTPException(status_code=400, detail="Identificador telefónico obligatorio para desplazar tarjetas.")
+            
+        col_final = sanitizar_nombre_columna(datos.nueva_columna if datos.nueva_columna else datos.columna)
+        
+        await async_db_execute(supabase.table('prospectos').update({"columna": col_final}).eq('telefono', tel_norm).eq('vendedor_id', str(_sesion)))
         return {"status": "ok", "mensaje": f"Movido a {col_final}"}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error BD")
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(status_code=500, detail="Error transaccional al desplazar tarjeta.")
 
 @app.post("/api/actualizar_notas")
 async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        update_data = {"notas": datos.notas, "etiquetas": datos.etiquetas, "nombre": datos.nombre}
-        tel = str(datos.telefono).strip()
-        res = None
-        if tel and tel.lower() not in ["", "null", "sin registrar"]:
-            res = await async_db_execute(supabase.table('prospectos').update(update_data).eq('telefono', tel).eq('vendedor_id', str(_sesion)))
-        if not res or not res.data:
-            res = await async_db_execute(supabase.table('prospectos').update(update_data).eq('nombre', datos.nombre).eq('vendedor_id', str(_sesion)))
+        tel_norm = normalizar_telefono(datos.telefono)
+        if not tel_norm:
+            raise HTTPException(status_code=400, detail="Número telefónico obligatorio para adjuntar notas.")
+            
+        # 🔥 FIX AUDITORÍA: Sanitización estricta contra XSS almacenado en notas y etiquetas
+        notas_sanitizadas = html.escape(datos.notas) if datos.notas else ""
+        etiquetas_sanitizadas = html.escape(datos.etiquetas) if datos.etiquetas else ""
+        nombre_sanitizado = html.escape(datos.nombre) if datos.nombre else "Cliente"
+        
+        update_data = {"notas": notas_sanitizadas, "etiquetas": etiquetas_sanitizadas, "nombre": nombre_sanitizado}
+        res = await async_db_execute(supabase.table('prospectos').update(update_data).eq('telefono', tel_norm).eq('vendedor_id', str(_sesion)))
+        
         if res and res.data: return {"status": "ok", "mensaje": "Sincronización completa"}
-        return {"status": "error", "mensaje": "No se encontró el registro"}
-    except Exception as e: raise HTTPException(status_code=500, detail="Error interno")
+        raise HTTPException(status_code=404, detail="No se localizó la tarjeta para inyectar metadatos.")
+    except HTTPException: raise
+    except Exception as e: 
+        logger.error(f"❌ Error inyectando notas CRM: {e}")
+        raise HTTPException(status_code=500, detail="Error de servidor al sincronizar apuntes.")
 
 # ==========================================================
 # 📦 BLOQUE 11: INVENTARIO Y GESTIÓN DE COLUMNAS (AAA ENTERPRISE)
