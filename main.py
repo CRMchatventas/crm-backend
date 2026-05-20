@@ -585,10 +585,10 @@ def sanitizar_nombre_columna(columna: str) -> str:
     return bleach.clean(columna, tags=[], attributes={}, strip=True)[:50]
 
 async def actualizar_estado_crm(telefono: str, vendedor_id: str, columna: str, iluminacion: str, juego: str, perfil_ia: dict = None):
-    # 🛡️ FIX AAA: Sanitización de inyecciones en base de datos
+    # 🛡️ FIX AAA: Permitimos mover tarjetas a las bandejas reservadas
     payload = {
-        'columna': sanitizar_nombre_columna(columna), 
-        'estado_iluminacion': sanitizar_nombre_columna(iluminacion), 
+        'columna': sanitizar_nombre_columna(columna, permitir_reservadas=True), 
+        'estado_iluminacion': sanitizar_nombre_columna(iluminacion, permitir_reservadas=True), 
         'ultimo_juego_interes': bleach.clean(juego, tags=[], strip=True)[:100], 
         'ultima_interaccion_ia': datetime.now(timezone.utc).isoformat()
     }
@@ -1624,7 +1624,8 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
-        col_segura = sanitizar_nombre_columna(datos.nueva_columna)
+        # 🛡️ FIX AAA: Le decimos a la función que SÍ permita nombres reservados para el Drag & Drop
+        col_segura = sanitizar_nombre_columna(datos.nueva_columna, permitir_reservadas=True)
         
         resultado = await asyncio.wait_for(
             async_db_execute(
@@ -1717,9 +1718,9 @@ inventario_db_lock = asyncio.Lock()
 # 🛡️ 1. SEGURIDAD Y REGLAS DE NEGOCIO
 COLUMNAS_SISTEMA_RESERVADAS = {"requiere asistencia", "por entregar", "bandeja nueva", "envios masivos", "null", "undefined", "delete"}
 
-def sanitizar_nombre_columna(nombre: str) -> str:
+def sanitizar_nombre_columna(nombre: str, permitir_reservadas: bool = False) -> str:
     limpio = limpiar_texto(nombre).strip()
-    if limpio.lower() in COLUMNAS_SISTEMA_RESERVADAS:
+    if not permitir_reservadas and limpio.lower() in COLUMNAS_SISTEMA_RESERVADAS:
         raise HTTPException(400, "Nombre de columna reservado por el sistema. Elige otro.")
     return limpio
 
