@@ -264,6 +264,10 @@ class PrecioResponse(BaseModel):
     url_pc: str
     confidence_score: float
 
+class ReordenarColumnasAction(BaseModel):
+    columnas: list[str]
+    vendedor_id: str
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
 # ==========================================================
@@ -2054,6 +2058,20 @@ async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depend
     except Exception as e: 
         logger.error(f"❌ Error renombrar columna: {e}")
         raise HTTPException(status_code=500, detail="Error renombrar")
+
+@app.post("/api/reordenar_columnas")
+async def reordenar_columnas(datos: ReordenarColumnasAction, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        # Aquí va tu lógica de actualización en Supabase
+        await async_db_execute(
+            supabase.table('vendedores') # O la tabla donde guardes esto
+            .update({'columnas_ordenadas': datos.columnas})
+            .eq('id', datos.vendedor_id)
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Error en backend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/borrar_columna")
 async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b)):
