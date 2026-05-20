@@ -2062,13 +2062,23 @@ async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depend
 @app.post("/api/reordenar_columnas")
 async def reordenar_columnas(datos: ReordenarColumnasAction, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # Aquí va tu lógica de actualización en Supabase
-        await async_db_execute(
-            supabase.table('vendedores') # O la tabla donde guardes esto
-            .update({'columnas_ordenadas': datos.columnas})
-            .eq('id', datos.vendedor_id)
-        )
+        # 1. BORRAR: Eliminamos el orden viejo de este vendedor
+        supabase.table('configuracion').delete().eq('vendedor_id', datos.vendedor_id).execute()
+
+        # 2. PREPARAR: Armamos la lista de diccionarios en el orden exacto de Godot
+        filas_a_insertar = []
+        for nombre in datos.columnas:
+            filas_a_insertar.append({
+                "vendedor_id": datos.vendedor_id,
+                "nombre_columna": nombre
+            })
+
+        # 3. INSERTAR: Guardamos el nuevo orden de golpe
+        if filas_a_insertar:
+            supabase.table('configuracion').insert(filas_a_insertar).execute()
+
         return {"status": "ok"}
+        
     except Exception as e:
         print(f"Error en backend: {e}")
         raise HTTPException(status_code=500, detail=str(e))
