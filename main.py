@@ -184,41 +184,47 @@ def limpiar_texto(texto: str) -> str:
     texto = unicodedata.normalize("NFKC", str(texto).replace("\x00", ""))
     return re.sub(r"\s+", " ", texto).strip()[:MAX_MENSAJE_LEN]
 
-# ==========================================
-# 📦 3. MODELOS PYDANTIC
-# ==========================================
+# ==========================================================
+# 📦 3. MODELOS PYDANTIC (MULTI-TENANT & SAAS READY)
+# ==========================================================
 class InventarioItem(BaseModel):
     id: Optional[int] = None
+    id_catalogo: Optional[str] = ""
     nombre: str = Field(..., min_length=1, max_length=180)
-    consola: str = Field(..., min_length=1, max_length=80)
+    categoria: str = "General"
     precio: float = Field(..., ge=0)
     nuevo_precio: Optional[float] = None
     costo: float = Field(default=0.0, ge=0)
+    precio_sugerido: float = Field(default=0.0, ge=0)
+    precio_minimo_bot: float = Field(default=0.0, ge=0)
     stock: int = Field(default=1, ge=0)
     nuevo_stock: Optional[int] = None
     codigo_barras: str = ""
     url_portada: str = ""
     estado_general: str = "Bueno"
-    rareza: str = ""
-    vendedor_id: str = ""
-    tiene_caja: bool = False
-    tiene_manual: bool = False
-    es_portada_original: bool = False
     descripcion_detallada: str = ""
-    @field_validator("nombre", "consola", mode="before")
+    vendedor_id: str = ""
+    # 🚀 EL CORAZÓN DEL MULTI-GIRO: El contenedor JSONB
+    atributos_extra: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("nombre", mode="before")
     @classmethod
-    def validar_texto(cls, value: str): return limpiar_texto(value)
+    def validar_texto(cls, value: str): 
+        # Prevención en caso de que limpiar_texto esté definido más abajo
+        return limpiar_texto(value) if "limpiar_texto" in globals() else value.strip()
 
 class VentaItem(BaseModel): 
     id: Optional[int] = None
-    nombre: str
-    consola: str
+    # 🛡️ Alias: Si Godot manda "nombre", Python lo lee como "nombre_producto"
+    nombre_producto: str = Field(alias="nombre", default="") 
     estado_general: str = ""
     nuevo_stock: Optional[int] = None      
     cantidad_vendida: Optional[int] = None 
     vendedor_id: str = ""
+    atributos_extra: Dict[str, Any] = Field(default_factory=dict)
     
 class LoginUpdate(BaseModel): email: str; password: str
+
 class MobileMessageRequest(BaseModel): 
     to: str
     msg: str
@@ -237,6 +243,7 @@ class ColumnaUpdate(BaseModel): nombre: str = ""; telefono: str = ""; columna: s
 class ColumnaAction(BaseModel): nombre: str; vendedor_id: str = ""
 class RenombrarColumnaAction(BaseModel): viejo_nombre: str; nuevo_nombre: str; vendedor_id: str = ""
 class NotasUpdate(BaseModel): nombre: str = ""; telefono: str = ""; notas: str = ""; etiquetas: str = ""; vendedor_id: str = ""
+
 class EstadoUpdate(BaseModel): 
     nombre: str
     telefono: str = ""
@@ -245,7 +252,15 @@ class EstadoUpdate(BaseModel):
     @classmethod
     def validar_tel(cls, value: str): return normalizar_telefono(value)
 
-class NuevoArticulo(BaseModel): nombre: str; categoria: str = "General"; precio_compra: float = 0.0; precio: float = 0.0; stock: int = 1; vendedor_id: str = ""
+class NuevoArticulo(BaseModel): 
+    nombre: str 
+    categoria: str = "General" 
+    precio_compra: float = 0.0 
+    precio: float = 0.0 
+    stock: int = 1 
+    vendedor_id: str = ""
+    atributos_extra: Dict[str, Any] = Field(default_factory=dict)
+
 class PreciosDetalle(BaseModel):
     loose: float
     cib: float
@@ -260,9 +275,9 @@ class PrecioResponse(BaseModel):
     mxn_venta: PreciosDetalle
     usd: PreciosDetalle
     tipo_cambio: float
-    rareza: str
     url_pc: str
     confidence_score: float
+    atributos_extra: Dict[str, Any] = Field(default_factory=dict)
 
 class ReordenarColumnasAction(BaseModel):
     columnas: list[str]
@@ -326,14 +341,14 @@ async def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
         return True
 
 # ==========================================================
-# 🧠 5. CEREBRO IA GEMINI Y RAG (RUTEADOR)
+# 🧠 5. CEREBRO IA GEMINI Y RAG (RUTEADOR) SAAS ENTERPRISE
 # ==========================================================
 async def consultar_gemini_json(prompt: str, media_dict: dict = None, temperature: float = 0.2, retries: int = 2, vendedor_id: str = "V-001") -> dict:
     global gemini_bloqueado_hasta
     inicio_telemetria = now_ts()
     
     if now_ts() < gemini_bloqueado_hasta:
-        return {"respuesta": "En este momento estoy atendiendo a varios clientes, denme un momento. 🎮", "intencion": "HUMANO", "confidence": 1.0}
+        return {"respuesta": "En este momento estoy atendiendo a varios clientes, denme un momento. ⏳", "intencion": "HUMANO", "confidence": 1.0}
 
     # 🛡️ FIX AAA: Implementación de CACHE IA Real
     cache_key = generar_hash_cache(str(prompt), vendedor_id, temperature)
@@ -409,10 +424,13 @@ def validar_respuesta_ia(data: dict) -> dict:
     confidence = float(data.get("confidence", 1.0))
     if confidence < 0.60: intencion = "HUMANO" 
     
+    # 🚀 FIX SAAS: Retrocompatibilidad Semántica (juego_detectado -> producto_detectado)
+    producto = limpiar_texto(data.get("producto_detectado", data.get("juego_detectado", "")))
+    
     return {
         "intencion": intencion,
         "respuesta": limpiar_texto(data.get("respuesta", "Hola. Estoy revisando la información.")),
-        "juego_detectado": limpiar_texto(data.get("juego_detectado", "")),
+        "producto_detectado": producto, # Clave SaaS
         "emocion_cliente": str(data.get("emocion_cliente", "neutral")),
         "temperatura_lead": str(data.get("temperatura_lead", "frio")),
         "confidence": confidence,
@@ -435,8 +453,9 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         tracking_locks_uso[lock_id] = now_ts()
         async with locks_por_conversacion[lock_id]:
             logger.info(f"🔮 [CEREBRO IA] Iniciando análisis cognitivo para Vendedor: {vendedor_id}")
-            perfil_str = json.dumps(perfil_cliente_previo) if perfil_cliente_previo else "Cliente nuevo sin historial de consolas."
+            perfil_str = json.dumps(perfil_cliente_previo) if perfil_cliente_previo else "Cliente nuevo sin historial en el sistema."
 
+            # 🚀 PROMPT SAAS (Genérico e Inteligente)
             prompt_estructurado = [
                 {"role": "user", "parts": [f"""
 [SYSTEM INSTRUCTIONS]
@@ -446,7 +465,7 @@ PERSONALIDAD/TONO: {tono_ia}
 
 [MEMORIA A LARGO PLAZO - PERFIL DEL CLIENTE]
 {perfil_str}
-*DIRECTRICES*: Si el perfil ya cuenta con una "consola_preferida", prioriza ofrecer juegos de esa plataforma. Si no la tiene o está vacía, dedúcela basándote en lo que el cliente pida en su mensaje.
+*DIRECTRICES*: Si el perfil ya cuenta con una "categoria_preferida" (ej. PS4, Herramientas, Ropa deportiva), prioriza ofrecer productos de esa categoría. Si no la tiene o está vacía, dedúcela basándote en lo que el cliente pida en su mensaje.
 
 [RAG CONTEXT - INVENTARIO DISPONIBLE EN TIEMPO REAL]
 {inventario_contexto}
@@ -460,8 +479,8 @@ PERSONALIDAD/TONO: {tono_ia}
 🤖 TAREAS AUTÓNOMAS (TOOL CALLING INTEGRADO):
 1. Detecta la intención real (COMPRA, COTIZACION, REGATEO, GARANTIA, HUMANO, SALUDO, ENOJO).
 2. Determina la emoción dominante del lead y su temperatura comercial.
-3. Extrae de forma limpia el nombre del juego solicitado.
-4. Deduce o mantén la "consola_preferida" del usuario (PS5, PS4, Xbox, Nintendo Switch, etc).
+3. Extrae de forma limpia el nombre del PRODUCTO solicitado.
+4. Deduce o mantén la "categoria_preferida" del usuario (Ej. Consola de videojuegos, Talla, Marca, etc, dependiendo del giro comercial).
 5. REGLA DE NEGOCIO (TOOL): Si el cliente está en intención de REGATEO o expresa que el precio es muy elevado, tienes autorización exclusiva para aplicar una herramienta de descuento autónomo de hasta el 10% sobre el precio de lista. Si decides aplicarlo, cambia "accion_tool" a "aplicar_descuento" e inyecta el valor en "precio_oferta".
 
 Responde estrictamente en un formato JSON plano, válido y limpio:
@@ -470,8 +489,8 @@ Responde estrictamente en un formato JSON plano, válido y limpio:
   "respuesta": "Tu respuesta persuasiva, humana y orientada a cerrar la venta, mencionando precios si los tienes...",
   "emocion_cliente": "urgencia|enojo|duda|entusiasmo|neutral",
   "temperatura_lead": "frio|tibio|caliente",
-  "juego_detectado": "...",
-  "consola_preferida": "...",
+  "producto_detectado": "...",
+  "categoria_preferida": "...",
   "confidence": 0.95,
   "accion_tool": "ninguna|aplicar_descuento",
   "precio_oferta": 0.0
@@ -498,9 +517,9 @@ Responde estrictamente en un formato JSON plano, válido y limpio:
         logger.error(f"❌ [CEREBRO ERROR] Error en el flujo cognitivo de la IA: {str(e)}")
         return {
             "intencion": "HUMANO", 
-            "respuesta": "Hubo un micro-corte en mi sistema de datos. Un asesor humano revisará tu mensaje de inmediato. 🚀", 
+            "respuesta": "Hubo un micro-corte en mi sistema de datos. Un asesor humano revisará tu mensaje de inmediato. ⏳", 
             "confidence": 0.0,
-            "consola_preferida": "",
+            "categoria_preferida": "",
             "accion_tool": "ninguna",
             "precio_oferta": 0.0
         }
@@ -510,30 +529,35 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str =
     try:
         palabras_clave = limpiar_texto(texto_cliente).lower()
         
-        # 🛡️ FIX AAA: Prefiltro SQL en RAG (Evita Memory Kills en tenants gigantes)
-        query = supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0)
+        # 🚀 FIX SAAS: Extraemos atributos_extra en vez de consola estática
+        query = supabase.table('inventario').select('nombre, precio, stock, atributos_extra').eq('vendedor_id', str(vendedor_id)).gt('stock', 0)
         
         if palabras_clave and len(palabras_clave.strip()) >= 3:
-            # Prefiltramos por las primeras palabras fuertes si es posible para aligerar carga
             palabras = palabras_clave.split()
             if palabras:
                 query = query.ilike('nombre', f"%{palabras[0]}%")
                 
-        res_inv = await async_db_execute(query.limit(100)) # Limite duro escalable
+        res_inv = await async_db_execute(query.limit(100)) 
         
         if not res_inv.data:
-            logger.warning("⚠️ [RAG INVENTARIO] La base de datos del vendedor no tiene stock disponible (o el prefiltro falló).")
-            # Fallback a inventario general
-            res_inv = await async_db_execute(supabase.table('inventario').select('nombre, precio, stock, consola').eq('vendedor_id', str(vendedor_id)).gt('stock', 0).limit(50))
+            logger.warning("⚠️ [RAG INVENTARIO] La base de datos no tiene stock o el prefiltro falló.")
+            res_inv = await async_db_execute(supabase.table('inventario').select('nombre, precio, stock, atributos_extra').eq('vendedor_id', str(vendedor_id)).gt('stock', 0).limit(50))
             if not res_inv.data: return "Catálogo vacío o agotado en este momento."
 
         inventario = res_inv.data
 
-        if not palabras_clave or len(palabras_clave.strip()) < 3:
-            logger.info("📋 [RAG INVENTARIO] Mensaje corto detectado. Retornando top 10 general.")
-            return "\n".join([f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in inventario[:10]])
+        # Función Helper para extraer información vital del JSONB para el RAG
+        def _obtener_info_extra(item_db: dict) -> str:
+            extras = item_db.get('atributos_extra') or {}
+            # Si el negocio es de videojuegos, mostramos la consola. Si es otro, su primer atributo clave.
+            info_valiosa = extras.get('consola', extras.get('marca', extras.get('modelo', '')))
+            return f" ({info_valiosa})" if info_valiosa else ""
 
-        diccionario_opciones = {f"{i['nombre']} {i.get('consola','')}".strip().lower(): i for i in inventario}
+        if not palabras_clave or len(palabras_clave.strip()) < 3:
+            logger.info("📋 [RAG INVENTARIO] Mensaje corto. Retornando top 10 general.")
+            return "\n".join([f"- {i['nombre']}{_obtener_info_extra(i)} | Precio: ${i['precio']} | Disp: {i['stock']}" for i in inventario[:10]])
+
+        diccionario_opciones = {f"{i['nombre']} {_obtener_info_extra(i)}".strip().lower(): i for i in inventario}
         matches = process.extract(
             palabras_clave, 
             diccionario_opciones.keys(), 
@@ -546,10 +570,10 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str =
             if score > 20.0: items_filtrados.append(diccionario_opciones[match_str])
 
         if not items_filtrados:
-            logger.warning("⚠️ [RAG INVENTARIO] Ningún juego superó el filtro difuso. Activando Fallback de rescate.")
+            logger.warning("⚠️ [RAG INVENTARIO] Ningún producto superó el filtro difuso. Activando Fallback.")
             items_filtrados = inventario[:5]
 
-        lineas = [f"- {i['nombre']} ({i.get('consola','')}) | Precio: ${i['precio']} | Disp: {i['stock']}" for i in items_filtrados]
+        lineas = [f"- {i['nombre']}{_obtener_info_extra(i)} | Precio: ${i['precio']} | Disp: {i['stock']}" for i in items_filtrados]
         logger.info(f"✅ [RAG INVENTARIO] Bloque RAG construido con {len(lineas)} opciones relevantes.")
         return "\n".join(lineas)
 
@@ -580,7 +604,6 @@ async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
     except Exception as e:
         logger.error(f"❌ [HISTORIAL ERROR] Falló la lectura de logs de chat: {str(e)}")
         return "No se pudo recuperar el historial de chat."
-
 
 # ==========================================================
 # 🛠️ 6. FUNCIONES CORE: SCRAPER, ALERTAS, MEDIA Y COMUNICACIÓN
@@ -832,13 +855,15 @@ async def bucle_seguimiento_24h():
                 
                 config = res_conf.data[0]
                 try:
-                    contexto_inv = await obtener_contexto_inventario_rag(vendedor_id, p.get('ultimo_juego_interes', ''))
-                    oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), p.get('ultimo_juego_interes', 'videojuego'), contexto_inv)
+                    # 🚀 FIX SAAS: Transición de juego a producto general
+                    producto_interes = p.get('ultimo_producto_interes', p.get('ultimo_juego_interes', ''))
+                    contexto_inv = await obtener_contexto_inventario_rag(vendedor_id, producto_interes)
+                    oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), producto_interes if producto_interes else 'producto', contexto_inv)
                     
                     if oferta and oferta.get("mensaje_oferta"):
                         mensaje = oferta.get("mensaje_oferta")
                         await disparar_whatsapp_dinamico_async(p.get('telefono'), mensaje, config.get('meta_token') or WHATSAPP_TOKEN, config.get('meta_phone_id') or WHATSAPP_PHONE_ID)
-                        await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', p.get('ultimo_juego_interes'))
+                        await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', producto_interes)
                         await guardar_mensaje_chat(p.get('telefono'), vendedor_id, 'BOT_REMARKETING', mensaje)
                         
                         # 🛡️ FIX AAA: Incremento atómico del contador de remarketing
@@ -907,19 +932,20 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             respuesta_final = bleach.clean(respuesta_bruta, tags=[], strip=True)
             respuesta_final = limpiar_texto(respuesta_final)
 
-            juego_detectado = decision.get("juego_detectado", "")
-            consola_detectada = decision.get("consola_preferida", perfil_cliente_previo.get("consola_preferida", ""))
+            # 🚀 FIX SAAS: Actualización de llaves universales en la lógica de procesamiento
+            producto_detectado = decision.get("producto_detectado", decision.get("juego_detectado", ""))
+            categoria_detectada = decision.get("categoria_preferida", perfil_cliente_previo.get("categoria_preferida", perfil_cliente_previo.get("consola_preferida", "")))
             accion_tool = str(decision.get("accion_tool", "ninguna")).lower()
             precio_oferta = decision.get("precio_oferta", 0.0)
             
-            print(f"📊 [IA WORKFLOW] Diagnóstico - Intención: {intencion_ia} | Juego: {juego_detectado} | Plataforma: {consola_detectada}")
+            print(f"📊 [IA WORKFLOW] Diagnóstico - Intención: {intencion_ia} | Producto: {producto_detectado} | Categoría: {categoria_detectada}")
 
             perfil_cliente_actualizado = {
                 **perfil_cliente_previo, 
                 "emocion_actual": decision.get("emocion_cliente", "neutral"),
                 "temperatura": decision.get("temperatura_lead", "frio"),
-                "ultimo_interes": juego_detectado,
-                "consola_preferida": consola_detectada,
+                "ultimo_interes": producto_detectado,
+                "categoria_preferida": categoria_detectada,
                 "ultima_intencion": intencion_ia
             }
 
@@ -946,17 +972,18 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 
             elif intencion_ia == "PEDIDO_ESPECIAL":
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
-                print("📦 [IA WORKFLOW] Título no localizado físicamente. Registrando alerta de pedido especial...")
-                await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", f"Busca: {juego_detectado}", config)
+                print("📦 [IA WORKFLOW] Producto no localizado físicamente. Registrando alerta de pedido especial...")
+                await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", f"Busca: {producto_detectado}", config)
 
             print("💾 [IA WORKFLOW] Sincronizando metadatos de tarjeta y chat log en la nube...")
-            await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, juego_detectado, perfil_ia=perfil_cliente_actualizado)
+            # 🚀 FIX SAAS: Actualizamos enviando el producto_detectado en lugar de juego_detectado
+            await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_cliente_actualizado)
             await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
 
             url_imagen = None
-            if juego_detectado:
-                print(f"🖼️ [IA WORKFLOW] Rastreando enlace URL de portada para: '{juego_detectado}'")
-                res_img = await async_db_execute(supabase.table('inventario').select('url_portada').ilike('nombre', f'%{juego_detectado}%').eq('vendedor_id', str(vendedor_id)).neq('url_portada', '').limit(1))
+            if producto_detectado:
+                print(f"🖼️ [IA WORKFLOW] Rastreando enlace URL de portada para: '{producto_detectado}'")
+                res_img = await async_db_execute(supabase.table('inventario').select('url_portada').ilike('nombre', f'%{producto_detectado}%').eq('vendedor_id', str(vendedor_id)).neq('url_portada', '').limit(1))
                 if res_img.data: 
                     url_imagen = res_img.data[0].get('url_portada')
                     print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
@@ -1130,6 +1157,24 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     # 🛡️ FIX AAA: Protección contra requests con nombres maliciosamente largos
     nombre = limpiar_texto(nombre)[:120]
     
+    # 🚀 BYPASS SAAS MULTI-GIRO: Si no hay consola o no aplica, evitamos gastar recursos en PriceCharting
+    if not consola or consola.lower() in ["n/a", "general", "ninguna", "otro", ""]:
+        print(f"🔄 [BYPASS SAAS] El artículo '{nombre}' no es un videojuego. Omitiendo scraper.")
+        return {
+            "status": "bypass_saas",
+            "api_version": "v3",
+            "nombre_corregido": nombre,
+            "mxn": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_mercado": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "mxn_venta": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "usd": {"loose": 0.0, "cib": 0.0, "new": 0.0},
+            "tipo_cambio": await obtener_dolar_hoy_async(),
+            "rareza": rareza,
+            "url_pc": "",
+            "confidence_score": 100.0,
+            "atributos_extra": {}
+        }
+    
     print(f"\n🏷️ [RADAR ENTERPRISE] Buscando: '{nombre}' ({consola}) | Operador: {vendedor_id}")
     
     llave_cache = generar_cache_key(nombre, consola)
@@ -1161,7 +1206,8 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             "tipo_cambio": tipo_cambio,
             "rareza": rareza,
             "url_pc": url_search,
-            "confidence_score": 0.0
+            "confidence_score": 0.0,
+            "atributos_extra": {}
         }
         
     soup = BeautifulSoup(html_search, 'html.parser')
@@ -1246,9 +1292,10 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
             "mxn_mercado": {"loose": 0.0, "cib": 0.0, "new": 0.0},
             "mxn_venta": {"loose": 0.0, "cib": 0.0, "new": 0.0}, 
             "usd": {"loose": 0.0, "cib": 0.0, "new": 0.0},
-            "rareza": "Manual",
+            "rareza": rareza,
             "url_pc": url_final_godot,
-            "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0
+            "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0,
+            "atributos_extra": {}
         }
         await guardar_precio_cache(llave_cache, respuesta_fallida)
         return respuesta_fallida
@@ -1282,7 +1329,8 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
         "tipo_cambio": tipo_cambio,
         "rareza": rareza,
         "url_pc": url_final_godot,
-        "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0
+        "confidence_score": round(mejor_candidato["score"], 2) if candidatos else 0.0,
+        "atributos_extra": {}
     }
     
     await guardar_precio_cache(llave_cache, respuesta_final)
@@ -1745,35 +1793,39 @@ async def crear_inventario(datos: NuevoArticulo, background_tasks: BackgroundTas
 
         vid_str = str(_sesion)
         
-        # 🔥 FIX AAA: Separación semántica de categoría y consola
+        # 🔥 FIX AAA: Separación semántica Multi-Giro
         categoria_limpia = limpiar_texto(datos.categoria) 
-        consola_limpia = categoria_limpia # Mantenemos retrocompatibilidad si Godot manda categoría como consola
+        # Extraemos la consola del JSONB si existe (para retrocompatibilidad con videojuegos)
+        consola_limpia = datos.atributos_extra.get("consola", categoria_limpia)
         
-        # 🛡️ FIX AAA: DB Timeout
+        # 🛡️ FIX AAA: Búsqueda de duplicados universal
         res_check = await asyncio.wait_for(
             async_db_execute(
-                supabase.table('inventario').select('id')
+                supabase.table('inventario').select('id, atributos_extra')
                 .eq('vendedor_id', vid_str)
                 .ilike('nombre', nombre_limpio)
-                .ilike('consola', consola_limpia)
-                .limit(1)
+                .limit(10) # Traemos coincidencias de nombre para filtrar en RAM
             ),
             timeout=10.0
         )
         
         if res_check.data:
-            raise HTTPException(400, "Este título ya existe en esta plataforma para tu inventario.")
+            for r in res_check.data:
+                # Si el artículo tiene exactamente el mismo nombre y las mismas características, es duplicado
+                if r.get('atributos_extra', {}).get('consola', '').lower() == consola_limpia.lower():
+                    raise HTTPException(400, "Este artículo ya existe en tu inventario con esas características.")
 
+        # 🚀 INSERCIÓN SAAS (Adiós columnas estáticas, hola JSONB)
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario').insert({
                     'vendedor_id': vid_str, 
                     'nombre': nombre_limpio, 
                     'categoria': categoria_limpia, 
-                    'consola': consola_limpia, 
                     'precio_compra': datos.precio_compra, 
                     'precio': datos.precio, 
-                    'stock': datos.stock
+                    'stock': datos.stock,
+                    'atributos_extra': datos.atributos_extra # Todo el ADN del negocio va aquí
                 })
             ),
             timeout=10.0
@@ -1799,10 +1851,11 @@ async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = De
         offset_seguro = max(0, offset)
         limit_seguro = min(limit, 100) 
         
+        # 📥 LECTURA SAAS: Pedimos el JSONB en vez de columnas sueltas
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario')
-                .select("id, nombre, consola, precio, precio_compra, stock, url_portada, estado_general, rareza")
+                .select("id, nombre, categoria, precio, precio_compra, stock, url_portada, estado_general, atributos_extra")
                 .eq('vendedor_id', str(_sesion))
                 .order('id', desc=True)
                 .range(offset_seguro, offset_seguro + limit_seguro - 1)
@@ -1812,16 +1865,20 @@ async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = De
         
         inventario_limpio = []
         for row in (res.data or []):
+            extras = row.get("atributos_extra") or {}
             inventario_limpio.append({
                 "id": row.get("id"),
                 "nombre": html.escape(row.get("nombre") or ""),
-                "consola": html.escape(row.get("consola") or ""),
                 "precio": float(row.get("precio") or 0.0),
                 "precio_compra": float(row.get("precio_compra") or 0.0),
                 "stock": int(row.get("stock") or 0),
                 "url_portada": row.get("url_portada") or "",
                 "estado_general": row.get("estado_general") or "Bueno",
-                "rareza": row.get("rareza") or "comun"
+                "categoria": row.get("categoria") or "General",
+                # Plan de contingencia para Godot: Desempaquetamos los atributos comunes al primer nivel visual
+                "consola": html.escape(extras.get("consola", "")),
+                "rareza": extras.get("rareza", "comun"),
+                "atributos_extra": extras
             })
             
         return {"status": "ok", "inventario": inventario_limpio}
@@ -1841,17 +1898,23 @@ async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
         stock_final = max(0, int(item.nuevo_stock if hasattr(item, 'nuevo_stock') and item.nuevo_stock is not None else item.stock))
 
         res_old = await asyncio.wait_for(
-            async_db_execute(supabase.table("inventario").select("nombre, consola").eq("id", item.id).eq("vendedor_id", vid_str).limit(1)),
+            async_db_execute(supabase.table("inventario").select("nombre, atributos_extra").eq("id", item.id).eq("vendedor_id", vid_str).limit(1)),
             timeout=5.0
         )
         
         nombre_anterior = res_old.data[0].get("nombre", "") if res_old.data else ""
-        consola_anterior = res_old.data[0].get("consola", "") if res_old.data else ""
+        consola_anterior = res_old.data[0].get("atributos_extra", {}).get("consola", "") if res_old.data else ""
 
+        # 🚀 UPDATE SAAS: Inyectamos el objeto JSONB completo
         await asyncio.wait_for(
             async_db_execute(
                 supabase.table("inventario")
-                .update({"nombre": nombre_limpio, "precio": precio_final, "stock": stock_final, "consola": limpiar_texto(item.consola)})
+                .update({
+                    "nombre": nombre_limpio, 
+                    "precio": precio_final, 
+                    "stock": stock_final, 
+                    "atributos_extra": item.atributos_extra
+                })
                 .eq("id", item.id).eq("vendedor_id", vid_str)
             ),
             timeout=10.0
@@ -1860,7 +1923,7 @@ async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
         # 🔥 Invalidación Doble de Caché AAA
         async with cache_lock:
             if nombre_anterior: cache_precios_ram.pop(generar_cache_key(nombre_anterior, consola_anterior), None)
-            cache_precios_ram.pop(generar_cache_key(nombre_limpio, item.consola), None)
+            cache_precios_ram.pop(generar_cache_key(nombre_limpio, item.atributos_extra.get("consola", "")), None)
 
         return {"status": "ok"}
     except HTTPException: raise
@@ -1882,7 +1945,7 @@ async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario')
-                .select('id, nombre, consola, precio, stock, url_portada')
+                .select('id, nombre, precio, stock, url_portada, atributos_extra')
                 .eq('vendedor_id', str(_sesion))
                 .ilike('nombre', f'%{q_limpio}%')
                 .limit(25)
@@ -1891,6 +1954,10 @@ async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b)):
         )
         
         resultados = res.data or []
+        # Fallback de seguridad visual para Godot
+        for r in resultados:
+            r['consola'] = r.get('atributos_extra', {}).get('consola', '')
+            
         cache_busquedas_maestro[llave_busqueda] = resultados
         return {"status": "ok", "resultados": resultados}
     except Exception as e: 
@@ -1904,7 +1971,7 @@ async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
         
         # 🛡️ FIX AAA: Recuperamos metadata antes de borrar para limpiar caché
         res_old = await asyncio.wait_for(
-            async_db_execute(supabase.table("inventario").select("nombre, consola").eq("id", item.id).eq("vendedor_id", str(_sesion)).limit(1)),
+            async_db_execute(supabase.table("inventario").select("nombre, atributos_extra").eq("id", item.id).eq("vendedor_id", str(_sesion)).limit(1)),
             timeout=5.0
         )
         
@@ -1916,7 +1983,7 @@ async def borrar_item(item: InventarioItem, _sesion: str = Depends(verificar_ses
         # 🛡️ FIX AAA: Limpieza de RAM
         if res_old.data:
             async with cache_lock:
-                cache_precios_ram.pop(generar_cache_key(res_old.data[0].get("nombre", ""), res_old.data[0].get("consola", "")), None)
+                cache_precios_ram.pop(generar_cache_key(res_old.data[0].get("nombre", ""), res_old.data[0].get("atributos_extra", {}).get("consola", "")), None)
 
         return {"status": "ok"}
     except HTTPException: raise
@@ -1940,19 +2007,18 @@ async def actualizar_stock(item: VentaItem, request: Request, _sesion: str = Dep
 
         res_inv = await asyncio.wait_for(
             async_db_execute(
-                supabase.table("inventario").select("id, nombre, consola, precio, stock")
+                supabase.table("inventario").select("id, nombre, precio, stock, atributos_extra")
                 .eq("id", item.id).eq("vendedor_id", vid_str).limit(1)
             ),
             timeout=10.0
         )
         
-        if not res_inv.data: raise HTTPException(status_code=404, detail="Juego no localizado.")
+        if not res_inv.data: raise HTTPException(status_code=404, detail="Artículo no localizado.")
             
         db_item = res_inv.data[0]
         stock_actual = int(db_item.get("stock", 0))
         precio_venta = float(db_item.get("precio", 0.0))
-        nombre_real_db = db_item.get("nombre", item.nombre)
-        consola_real_db = db_item.get("consola", item.consola)
+        nombre_real_db = db_item.get("nombre", item.nombre_producto)
 
         if item.cantidad_vendida is not None:
             if item.cantidad_vendida > 100: raise HTTPException(400, "Cantidad de venta sospechosa. Límite excedido.")
@@ -1983,12 +2049,12 @@ async def actualizar_stock(item: VentaItem, request: Request, _sesion: str = Dep
         ingreso_total = precio_venta * cantidad_descontar
         transaccion_id = str(uuid.uuid4())
         
+        # 🚀 FIX MIGRACIÓN SAAS: Insertamos en la tabla de ventas limpia
         await asyncio.wait_for(
             async_db_execute(
                 supabase.table("ventas").insert({
                     "vendedor_id": vid_str,
-                    "articulo": nombre_real_db,
-                    "consola": consola_real_db,
+                    "nombre_producto": nombre_real_db, # <- El nuevo nombre de columna de la migración SQL
                     "monto": ingreso_total,
                     "cantidad": cantidad_descontar,
                     "stock_anterior": stock_actual,
