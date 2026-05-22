@@ -2240,6 +2240,12 @@ async def actualizar_estado_cita(datos: EstadoCita, _sesion: str = Depends(verif
         print(f"❌ Error en actualizar_estado: {e}")
         raise HTTPException(status_code=500, detail="Error al actualizar estado")
 
+@app.post("/api/borrar_cita")
+async def borrar_cita(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
+    cita_id = datos.get("cita_id")
+    supabase.table('citas').delete().eq('id', cita_id).eq('vendedor_id', str(_sesion)).execute()
+    return {"status": "ok"}
+
 # ==========================================================
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
 # ==========================================================
