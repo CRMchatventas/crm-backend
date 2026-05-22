@@ -296,6 +296,12 @@ class EstadoCita(BaseModel):
     cita_id: int
     nuevo_estado: str
 
+class NuevaPublicacion(BaseModel):
+    id_inventario: int
+    titulo: str
+    descripcion: str
+    precio: float
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
 # ==========================================================
@@ -2245,6 +2251,26 @@ async def borrar_cita(datos: dict, _sesion: str = Depends(verificar_sesion_b2b))
     cita_id = datos.get("cita_id")
     supabase.table('citas').delete().eq('id', cita_id).eq('vendedor_id', str(_sesion)).execute()
     return {"status": "ok"}
+
+# ==========================================================
+# ⚙️ 11.6 CREACION DE PUBLICACIONES
+# ==========================================================
+# --- ENDPOINTS DE PUBLICACIONES ---
+
+@app.post("/api/crear_publicacion")
+async def crear_publicacion(datos: NuevaPublicacion, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = supabase.table('publicaciones').insert({
+            'vendedor_id': str(_sesion),
+            'inventario_id': datos.id_inventario,
+            'titulo': datos.titulo,
+            'descripcion': datos.descripcion,
+            'precio_publicado': datos.precio,
+            'estado': 'activa'
+        }).execute()
+        return {"status": "ok", "pub_id": res.data[0]['id']}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================================
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
