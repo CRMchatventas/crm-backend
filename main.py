@@ -283,6 +283,19 @@ class ReordenarColumnasAction(BaseModel):
     columnas: list[str]
     vendedor_id: str
 
+# --- MODELOS DE DATOS ---
+class NuevaCita(BaseModel):
+    cliente_nombre: str
+    cliente_telefono: str
+    concepto: str
+    fecha_inicio: str  # Formato ISO: "2026-05-21T15:30:00"
+    duracion_min: int = 30
+    atributos_extra: dict = {}
+
+class EstadoCita(BaseModel):
+    cita_id: int
+    nuevo_estado: str
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
 # ==========================================================
@@ -2171,6 +2184,61 @@ async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_
     except Exception as e: 
         logger.error(f"❌ Error borrar columna: {e}")
         raise HTTPException(status_code=500, detail="Error borrar columna")
+
+# ==========================================================
+# ⚙️ 11.5 CITAS
+# ==========================================================
+# --- ENDPOINTS DE CITAS ---
+
+@app.post("/api/crear_cita")
+async def crear_cita(datos: NuevaCita, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        # Calcular fecha fin
+        inicio_dt = datetime.fromisoformat(datos.fecha_inicio)
+        fin_dt = inicio_dt + timedelta(minutes=datos.duracion_min)
+        
+        # Insertar en Supabase
+        res = supabase.table('citas').insert({
+            'vendedor_id': str(_sesion),
+            'cliente_nombre': datos.cliente_nombre,
+            'cliente_telefono': datos.cliente_telefono,
+            'concepto': datos.concepto,
+            'fecha_inicio': inicio_dt.isoformat(),
+            'fecha_fin': fin_dt.isoformat(),
+            'estado': 'pendiente',
+            'atributos_extra': datos.atributos_extra
+        }).execute()
+        
+        return {"status": "ok", "cita_id": res.data[0]['id']}
+    except Exception as e:
+        print(f"❌ Error en crear_cita: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar la cita")
+
+@app.get("/api/cargar_citas")
+async def cargar_citas(_sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        res = supabase.table('citas')\
+            .select('*')\
+            .eq('vendedor_id', str(_sesion))\
+            .order('fecha_inicio', desc=False)\
+            .execute()
+        return {"status": "ok", "citas": res.data}
+    except Exception as e:
+        print(f"❌ Error en cargar_citas: {e}")
+        raise HTTPException(status_code=500, detail="Error al listar citas")
+
+@app.post("/api/actualizar_estado_cita")
+async def actualizar_estado_cita(datos: EstadoCita, _sesion: str = Depends(verificar_sesion_b2b)):
+    try:
+        supabase.table('citas')\
+            .update({'estado': datos.nuevo_estado})\
+            .eq('id', datos.cita_id)\
+            .eq('vendedor_id', str(_sesion))\
+            .execute()
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"❌ Error en actualizar_estado: {e}")
+        raise HTTPException(status_code=500, detail="Error al actualizar estado")
 
 # ==========================================================
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
