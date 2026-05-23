@@ -632,10 +632,11 @@ def sanitizar_nombre_columna(columna: str) -> str:
 
 async def actualizar_estado_crm(telefono: str, vendedor_id: str, columna: str, iluminacion: str, juego: str, perfil_ia: dict = None):
     # 🛡️ FIX AAA: Permitimos mover tarjetas a las bandejas reservadas
+    # 🚀 FIX SAAS: Actualizamos el nombre de la columna para que empate con Supabase ('ultimo_producto_interes')
     payload = {
         'columna': sanitizar_nombre_columna(columna, permitir_reservadas=True), 
         'estado_iluminacion': sanitizar_nombre_columna(iluminacion, permitir_reservadas=True), 
-        'ultimo_juego_interes': bleach.clean(juego, tags=[], strip=True)[:100], 
+        'ultimo_producto_interes': bleach.clean(juego, tags=[], strip=True)[:100], 
         'ultima_interaccion_ia': datetime.now(timezone.utc).isoformat()
     }
     if perfil_ia: payload['perfil_psicologico'] = perfil_ia
