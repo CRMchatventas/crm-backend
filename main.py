@@ -2272,6 +2272,17 @@ async def crear_publicacion(datos: NuevaPublicacion, _sesion: str = Depends(veri
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/listar_publicaciones")
+async def listar_publicaciones(_sesion: str = Depends(verificar_sesion_b2b)):
+    print(f"📢 [API] Solicitando publicaciones para el vendedor: {_sesion}")
+    try:
+        # Traemos solo las publicaciones del vendedor que inició sesión
+        res = supabase.table('publicaciones').select('*').eq('vendedor_id', str(_sesion)).order('id', desc=True).execute()
+        return {"publicaciones": res.data}
+    except Exception as e:
+        print(f"❌ [API ERROR] Fallo al listar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==========================================================
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
 # ==========================================================
