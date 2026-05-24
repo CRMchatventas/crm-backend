@@ -2300,23 +2300,29 @@ async def ejecutar_campana_masiva(datos: dict, _sesion: str = Depends(verificar_
     print(f"📢 [API DEBUG] Buscando prospectos en columna: '{columna}' para {vendedor_id}")
     
     try:
-        # 1. Obtener prospectos
-        res = supabase.table('prospectos').select('telefono, nombre').eq('vendedor_id', vendedor_id).eq('columna', columna).execute()
+        # 1. Obtener prospectos con buscador tolerante (ilike + comodines %)
+        # Esto ignora espacios extra y diferencias de mayúsculas/minúsculas.
+        res = supabase.table('prospectos') \
+            .select('telefono, nombre') \
+            .eq('vendedor_id', vendedor_id) \
+            .ilike('columna', f'%{columna}%') \
+            .execute()
+        
         prospectos = res.data
         print(f"🔍 [API DEBUG] Prospectos encontrados: {len(prospectos)}")
         
         if not prospectos:
-            return {"status": "error", "message": "No se encontraron prospectos"}
+            return {"status": "error", "message": "No se encontraron prospectos (Verifica el nombre de la columna en la BD)"}
 
-        # 2. Obtener config
+        # 2. Obtener config del bot
         res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).single().execute()
         config = res_conf.data
         
-        # 3. Disparar mensajes con LOGS internos
+        # 3. Disparar mensajes
         for p in prospectos:
-            print(f"🚀 [API DEBUG] Intentando enviar a: {p['nombre']} - {p['telefono']}")
+            print(f"🚀 [API DEBUG] Intentando enviar a: {p.get('nombre', 'Sin Nombre')} - {p['telefono']}")
             
-            # Aquí es donde ocurre la magia (o el fallo silencioso)
+            # Envío de WhatsApp
             resultado = await disparar_whatsapp_dinamico_async(
                 p['telefono'], 
                 datos.get("mensaje"), 
@@ -2326,7 +2332,7 @@ async def ejecutar_campana_masiva(datos: dict, _sesion: str = Depends(verificar_
             
             print(f"✅ [API DEBUG] Resultado envío a {p['telefono']}: {resultado}")
             
-            # Guardar en chat
+            # Guardar registro en chat
             await guardar_mensaje_chat(p['telefono'], vendedor_id, 'BOT_MASIVO', datos.get("mensaje"))
             
         return {"status": "ok", "enviados": len(prospectos)}
