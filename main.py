@@ -1933,46 +1933,83 @@ async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = De
         raise HTTPException(status_code=500, detail="Error carga de inventario")
 
 @app.post("/api/editar_item_visor")
-async def editar_item(item: InventarioItem, _sesion: str = Depends(verificar_sesion_b2b)):
+async def editar_item(item: InventarioItemUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
         vid_str = str(_sesion)
         if not item.id:
             raise HTTPException(400, "ID Requerido. Operación cancelada.")
 
-        nombre_limpio = limpiar_texto(item.nombre)
-        precio_final = max(0.0, float(item.nuevo_precio if hasattr(item, 'nuevo_precio') and item.nuevo_precio is not None else item.precio))
-        stock_final = max(0, int(item.nuevo_stock if hasattr(item, 'nuevo_stock') and item.nuevo_stock is not None else item.stock))
+        # 1. Extraer SOLO lo que Godot mandó explícitamente (Ignora todo lo demás)
+        datos_nuevos = item.model_dump(exclude_unset=True, exclude={"id"})
 
+        # 2. Rescatar datos antiguos de la BD (Para la caché y para proteger el JSONB)
         res_old = await asyncio.wait_for(
             async_db_execute(supabase.table("inventario").select("nombre, atributos_extra").eq("id", item.id).eq("vendedor_id", vid_str).limit(1)),
             timeout=5.0
         )
         
         nombre_anterior = res_old.data[0].get("nombre", "") if res_old.data else ""
-        consola_anterior = res_old.data[0].get("atributos_extra", {}).get("consola", "") if res_old.data else ""
+        atributos_anteriores = res_old.data[0].get("atributos_extra", {}) if res_old.data else {}
+        if not isinstance(atributos_anteriores, dict): atributos_anteriores = {}
+        consola_anterior = atributos_anteriores.get("consola", "")
 
-        # 🚀 UPDATE SAAS: Inyectamos el objeto JSONB completo
+        # 3. Construir el Payload de Actualización Dinámico
+        payload_update = {}
+
+        # Limpieza de Nombre (si fue enviado)
+        if "nombre" in datos_nuevos and datos_nuevos["nombre"]:
+            payload_update["nombre"] = limpiar_texto(datos_nuevos["nombre"]) if "limpiar_texto" in globals() else datos_nuevos["nombre"].strip()
+
+        # Determinar Precio Final (Prioriza 'nuevo_precio', luego 'precio')
+        if "nuevo_precio" in datos_nuevos and datos_nuevos["nuevo_precio"] is not None:
+            payload_update["precio"] = max(0.0, float(datos_nuevos["nuevo_precio"]))
+        elif "precio" in datos_nuevos:
+            payload_update["precio"] = max(0.0, float(datos_nuevos["precio"]))
+
+        # Determinar Stock Final (Prioriza 'nuevo_stock', luego 'stock')
+        if "nuevo_stock" in datos_nuevos and datos_nuevos["nuevo_stock"] is not None:
+            payload_update["stock"] = max(0, int(datos_nuevos["nuevo_stock"]))
+        elif "stock" in datos_nuevos:
+            payload_update["stock"] = max(0, int(datos_nuevos["stock"]))
+
+        # 🚀 FUSIÓN SAAS DEL JSONB: Protegemos la consola y propiedades previas
+        atributos_fusionados = atributos_anteriores.copy()
+        
+        # Si vienen atributos nuevos directos, los combinamos
+        if "atributos_extra" in datos_nuevos and isinstance(datos_nuevos["atributos_extra"], dict):
+            atributos_fusionados.update(datos_nuevos["atributos_extra"])
+            
+        # Si Godot mandó "consola" suelta, la inyectamos a los atributos
+        if "consola" in datos_nuevos:
+            atributos_fusionados["consola"] = datos_nuevos["consola"]
+
+        payload_update["atributos_extra"] = atributos_fusionados
+
+        if not payload_update:
+            return {"status": "ok", "mensaje": "Nada detectado para actualizar."}
+
+        # 🚀 UPDATE SAAS: Inyectamos exclusivamente los campos procesados
         await asyncio.wait_for(
             async_db_execute(
                 supabase.table("inventario")
-                .update({
-                    "nombre": nombre_limpio, 
-                    "precio": precio_final, 
-                    "stock": stock_final, 
-                    "atributos_extra": item.atributos_extra
-                })
+                .update(payload_update)
                 .eq("id", item.id).eq("vendedor_id", vid_str)
             ),
             timeout=10.0
         )
         
         # 🔥 Invalidación Doble de Caché AAA
+        nombre_final = payload_update.get("nombre", nombre_anterior)
+        consola_final = payload_update.get("atributos_extra", {}).get("consola", consola_anterior)
+
         async with cache_lock:
-            if nombre_anterior: cache_precios_ram.pop(generar_cache_key(nombre_anterior, consola_anterior), None)
-            cache_precios_ram.pop(generar_cache_key(nombre_limpio, item.atributos_extra.get("consola", "")), None)
+            if nombre_anterior: 
+                cache_precios_ram.pop(generar_cache_key(nombre_anterior, consola_anterior), None)
+            cache_precios_ram.pop(generar_cache_key(nombre_final, consola_final), None)
 
         return {"status": "ok"}
-    except HTTPException: raise
+    except HTTPException: 
+        raise
     except Exception as e: 
         logger.error(f"❌ Error editar item: {e}")
         raise HTTPException(status_code=500, detail="Error editar item")
