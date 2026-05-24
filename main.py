@@ -187,6 +187,10 @@ def limpiar_texto(texto: str) -> str:
 # ==========================================================
 # 📦 3. MODELOS PYDANTIC (MULTI-TENANT & SAAS READY)
 # ==========================================================
+# -------------------------------------------------------------------
+#         📦 1. CLASE PARA ALTAS (Crear productos nuevos)
+# Requiere validaciones estrictas y rellena con defaults.
+# -------------------------------------------------------------------
 class InventarioItem(BaseModel):
     id: Optional[int] = None
     id_catalogo: Optional[str] = ""
@@ -213,6 +217,24 @@ class InventarioItem(BaseModel):
         # Prevención en caso de que limpiar_texto esté definido más abajo
         return limpiar_texto(value) if "limpiar_texto" in globals() else value.strip()
 
+
+# -------------------------------------------------------------------
+#         🛠️ 2. CLASE PARA EDICIÓN (Fix del Borrado Fantasma)
+# Todo es Optional. Así FastAPI solo lee lo que Godot realmente manda.
+# -------------------------------------------------------------------
+class InventarioItemUpdate(BaseModel):
+    id: int # Único campo obligatorio para saber qué fila editar
+    nombre: Optional[str] = None
+    consola: Optional[str] = None # Mapeamos "consola" que viene de Godot
+    categoria: Optional[str] = None
+    precio: Optional[float] = Field(default=None, ge=0)
+    stock: Optional[int] = Field(default=None, ge=0)
+    # Puedes agregar más campos que quieras editar después, siempre como Optional...
+
+
+# -------------------------------------------------------------------
+#         💰 3. CLASE PARA VENTAS
+# -------------------------------------------------------------------
 class VentaItem(BaseModel): 
     id: Optional[int] = None
     # 🛡️ Alias: Si Godot manda "nombre", Python lo lee como "nombre_producto"
