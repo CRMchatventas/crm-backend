@@ -302,6 +302,10 @@ class NuevaPublicacion(BaseModel):
     descripcion: str
     precio: float
 
+class CampanaMasiva(BaseModel):
+    mensaje: str
+    columna_origen: str
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
 # ==========================================================
@@ -2282,6 +2286,45 @@ async def listar_publicaciones(_sesion: str = Depends(verificar_sesion_b2b)):
         return {"publicaciones": res.data}
     except Exception as e:
         print(f"❌ [API ERROR] Fallo al listar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================================
+# ⚙️ 11.6 ENVIOS MASIVOS
+# ==========================================================
+
+@app.post("/api/mensaje_masivo")
+async def ejecutar_campana_masiva(datos: CampanaMasiva, _sesion: str = Depends(verificar_sesion_b2b)):
+    vendedor_id = str(_sesion)
+    print(f"📢 [API] Iniciando campaña masiva para {vendedor_id} en columna: {datos.columna_origen}")
+    
+    try:
+        # 1. Obtener prospectos de esa columna
+        res = supabase.table('prospectos').select('telefono, nombre').eq('vendedor_id', vendedor_id).eq('columna', datos.columna_origen).execute()
+        prospectos = res.data
+        
+        # 2. Obtener configuración del bot para los tokens
+        res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).single().execute()
+        config = res_conf.data
+        
+        if not prospectos:
+            return {"status": "error", "message": "No hay prospectos en esa columna"}
+
+        # 3. Disparar los mensajes
+        # Usamos tu función existente que ya definiste en el bloque 6 anterior
+        for p in prospectos:
+            await disparar_whatsapp_dinamico_async(
+                p['telefono'], 
+                datos.mensaje, 
+                config['meta_token'], 
+                config['meta_phone_id']
+            )
+            # Guardamos registro en chat
+            await guardar_mensaje_chat(p['telefono'], vendedor_id, 'BOT_MASIVO', datos.mensaje)
+            
+        return {"status": "ok", "enviados": len(prospectos)}
+        
+    except Exception as e:
+        print(f"❌ [API ERROR] Fallo en campaña: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================================
