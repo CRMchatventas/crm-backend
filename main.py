@@ -2289,44 +2289,52 @@ async def listar_publicaciones(_sesion: str = Depends(verificar_sesion_b2b)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================================
-# ⚙️ 11.6 ENVIOS MASIVOS
+# ⚙️ 11.7 ENVIOS MASIVOS
 # ==========================================================
 
 @app.post("/api/mensaje_masivo")
-async def ejecutar_campana_masiva(datos: CampanaMasiva, _sesion: str = Depends(verificar_sesion_b2b)):
+async def ejecutar_campana_masiva(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     vendedor_id = str(_sesion)
-    print(f"📢 [API] Iniciando campaña masiva para {vendedor_id} en columna: {datos.columna_origen}")
+    columna = datos.get("columna_origen")
+    
+    print(f"📢 [API DEBUG] Buscando prospectos en columna: '{columna}' para {vendedor_id}")
     
     try:
-        # 1. Obtener prospectos de esa columna
-        res = supabase.table('prospectos').select('telefono, nombre').eq('vendedor_id', vendedor_id).eq('columna', datos.columna_origen).execute()
+        # 1. Obtener prospectos
+        res = supabase.table('prospectos').select('telefono, nombre').eq('vendedor_id', vendedor_id).eq('columna', columna).execute()
         prospectos = res.data
+        print(f"🔍 [API DEBUG] Prospectos encontrados: {len(prospectos)}")
         
-        # 2. Obtener configuración del bot para los tokens
+        if not prospectos:
+            return {"status": "error", "message": "No se encontraron prospectos"}
+
+        # 2. Obtener config
         res_conf = supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).single().execute()
         config = res_conf.data
         
-        if not prospectos:
-            return {"status": "error", "message": "No hay prospectos en esa columna"}
-
-        # 3. Disparar los mensajes
-        # Usamos tu función existente que ya definiste en el bloque 6 anterior
+        # 3. Disparar mensajes con LOGS internos
         for p in prospectos:
-            await disparar_whatsapp_dinamico_async(
+            print(f"🚀 [API DEBUG] Intentando enviar a: {p['nombre']} - {p['telefono']}")
+            
+            # Aquí es donde ocurre la magia (o el fallo silencioso)
+            resultado = await disparar_whatsapp_dinamico_async(
                 p['telefono'], 
-                datos.mensaje, 
+                datos.get("mensaje"), 
                 config['meta_token'], 
                 config['meta_phone_id']
             )
-            # Guardamos registro en chat
-            await guardar_mensaje_chat(p['telefono'], vendedor_id, 'BOT_MASIVO', datos.mensaje)
+            
+            print(f"✅ [API DEBUG] Resultado envío a {p['telefono']}: {resultado}")
+            
+            # Guardar en chat
+            await guardar_mensaje_chat(p['telefono'], vendedor_id, 'BOT_MASIVO', datos.get("mensaje"))
             
         return {"status": "ok", "enviados": len(prospectos)}
         
     except Exception as e:
-        print(f"❌ [API ERROR] Fallo en campaña: {e}")
+        print(f"❌ [API CRITICAL] Fallo en ejecución: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 # ==========================================================
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
 # ==========================================================
