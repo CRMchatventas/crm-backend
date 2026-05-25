@@ -1982,7 +1982,7 @@ async def editar_item(item: InventarioItemUpdate, _sesion: str = Depends(verific
         # Si Godot mandó "consola" suelta, la inyectamos a los atributos
         if "consola" in datos_nuevos:
             atributos_fusionados["consola"] = datos_nuevos["consola"]
-
+            payload_update["categoria"] = datos_nuevos["consola"]
         payload_update["atributos_extra"] = atributos_fusionados
 
         if not payload_update:
