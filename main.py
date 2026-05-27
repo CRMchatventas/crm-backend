@@ -2698,7 +2698,7 @@ async def api_generar_copy_imagen(datos: PeticionCopy):
     
     try:
         # Usamos el modelo Flash de Gemini: ultra rápido para no hacer esperar a Godot
-        modelo = genai.GenerativeModel('gemini-pro')
+        modelo = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt_maestro = f"""
         Eres un experto copywriter de videojuegos físicos. Tu objetivo es vender en Marketplace.
