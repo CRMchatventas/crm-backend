@@ -1901,11 +1901,12 @@ async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = De
         offset_seguro = max(0, offset)
         limit_seguro = min(limit, 100) 
         
-        # 📥 LECTURA SAAS: Pedimos el JSONB en vez de columnas sueltas
+        # 📥 LECTURA SAAS: Pedimos el JSONB y agregamos id_catalogo a la petición
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario')
-                .select("id, nombre, categoria, precio, precio_compra, stock, url_portada, estado_general, atributos_extra")
+                # 👇 SE AGREGÓ id_catalogo AL FINAL DEL SELECT 👇
+                .select("id, nombre, categoria, precio, precio_compra, stock, url_portada, estado_general, atributos_extra, id_catalogo")
                 .eq('vendedor_id', str(_sesion))
                 .order('id', desc=True)
                 .range(offset_seguro, offset_seguro + limit_seguro - 1)
@@ -1918,6 +1919,8 @@ async def cargar_inventario(offset: int = 0, limit: int = 100, _sesion: str = De
             extras = row.get("atributos_extra") or {}
             inventario_limpio.append({
                 "id": row.get("id"),
+                # 👇 SE EMPAQUETA EL ID_CATALOGO PARA ENVIARLO A GODOT 👇
+                "id_catalogo": int(row.get("id_catalogo") or 0), 
                 "nombre": html.escape(row.get("nombre") or ""),
                 "precio": float(row.get("precio") or 0.0),
                 "precio_compra": float(row.get("precio_compra") or 0.0),
