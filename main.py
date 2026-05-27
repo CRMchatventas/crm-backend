@@ -817,92 +817,84 @@ async def obtener_html_escalonado_async_portadas(url_objetivo: str) -> str:
     return ""
 
 async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_juego: str, consola: str):
+    RAWG_API_KEY = "7762b63e3ae74e85bfb9a8f2c4f501db"
+    url_publica = None
+    
+    # =====================================================================
+    # ESTRATEGIA 1: RAWG API (Prioridad Alta)
+    # =====================================================================
     try:
-        consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
-        query = f"{nombre_juego} {consola_web}".replace(" ", "+")
-        url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
+        logger.info(f"🌐 [RAWG] Buscando en API oficial: {nombre_juego}")
+        url_search = f"https://api.rawg.io/api/games?key={RAWG_API_KEY}&search={urllib.parse.quote(nombre_juego)}&page_size=1"
+        res_rawg = await http_client.get(url_search, timeout=10.0)
         
-        html_search = await obtener_html_escalonado_async_portadas(url_search)
-        if not html_search: return
-        
-        soup = BeautifulSoup(html_search, 'html.parser')
-        img_tag = soup.find('img', class_='product_image') or soup.find('img', alt=lambda x: x and nombre_juego.lower() in x.lower())
-        if not img_tag or not img_tag.get('src'): return
-        
-        imagen_url = img_tag['src']
-        if not imagen_url.startswith("http"):
-            imagen_url = "https:" + imagen_url if imagen_url.startswith("//") else "https://www.pricecharting.com" + imagen_url
-            
-        res_img = await http_client.get(imagen_url, timeout=15.0)
-        if res_img.status_code != 200: return
-        
-        # 🛡️ FIX AAA: Compresión de imágenes para ahorrar Storage
-        from PIL import Image
-        import io
-        img_buffer = io.BytesIO(res_img.content)
-        img = Image.open(img_buffer)
-        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-        out_buffer = io.BytesIO()
-        img.save(out_buffer, format="JPEG", quality=80, optimize=True)
-        img_comprimida = out_buffer.getvalue()
-        
-        hash_img = hashlib.sha256(img_comprimida).hexdigest()[:10]
-        nombre_archivo = f"{consola.replace(' ', '_')}_{nombre_juego.replace(' ', '_')}_{hash_img}.jpg"
-        
-        # 🛡️ FIX AAA: Manejo de Race Conditions (Duplicidad) en Supabase Upload
+        if res_rawg.status_code == 200:
+            datos_json = res_rawg.json()
+            if datos_json.get("results") and datos_json["results"][0].get("background_image"):
+                imagen_url = datos_json["results"][0]["background_image"]
+                url_publica = await procesar_y_subir_imagen(imagen_url, consola, nombre_juego)
+    except Exception as e:
+        logger.warning(f"⚠️ [RAWG] Falló, intentando Plan B (PriceCharting): {e}")
+
+    # =====================================================================
+    # ESTRATEGIA 2: PRICECHARTING (Plan B / Legacy)
+    # =====================================================================
+    if not url_publica:
         try:
-            await async_db_execute(supabase.storage.from_("portadas").upload(nombre_archivo, img_comprimida, {"content-type": "image/jpeg"}))
-        except Exception as e_upload:
-            if "Duplicate" not in str(e_upload): raise
+            logger.info(f"🌐 [SCRAPER] Buscando en PriceCharting: {nombre_juego}")
+            consola_web = consola.replace("Xbox Clasico", "Xbox").replace("GameBoy Advance", "GBA").replace("GameBoy Color", "GBC")
+            query = f"{nombre_juego} {consola_web}".replace(" ", "+")
+            url_search = f"https://www.pricecharting.com/search-products?q={query}&type=videogames"
             
-        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
-        
-        # =====================================================================
-        # 🔥 NUEVO MOTOR DE PERSISTENCIA: CATÁLOGO MAESTRO + INVENTARIO
-        # =====================================================================
-        id_catalogo_final = None
-        
+            html_search = await obtener_html_escalonado_async_portadas(url_search)
+            if html_search:
+                soup = BeautifulSoup(html_search, 'html.parser')
+                img_tag = soup.find('img', class_='product_image')
+                if img_tag and img_tag.get('src'):
+                    imagen_url = img_tag['src']
+                    if not imagen_url.startswith("http"):
+                        imagen_url = ("https:" if imagen_url.startswith("//") else "https://www.pricecharting.com") + imagen_url
+                    url_publica = await procesar_y_subir_imagen(imagen_url, consola, nombre_juego)
+        except Exception as e:
+            logger.error(f"⚠️ [SCRAPER] Error crítico Plan B: {e}")
+
+    # =====================================================================
+    # MOTOR DE PERSISTENCIA (Si logramos obtener url_publica)
+    # =====================================================================
+    if url_publica:
         try:
-            # 1. Revisamos si el juego ya existe en el catálogo maestro
-            res_cat = await async_db_execute(
-                supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_juego).limit(1)
-            )
+            res_cat = await async_db_execute(supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_juego).limit(1))
             
             if res_cat.data and len(res_cat.data) > 0:
-                # El juego ya existe en el catálogo, solo le actualizamos la portada
                 id_catalogo_final = res_cat.data[0]['id']
-                await async_db_execute(
-                    supabase.table('catalogo_maestro').update({'url_portada_oficial': url_publica}).eq('id', id_catalogo_final)
-                )
+                await async_db_execute(supabase.table('catalogo_maestro').update({'url_portada_oficial': url_publica}).eq('id', id_catalogo_final))
             else:
-                # El juego NO existe en el catálogo, lo creamos desde cero
-                nuevo_registro = {
-                    'nombre': nombre_juego,
-                    'consola': consola,
-                    'url_portada_oficial': url_publica
-                }
-                res_insert = await async_db_execute(
-                    supabase.table('catalogo_maestro').insert(nuevo_registro)
-                )
-                if res_insert.data:
-                    id_catalogo_final = res_insert.data[0]['id']
-                    
-            # 2. Actualizamos el inventario con la foto Y el ID relacional
-            update_inventario = {"url_portada": url_publica}
-            if id_catalogo_final:
-                update_inventario["id_catalogo"] = id_catalogo_final
-                
-            await async_db_execute(
-                supabase.table('inventario').update(update_inventario).eq('id', juego_id_supabase)
-            )
+                res_insert = await async_db_execute(supabase.table('catalogo_maestro').insert({'nombre': nombre_juego, 'consola': consola, 'url_portada_oficial': url_publica}))
+                id_catalogo_final = res_insert.data[0]['id'] if res_insert.data else None
             
-            logger.info(f"✅ [CORE] Portada guardada en Catálogo (ID: {id_catalogo_final}) y enlazada al Inventario: {nombre_juego}")
-            
-        except Exception as e_db:
-            logger.error(f"⚠️ Error enlazando base de datos: {e_db}")
+            update_data = {"url_portada": url_publica}
+            if id_catalogo_final: update_data["id_catalogo"] = id_catalogo_final
+            await async_db_execute(supabase.table('inventario').update(update_data).eq('id', juego_id_supabase))
+            logger.info(f"✅ [CORE] Portada vinculada exitosamente: {nombre_juego}")
+        except Exception as e:
+            logger.error(f"⚠️ Error escribiendo DB: {e}")
 
-    except Exception as e: 
-        logger.error(f"⚠️ Error cazando portada: {e}")
+# Función auxiliar para no repetir código de procesamiento
+async def procesar_y_subir_imagen(url: str, consola: str, nombre: str) -> str:
+    res_img = await http_client.get(url, timeout=15.0)
+    if res_img.status_code != 200: return None
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(res_img.content)).convert("RGB")
+    out_buffer = io.BytesIO()
+    img.save(out_buffer, format="JPEG", quality=80, optimize=True)
+    img_bytes = out_buffer.getvalue()
+    hash_img = hashlib.sha256(img_bytes).hexdigest()[:10]
+    nombre_archivo = f"{consola.replace(' ', '_')}_{nombre.replace(' ', '_')}_{hash_img}.jpg"
+    try:
+        await async_db_execute(supabase.storage.from_("portadas").upload(nombre_archivo, img_bytes, {"content-type": "image/jpeg"}))
+    except: pass
+    return supabase.storage.from_("portadas").get_public_url(nombre_archivo)
 
 # ==========================================================
 # ⏰ 7. WATCHDOG B2B Y FLUJO PRINCIPAL IA (AAA ENTERPRISE)
