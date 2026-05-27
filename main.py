@@ -328,6 +328,10 @@ class CampanaMasiva(BaseModel):
     mensaje: str
     columna_origen: str
 
+class PeticionCopy(BaseModel):
+    juego: str
+    prompt_interno: str
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD
 # ==========================================================
@@ -2683,6 +2687,53 @@ async def recibir_mensajes(request: Request):
         return {"status": "error", "reason": str(e)}
 
 app.include_router(router)
+
+# ==============================================================================
+#  13 🤖 MÓDULO IA VELTRIX: GENERADOR DE COPY COMERCIAL AAA
+# ==============================================================================
+
+@app.post("/api/generar_copy_imagen")
+async def api_generar_copy_imagen(datos: PeticionCopy):
+    print(f"✨ [IA] Generando copy comercial AAA para: {datos.juego}")
+    
+    try:
+        # Usamos el modelo Flash de Gemini: ultra rápido para no hacer esperar a Godot
+        modelo = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt_maestro = f"""
+        Eres un experto copywriter de videojuegos físicos. Tu objetivo es vender en Marketplace.
+        Genera un texto vendedor ultra-persuasivo para este juego: {datos.juego}
+        
+        Reglas estrictas de Veltrix Engine:
+        1. Devuelve ÚNICAMENTE un objeto JSON válido, sin formato Markdown (NO uses ```json).
+        2. El JSON debe tener exactamente dos llaves: "titulo_generado" y "estado_generado".
+        3. "titulo_generado": Debe ser un título llamativo, en MAYÚSCULAS, MÁXIMO 4 palabras. Ej: "¡GOD OF WAR REMATADO!"
+        4. "estado_generado": Debe incluir emojis y texto comercial corto. Para hacerlo muy realista y local, sugiere entregas en puntos clave como Altaria, San Pancho o punto a convenir. Ej: "🔥 ENTREGA INMEDIATA | ESTADO 10/10 | ENTREGAS EN ALTARIA"
+        """
+        
+        # Ejecutamos la petición asíncrona a la IA
+        respuesta = await modelo.generate_content_async(prompt_maestro)
+        texto_ia = respuesta.text.strip()
+        
+        # 🛡️ BLINDAJE AAA: Limpieza por si Gemini se pone terco y devuelve markdown
+        if texto_ia.startswith("```json"):
+            texto_ia = texto_ia.replace("```json", "").replace("```", "").strip()
+        elif texto_ia.startswith("```"):
+            texto_ia = texto_ia.replace("```", "").strip()
+            
+        json_ia = json.loads(texto_ia)
+        
+        print(f"✅ [IA] Copy generado exitosamente para {datos.juego}")
+        return json_ia
+        
+    except Exception as e:
+        print(f"❌ [IA ERROR] Fallo al generar copy: {str(e)}")
+        
+        # 🛡️ FALLBACK DE SEGURIDAD: Nunca dejamos que Godot reciba un error vacío
+        return {
+            "titulo_generado": f"¡{datos.juego.upper()}!",
+            "estado_generado": "🔥 DISPONIBLE AHORA | EXCELENTE ESTADO | PUNTO A CONVENIR"
+        }
 
 if __name__ == "__main__":
     import uvicorn
