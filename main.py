@@ -1076,11 +1076,37 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
 
             url_imagen = None
             if producto_detectado:
-                print(f"🖼️ [IA WORKFLOW] Rastreando enlace URL de portada para: '{producto_detectado}'")
-                res_img = await async_db_execute(supabase.table('inventario').select('url_portada').ilike('nombre', f'%{producto_detectado}%').eq('vendedor_id', str(vendedor_id)).neq('url_portada', '').limit(1))
-                if res_img.data: 
-                    url_imagen = res_img.data[0].get('url_portada')
-                    print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
+                print(f"🖼️ [IA WORKFLOW] Rastreando inventario para: '{producto_detectado}'")
+                
+                # 🔥 FIX AAA: Buscamos el juego tenga o no tenga portada
+                res_juego = await async_db_execute(
+                    supabase.table('inventario')
+                    .select('id, url_portada, atributos_extra')
+                    .ilike('nombre', f'%{producto_detectado}%')
+                    .eq('vendedor_id', str(vendedor_id))
+                    .limit(1)
+                )
+                
+                if res_juego.data: 
+                    datos_juego = res_juego.data[0]
+                    url_imagen = datos_juego.get('url_portada')
+                    
+                    if url_imagen:
+                        print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
+                    else:
+                        print(f"⚠️ [IA WORKFLOW] Juego sin foto. Disparando cacería en background para: {producto_detectado}")
+                        juego_id_inventario = str(datos_juego.get('id'))
+                        consola_del_juego = datos_juego.get('atributos_extra', {}).get('consola', categoria_detectada)
+                        
+                        # 🚀 DISPARO EN BACKGROUND: No bloquea el bot, el cliente recibe su texto al instante
+                        import asyncio
+                        asyncio.create_task(
+                            cazar_portada_y_guardar_background(
+                                juego_id_supabase=juego_id_inventario,
+                                nombre_juego=producto_detectado,
+                                consola=consola_del_juego
+                            )
+                        )
 
             if url_imagen: 
                 print("📡 [IA WORKFLOW] Despachando paquete de mensajería enriquecida (IMAGEN + TEXTO)...")
