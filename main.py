@@ -896,6 +896,21 @@ async def procesar_y_subir_imagen(url: str, consola: str, nombre: str) -> str:
     except: pass
     return supabase.storage.from_("portadas").get_public_url(nombre_archivo)
 
+@app.post("/api/solicitar_portada")
+async def solicitar_portada(payload: dict, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b)):
+    # payload espera: {"juego_id": 1493, "nombre": "Bloodborne", "consola": "PS4"}
+    juego_id = payload.get("juego_id")
+    nombre = payload.get("nombre")
+    consola = payload.get("consola")
+    
+    if not juego_id or not nombre:
+        raise HTTPException(status_code=400, detail="Datos incompletos")
+        
+    # Disparamos la misma función que usa el bot de WhatsApp
+    background_tasks.add_task(cazar_portada_y_guardar_background, str(juego_id), nombre, consola)
+    
+    return {"status": "searching", "message": "Tarea de cacería iniciada"}
+
 # ==========================================================
 # ⏰ 7. WATCHDOG B2B Y FLUJO PRINCIPAL IA (AAA ENTERPRISE)
 # ==========================================================
