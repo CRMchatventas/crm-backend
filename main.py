@@ -856,9 +856,53 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
             if "Duplicate" not in str(e_upload): raise
             
         url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
-        await async_db_execute(supabase.table('inventario').update({"url_portada": url_publica}).eq('id', juego_id_supabase))
-        logger.info(f"🖼️ [PORTADA] Descargada, comprimida y linkeada: {nombre_juego}")
-    except Exception as e: logger.error(f"⚠️ Error cazando portada: {e}")
+        
+        # =====================================================================
+        # 🔥 NUEVO MOTOR DE PERSISTENCIA: CATÁLOGO MAESTRO + INVENTARIO
+        # =====================================================================
+        id_catalogo_final = None
+        
+        try:
+            # 1. Revisamos si el juego ya existe en el catálogo maestro
+            res_cat = await async_db_execute(
+                supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_juego).limit(1)
+            )
+            
+            if res_cat.data and len(res_cat.data) > 0:
+                # El juego ya existe en el catálogo, solo le actualizamos la portada
+                id_catalogo_final = res_cat.data[0]['id']
+                await async_db_execute(
+                    supabase.table('catalogo_maestro').update({'url_portada_oficial': url_publica}).eq('id', id_catalogo_final)
+                )
+            else:
+                # El juego NO existe en el catálogo, lo creamos desde cero
+                nuevo_registro = {
+                    'nombre': nombre_juego,
+                    'consola': consola,
+                    'url_portada_oficial': url_publica
+                }
+                res_insert = await async_db_execute(
+                    supabase.table('catalogo_maestro').insert(nuevo_registro)
+                )
+                if res_insert.data:
+                    id_catalogo_final = res_insert.data[0]['id']
+                    
+            # 2. Actualizamos el inventario con la foto Y el ID relacional
+            update_inventario = {"url_portada": url_publica}
+            if id_catalogo_final:
+                update_inventario["id_catalogo"] = id_catalogo_final
+                
+            await async_db_execute(
+                supabase.table('inventario').update(update_inventario).eq('id', juego_id_supabase)
+            )
+            
+            logger.info(f"✅ [CORE] Portada guardada en Catálogo (ID: {id_catalogo_final}) y enlazada al Inventario: {nombre_juego}")
+            
+        except Exception as e_db:
+            logger.error(f"⚠️ Error enlazando base de datos: {e_db}")
+
+    except Exception as e: 
+        logger.error(f"⚠️ Error cazando portada: {e}")
 
 # ==========================================================
 # ⏰ 7. WATCHDOG B2B Y FLUJO PRINCIPAL IA (AAA ENTERPRISE)
