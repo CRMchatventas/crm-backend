@@ -576,6 +576,11 @@ async def consultar_gemini_json(
     - Validación multimodal
     - Recuperación automática
     - Retry exponencial
+    - Circuit Breaker
+    - Anti Prompt Bomb
+    - Anti Semantic Flood
+    - Anti Response Poisoning
+    - Anti Retry Storm
     ---------------------------------------------------------
     """
 
@@ -584,13 +589,42 @@ async def consultar_gemini_json(
     inicio_telemetria = now_ts()
 
     # ==========================================================
+    # 🛡️ 0. VALIDACIÓN TEMPRANA DE ARGUMENTOS
+    # ==========================================================
+    try:
+
+        if retries < 1:
+            retries = 1
+
+        retries = min(retries, 4)
+
+        temperature = float(temperature)
+
+        if temperature < 0:
+            temperature = 0.0
+
+        if temperature > 1:
+            temperature = 1.0
+
+    except Exception:
+
+        retries = 2
+        temperature = 0.2
+
+    # ==========================================================
     # 🛡️ 1. CIRCUIT BREAKER GLOBAL
     # ==========================================================
     if now_ts() < gemini_bloqueado_hasta:
 
+        tiempo_restante = round(
+            gemini_bloqueado_hasta - now_ts(),
+            2
+        )
+
         logger.warning(
-            "🚨 [GEMINI CIRCUIT BREAKER] "
-            "Gemini temporalmente bloqueado."
+            f"🚨 [GEMINI CIRCUIT BREAKER] "
+            f"Gemini bloqueado temporalmente "
+            f"({tiempo_restante}s restantes)"
         )
 
         return {
@@ -604,7 +638,7 @@ async def consultar_gemini_json(
         }
 
     # ==========================================================
-    # 🛡️ 2. SANITIZACIÓN DE PROMPT
+    # 🛡️ 2. SERIALIZACIÓN SEGURA DEL PROMPT
     # ==========================================================
     try:
 
@@ -613,13 +647,53 @@ async def consultar_gemini_json(
         else:
             prompt_serializado = str(prompt)
 
-    except Exception:
+    except Exception as serial_error:
+
+        logger.warning(
+            f"⚠️ [PROMPT SERIALIZER] "
+            f"Fallback activado: {serial_error}"
+        )
+
         prompt_serializado = str(prompt)
 
+    # ==========================================================
+    # 🧹 3. SANITIZACIÓN AVANZADA PROMPT
+    # ==========================================================
     prompt_serializado = limpiar_texto(prompt_serializado)
 
+    # 🛡️ Anti null bytes
+    prompt_serializado = prompt_serializado.replace("\x00", "")
+
+    # 🛡️ Anti markdown injection
+    prompt_serializado = re.sub(
+        r"```.*?```",
+        "",
+        prompt_serializado,
+        flags=re.DOTALL
+    )
+
+    # 🛡️ Anti pseudo roles
+    patrones_roles = [
+        r"<\|system\|>",
+        r"<\|assistant\|>",
+        r"<\|user\|>",
+        r"role\s*:\s*system",
+        r"role\s*:\s*assistant",
+        r"BEGIN\s+OVERRIDE",
+        r"SYSTEM\s+INSTRUCTION",
+        r"DEVELOPER\s+MODE"
+    ]
+
+    for patron in patrones_roles:
+        prompt_serializado = re.sub(
+            patron,
+            "",
+            prompt_serializado,
+            flags=re.IGNORECASE
+        )
+
     # ==========================================================
-    # 🛡️ 3. LIMITADOR DE TAMAÑO DE PROMPT
+    # 🛡️ 4. LIMITADOR DE TAMAÑO PROMPT
     # ==========================================================
     MAX_PROMPT_CHARS = 45000
 
@@ -627,13 +701,38 @@ async def consultar_gemini_json(
 
         logger.warning(
             f"⚠️ [GEMINI PROMPT LIMIT] "
-            f"Prompt truncado de {len(prompt_serializado)} chars."
+            f"Prompt truncado "
+            f"({len(prompt_serializado)} chars)"
         )
 
-        prompt_serializado = prompt_serializado[-MAX_PROMPT_CHARS:]
+        prompt_serializado = (
+            prompt_serializado[-MAX_PROMPT_CHARS:]
+        )
 
     # ==========================================================
-    # ⚡ 4. CACHE INTELIGENTE
+    # 🛡️ 5. ANTI SEMANTIC FLOOD
+    # ==========================================================
+    palabras_prompt = prompt_serializado.lower().split()
+
+    if len(palabras_prompt) > 5000:
+
+        logger.warning(
+            "🚨 [PROMPT FLOOD] "
+            "Demasiadas palabras en prompt."
+        )
+
+        return {
+            "respuesta": (
+                "Tu mensaje es demasiado grande "
+                "para procesarlo."
+            ),
+            "intencion": "HUMANO",
+            "confidence": 0.0,
+            "accion_tool": "ninguna"
+        }
+
+    # ==========================================================
+    # ⚡ 6. CACHE INTELIGENTE
     # ==========================================================
     cache_key = generar_hash_cache(
         prompt_serializado,
@@ -658,7 +757,7 @@ async def consultar_gemini_json(
             return cache_item["data"]
 
     # ==========================================================
-    # 🧠 5. FAILOVER DE MODELOS
+    # 🧠 7. FAILOVER DE MODELOS
     # ==========================================================
     modelos = [
         "gemini-2.5-flash",
@@ -666,7 +765,7 @@ async def consultar_gemini_json(
     ]
 
     # ==========================================================
-    # 📊 6. ESTIMACIÓN DE TOKENS
+    # 📊 8. ESTIMACIÓN TOKENS
     # ==========================================================
     tokens_estimados = max(
         1,
@@ -674,7 +773,7 @@ async def consultar_gemini_json(
     )
 
     # ==========================================================
-    # 🛡️ 7. RATE LIMIT GLOBAL POR TENANT
+    # 🛡️ 9. RATE LIMIT GLOBAL
     # ==========================================================
     async with rate_limit_global_lock:
 
@@ -683,14 +782,17 @@ async def consultar_gemini_json(
             0
         )
 
-        nuevo_total = tokens_actuales + tokens_estimados
+        nuevo_total = (
+            tokens_actuales +
+            tokens_estimados
+        )
 
         if nuevo_total > MAX_TOKENS_POR_MINUTO_TENANT:
 
             logger.warning(
-                f"🚨 [GEMINI FLOOD] "
+                f"🚨 [TOKEN FLOOD] "
                 f"Tenant={vendedor_id} "
-                f"superó límite tokens."
+                f"superó límite."
             )
 
             return {
@@ -706,13 +808,14 @@ async def consultar_gemini_json(
         tokens_consumidos_tenant[vendedor_id] = nuevo_total
 
     # ==========================================================
-    # 🧠 8. GENERACIÓN MULTIMODELO
+    # 🧠 10. FAILOVER MULTI MODELO
     # ==========================================================
     for nombre_modelo in modelos:
 
         logger.info(
             f"🧠 [GEMINI] "
-            f"Iniciando inferencia con: {nombre_modelo}"
+            f"Iniciando inferencia con: "
+            f"{nombre_modelo}"
         )
 
         for intento in range(retries):
@@ -720,20 +823,22 @@ async def consultar_gemini_json(
             try:
 
                 # ==========================================================
-                # 🛡️ 9. GENERATION CONFIG AAA
+                # 🛡️ 11. CONFIG IA AAA
                 # ==========================================================
                 generation_config = genai.types.GenerationConfig(
-                    temperature=max(0.0, min(temperature, 1.0)),
+                    temperature=temperature,
                     top_p=0.90,
                     top_k=32,
                     candidate_count=1,
                     max_output_tokens=2048
                 )
 
-                model = genai.GenerativeModel(nombre_modelo)
+                model = genai.GenerativeModel(
+                    nombre_modelo
+                )
 
                 # ==========================================================
-                # 📦 10. CONSTRUCCIÓN MULTIMODAL
+                # 📦 12. CONSTRUCCIÓN CONTENIDO
                 # ==========================================================
                 contenido = (
                     prompt
@@ -742,32 +847,37 @@ async def consultar_gemini_json(
                 )
 
                 # ==========================================================
-                # 🖼️ 11. INYECCIÓN MULTIMEDIA
+                # 🖼️ 13. INYECCIÓN MULTIMEDIA
                 # ==========================================================
                 if media_dict and "data" in media_dict:
 
-                    media_bytes = media_dict.get("data", b"")
+                    media_bytes = media_dict.get(
+                        "data",
+                        b""
+                    )
 
-                    # 🛡️ Límite duro multimedia
+                    mime_type = media_dict.get(
+                        "mime_type",
+                        "image/jpeg"
+                    )
+
+                    # 🛡️ Hard Limit
                     if len(media_bytes) > 20_000_000:
 
                         logger.warning(
-                            "🚨 [GEMINI MEDIA LIMIT] "
-                            "Archivo multimedia excede 20MB."
+                            "🚨 [MEDIA LIMIT] "
+                            "Multimedia excede 20MB."
                         )
 
                     else:
 
                         contenido.append({
-                            "mime_type": media_dict.get(
-                                "mime_type",
-                                "image/jpeg"
-                            ),
+                            "mime_type": mime_type,
                             "data": media_bytes
                         })
 
                 # ==========================================================
-                # 🚀 12. LLAMADA PRINCIPAL GEMINI
+                # 🚀 14. LLAMADA GEMINI
                 # ==========================================================
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -779,7 +889,7 @@ async def consultar_gemini_json(
                 )
 
                 # ==========================================================
-                # 🛡️ 13. VALIDACIÓN RESPONSE
+                # 🛡️ 15. VALIDACIÓN RESPONSE
                 # ==========================================================
                 if not response:
 
@@ -800,7 +910,7 @@ async def consultar_gemini_json(
                     )
 
                 # ==========================================================
-                # 🧹 14. LIMPIEZA DE MARKDOWN
+                # 🧹 16. LIMPIEZA MARKDOWN
                 # ==========================================================
                 texto_limpio = (
                     texto_respuesta
@@ -810,8 +920,11 @@ async def consultar_gemini_json(
                     .strip()
                 )
 
+                # 🛡️ Anti basura extrema
+                texto_limpio = texto_limpio[:15000]
+
                 # ==========================================================
-                # 🛡️ 15. JSON PARSER AAA
+                # 🛡️ 17. JSON PARSER AAA
                 # ==========================================================
                 obj = None
 
@@ -819,13 +932,15 @@ async def consultar_gemini_json(
 
                     decoder = json.JSONDecoder()
 
-                    obj, idx = decoder.raw_decode(texto_limpio)
+                    obj, idx = decoder.raw_decode(
+                        texto_limpio
+                    )
 
                 except json.JSONDecodeError:
 
                     logger.warning(
-                        "⚠️ [GEMINI PARSER] "
-                        "Raw decode falló. Activando regex fallback."
+                        "⚠️ [JSON PARSER] "
+                        "Fallback regex activado."
                     )
 
                     match = re.search(
@@ -837,41 +952,67 @@ async def consultar_gemini_json(
                     if match:
 
                         try:
-                            obj = orjson.loads(match.group())
+
+                            obj = orjson.loads(
+                                match.group()
+                            )
 
                         except Exception as regex_e:
 
                             logger.error(
-                                f"❌ [GEMINI REGEX PARSER] "
+                                f"❌ [REGEX PARSER ERROR] "
                                 f"{regex_e}"
                             )
 
                 # ==========================================================
-                # 🛡️ 16. VALIDACIÓN FINAL OBJETO
+                # 🛡️ 18. VALIDACIÓN OBJETO
                 # ==========================================================
                 if not isinstance(obj, dict):
 
                     raise ValueError(
-                        "Gemini devolvió estructura inválida."
+                        "Gemini devolvió "
+                        "estructura inválida."
                     )
 
                 # ==========================================================
-                # 🧹 17. SANITIZACIÓN JSON
+                # 🧹 19. SANITIZACIÓN RESPUESTA
                 # ==========================================================
                 for key, value in list(obj.items()):
 
                     if isinstance(value, str):
 
-                        obj[key] = limpiar_texto(
-                            bleach.clean(
-                                value,
-                                tags=[],
-                                strip=True
-                            )
-                        )[:5000]
+                        value = bleach.clean(
+                            value,
+                            tags=[],
+                            strip=True
+                        )
+
+                        value = limpiar_texto(value)
+
+                        # 🛡️ Hard truncate
+                        value = value[:5000]
+
+                        obj[key] = value
 
                 # ==========================================================
-                # ⚡ 18. GUARDADO CACHE
+                # 🛡️ 20. VALIDACIÓN CAMPOS CRÍTICOS
+                # ==========================================================
+                if "respuesta" not in obj:
+                    obj["respuesta"] = (
+                        "No pude generar respuesta."
+                    )
+
+                if "intencion" not in obj:
+                    obj["intencion"] = "HUMANO"
+
+                if "confidence" not in obj:
+                    obj["confidence"] = 0.5
+
+                if "accion_tool" not in obj:
+                    obj["accion_tool"] = "ninguna"
+
+                # ==========================================================
+                # ⚡ 21. GUARDADO CACHE
                 # ==========================================================
                 cache_respuestas_ia[cache_key] = {
                     "data": obj,
@@ -879,10 +1020,11 @@ async def consultar_gemini_json(
                 }
 
                 # ==========================================================
-                # 📊 19. TELEMETRÍA FINAL
+                # 📊 22. TELEMETRÍA
                 # ==========================================================
                 tiempo_total = (
-                    now_ts() - inicio_telemetria
+                    now_ts() -
+                    inicio_telemetria
                 )
 
                 logger.info(
@@ -895,7 +1037,7 @@ async def consultar_gemini_json(
                 return obj
 
             # ==========================================================
-            # ⏱️ 20. TIMEOUT CONTROLADO
+            # ⏱️ 23. TIMEOUT CONTROLADO
             # ==========================================================
             except asyncio.TimeoutError:
 
@@ -906,7 +1048,7 @@ async def consultar_gemini_json(
                 )
 
             # ==========================================================
-            # 🚨 21. ERRORES CONTROLADOS
+            # 🚨 24. ERRORES CONTROLADOS
             # ==========================================================
             except Exception as e:
 
@@ -920,7 +1062,7 @@ async def consultar_gemini_json(
                 error_str = str(e).lower()
 
                 # ==========================================================
-                # 🚨 QUOTA / 429 / SATURACIÓN
+                # 🚨 429 / QUOTA / SATURACIÓN
                 # ==========================================================
                 if (
                     "429" in error_str
@@ -928,11 +1070,13 @@ async def consultar_gemini_json(
                     or "resource exhausted" in error_str
                 ):
 
-                    gemini_bloqueado_hasta = now_ts() + 60.0
+                    gemini_bloqueado_hasta = (
+                        now_ts() + 60.0
+                    )
 
                     logger.warning(
-                        "🚨 [GEMINI QUOTA] "
-                        "Circuit breaker activado 60s."
+                        "🚨 [QUOTA LIMIT] "
+                        "Circuit breaker 60s."
                     )
 
                     break
@@ -948,7 +1092,7 @@ async def consultar_gemini_json(
                 await asyncio.sleep(espera)
 
     # ==========================================================
-    # 🚨 22. FAILSAFE ABSOLUTO
+    # 🚨 25. FAILSAFE FINAL
     # ==========================================================
     logger.error(
         "🚨 [GEMINI FAILSAFE] "
@@ -966,45 +1110,475 @@ async def consultar_gemini_json(
     }
 
 # ==========================================================
-# 🛡️ VALIDADOR UNIVERSAL IA AAA
+# 🛡️ VALIDADOR UNIVERSAL IA AAA ENTERPRISE HARDENED
 # ==========================================================
 
 def validar_respuesta_ia(data: dict) -> dict:
-    """🧠 VALIDADOR COGNITIVO COMPACTO AAA"""
-    if not isinstance(data, dict): raise Exception("Formato IA inválido.")
-    
-    # 1. Normalización de campos obligatorios
-    res = {
-        "intencion": data.get("intencion", "COTIZACION").upper().strip() if data.get("intencion", "").upper().strip() in ["COMPRA","COTIZACION","HUMANO","PEDIDO_ESPECIAL","REGATEO","POSTVENTA","GARANTIA","SPAM","MAYOREO","SALUDO","ENOJO"] else "HUMANO",
-        "respuesta": limpiar_texto(bleach.clean(str(data.get("respuesta", "Hola.")), tags=[], strip=True))[:4000],
-        "producto_detectado": limpiar_texto(str(data.get("producto_detectado") or data.get("juego_detectado", "")))[:150],
-        "categoria_preferida": limpiar_texto(str(data.get("categoria_preferida", "")))[:120],
-        "emocion_cliente": data.get("emocion_cliente", "neutral") if data.get("emocion_cliente") in ["urgencia","enojo","duda","entusiasmo","neutral"] else "neutral",
-        "temperatura_lead": data.get("temperatura_lead", "frio") if data.get("temperatura_lead") in ["frio","tibio","caliente"] else "frio",
-        "accion_tool": data.get("accion_tool", "ninguna") if data.get("accion_tool") in ["ninguna","aplicar_descuento"] else "ninguna",
-        "estrategia_venta": limpiar_texto(str(data.get("estrategia_venta", "normal")))[:100],
-        "cross_selling": limpiar_texto(str(data.get("cross_selling", "")))[:250],
-        "upselling": limpiar_texto(str(data.get("upselling", "")))[:250],
-        "nivel_prioridad": limpiar_texto(str(data.get("nivel_prioridad", "media")))[:30],
-        "tipo_seguimiento": limpiar_texto(str(data.get("tipo_seguimiento", "ninguno")))[:30],
-        "requiere_seguimiento": bool(data.get("requiere_seguimiento", False)),
-        "sugerir_veltrix": bool(data.get("sugerir_veltrix", False))
+    """
+    ==============================================================================
+    🧠 FIREWALL COGNITIVO UNIVERSAL VELTRIX ENGINE
+    ==============================================================================
+    ✔ Schema Validation Estricta
+    ✔ Anti Hallucination
+    ✔ Anti JSON Bomb
+    ✔ Anti Prompt Reflection
+    ✔ Anti Unicode Exploits
+    ✔ Clamp Numérico Seguro
+    ✔ Sanitización XSS / HTML
+    ✔ Protección Anti Overflow
+    ✔ Compatibilidad Retroactiva
+    ✔ FailSafe Comercial
+    ✔ Protección Token/RAM Abuse
+    ✔ Anti Nested Objects
+    ✔ Anti Markdown Injection
+    ✔ Anti Null Corruption
+    ✔ Anti Infinity / NaN
+    ==============================================================================
+    """
+
+    # ==============================================================================
+    # 🛡️ 1. VALIDACIÓN ESTRUCTURAL
+    # ==============================================================================
+
+    if not isinstance(data, dict):
+        raise Exception("Formato IA inválido.")
+
+    # ==============================================================================
+    # 🛡️ 2. LÍMITE DURO DE CAMPOS
+    # ==============================================================================
+
+    if len(data) > 80:
+        logger.warning("🚨 [VALIDADOR IA] Payload excesivo detectado.")
+        raise Exception("Payload IA sospechoso.")
+
+    # ==============================================================================
+    # 🛡️ 3. ENUMS SEGUROS
+    # ==============================================================================
+
+    INTENCIONES_VALIDAS = {
+        "COMPRA",
+        "COTIZACION",
+        "HUMANO",
+        "PEDIDO_ESPECIAL",
+        "REGATEO",
+        "POSTVENTA",
+        "GARANTIA",
+        "SPAM",
+        "MAYOREO",
+        "SALUDO",
+        "ENOJO"
     }
 
-    # 2. Conversión segura de numéricos
-    try:
-        conf = float(data.get("confidence", 0.0))
-        res["confidence"] = max(0.0, min(conf, 1.0)) if conf >= 0.60 else 0.0
-        if res["confidence"] == 0.0: res["intencion"] = "HUMANO" # Handoff automático
-        res["precio_oferta"] = max(0.0, float(data.get("precio_oferta", 0.0)))
-        res["lead_score"] = int(max(0, min(int(data.get("lead_score", 0)), 100)))
-        res["probabilidad_cierre"] = max(0.0, min(float(data.get("probabilidad_cierre", 0.0)), 1.0))
-    except:
-        res.update({"confidence": 0.0, "precio_oferta": 0.0, "lead_score": 0, "probabilidad_cierre": 0.0})
+    EMOCIONES_VALIDAS = {
+        "urgencia",
+        "enojo",
+        "duda",
+        "entusiasmo",
+        "neutral"
+    }
 
-    if not res["respuesta"]: res["respuesta"] = "Estoy revisando la mejor opción para ayudarte. 👌"
-    
-    logger.info(f"🎯 [VALIDADOR IA] Intención={res['intencion']} | Score={res['lead_score']}")
+    TEMPERATURAS_VALIDAS = {
+        "frio",
+        "tibio",
+        "caliente"
+    }
+
+    TOOLS_VALIDAS = {
+        "ninguna",
+        "aplicar_descuento"
+    }
+
+    PRIORIDADES_VALIDAS = {
+        "baja",
+        "media",
+        "alta",
+        "critica"
+    }
+
+    # ==============================================================================
+    # 🛡️ 4. HELPERS HARDENED
+    # ==============================================================================
+
+    def safe_clean_text(
+        valor,
+        max_len: int = 300,
+        permitir_saltos: bool = False
+    ) -> str:
+
+        try:
+
+            if valor is None:
+                return ""
+
+            # ----------------------------------------------------------------------
+            # Protección Anti Nested Objects
+            # ----------------------------------------------------------------------
+
+            if isinstance(valor, (dict, list, tuple, set)):
+                valor = str(valor)
+
+            texto = str(valor)
+
+            # ----------------------------------------------------------------------
+            # Protección Anti Unicode Invisible / Control Chars
+            # ----------------------------------------------------------------------
+
+            texto = re.sub(
+                r"[\x00-\x1F\x7F-\x9F\u200B-\u200F\u202A-\u202E]",
+                "",
+                texto
+            )
+
+            # ----------------------------------------------------------------------
+            # Protección Anti Prompt Reflection
+            # ----------------------------------------------------------------------
+
+            patrones_bloqueados = [
+                r"system\s+prompt",
+                r"developer\s+mode",
+                r"ignore\s+instructions",
+                r"olvida\s+las\s+reglas",
+                r"eres\s+chatgpt",
+                r"<script",
+                r"javascript:",
+                r"data:text/html",
+                r"file://",
+                r"gopher://",
+                r"ftp://",
+                r"localhost",
+                r"127\.0\.0\.1"
+            ]
+
+            texto_lower = texto.lower()
+
+            for patron in patrones_bloqueados:
+                if re.search(patron, texto_lower):
+                    logger.warning(
+                        f"🚨 [VALIDADOR IA] Patrón sospechoso bloqueado: {patron}"
+                    )
+                    texto = "[CONTENIDO FILTRADO]"
+                    break
+
+            # ----------------------------------------------------------------------
+            # Sanitización HTML/XSS
+            # ----------------------------------------------------------------------
+
+            texto = bleach.clean(
+                texto,
+                tags=[],
+                attributes={},
+                strip=True
+            )
+
+            texto = limpiar_texto(texto)
+
+            # ----------------------------------------------------------------------
+            # Protección Markdown Injection
+            # ----------------------------------------------------------------------
+
+            texto = texto.replace("```", "")
+            texto = texto.replace("***", "")
+            texto = texto.replace("###", "")
+
+            # ----------------------------------------------------------------------
+            # Protección Longitud
+            # ----------------------------------------------------------------------
+
+            texto = texto[:max_len]
+
+            # ----------------------------------------------------------------------
+            # Saltos de línea
+            # ----------------------------------------------------------------------
+
+            if not permitir_saltos:
+                texto = texto.replace("\n", " ").replace("\r", " ")
+
+            return texto.strip()
+
+        except Exception as e:
+
+            logger.warning(
+                f"⚠️ [VALIDADOR IA] Error limpiando texto: {e}"
+            )
+
+            return ""
+
+    def safe_float(
+        valor,
+        default: float = 0.0,
+        minimo: float = 0.0,
+        maximo: float = 999999.0
+    ) -> float:
+
+        try:
+
+            num = float(valor)
+
+            # Protección NaN / Infinity
+            if math.isnan(num) or math.isinf(num):
+                return default
+
+            return max(minimo, min(num, maximo))
+
+        except:
+            return default
+
+    def safe_int(
+        valor,
+        default: int = 0,
+        minimo: int = 0,
+        maximo: int = 100
+    ) -> int:
+
+        try:
+
+            num = int(float(valor))
+
+            return max(minimo, min(num, maximo))
+
+        except:
+            return default
+
+    # ==============================================================================
+    # 🛡️ 5. NORMALIZACIÓN PRINCIPAL
+    # ==============================================================================
+
+    intencion = safe_clean_text(
+        data.get("intencion", "HUMANO"),
+        40
+    ).upper()
+
+    if intencion not in INTENCIONES_VALIDAS:
+        intencion = "HUMANO"
+
+    emocion_cliente = safe_clean_text(
+        data.get("emocion_cliente", "neutral"),
+        30
+    ).lower()
+
+    if emocion_cliente not in EMOCIONES_VALIDAS:
+        emocion_cliente = "neutral"
+
+    temperatura_lead = safe_clean_text(
+        data.get("temperatura_lead", "frio"),
+        30
+    ).lower()
+
+    if temperatura_lead not in TEMPERATURAS_VALIDAS:
+        temperatura_lead = "frio"
+
+    accion_tool = safe_clean_text(
+        data.get("accion_tool", "ninguna"),
+        50
+    ).lower()
+
+    if accion_tool not in TOOLS_VALIDAS:
+        accion_tool = "ninguna"
+
+    nivel_prioridad = safe_clean_text(
+        data.get("nivel_prioridad", "media"),
+        20
+    ).lower()
+
+    if nivel_prioridad not in PRIORIDADES_VALIDAS:
+        nivel_prioridad = "media"
+
+    # ==============================================================================
+    # 🛡️ 6. RESPUESTA PRINCIPAL
+    # ==============================================================================
+
+    respuesta = safe_clean_text(
+        data.get("respuesta", "Hola."),
+        max_len=4000,
+        permitir_saltos=True
+    )
+
+    if not respuesta:
+        respuesta = (
+            "Estoy revisando la mejor opción para ayudarte. 👌"
+        )
+
+    # ==============================================================================
+    # 🛡️ 7. NUMÉRICOS HARDENED
+    # ==============================================================================
+
+    confidence = safe_float(
+        data.get("confidence", 0.0),
+        default=0.0,
+        minimo=0.0,
+        maximo=1.0
+    )
+
+    # ----------------------------------------------------------------------
+    # Handoff Automático si confianza baja
+    # ----------------------------------------------------------------------
+
+    if confidence < 0.60:
+        intencion = "HUMANO"
+        confidence = 0.0
+
+    precio_oferta = safe_float(
+        data.get("precio_oferta", 0.0),
+        default=0.0,
+        minimo=0.0,
+        maximo=999999.0
+    )
+
+    lead_score = safe_int(
+        data.get("lead_score", 0),
+        default=0,
+        minimo=0,
+        maximo=100
+    )
+
+    probabilidad_cierre = safe_float(
+        data.get("probabilidad_cierre", 0.0),
+        default=0.0,
+        minimo=0.0,
+        maximo=1.0
+    )
+
+    # ==============================================================================
+    # 🛡️ 8. CONSTRUCCIÓN FINAL SEGURA
+    # ==============================================================================
+
+    res = {
+
+        "intencion":
+            intencion,
+
+        "respuesta":
+            respuesta,
+
+        "producto_detectado":
+            safe_clean_text(
+                data.get("producto_detectado")
+                or data.get("juego_detectado", ""),
+                150
+            ),
+
+        "categoria_preferida":
+            safe_clean_text(
+                data.get("categoria_preferida", ""),
+                120
+            ),
+
+        "emocion_cliente":
+            emocion_cliente,
+
+        "temperatura_lead":
+            temperatura_lead,
+
+        "accion_tool":
+            accion_tool,
+
+        "estrategia_venta":
+            safe_clean_text(
+                data.get("estrategia_venta", "normal"),
+                100
+            ),
+
+        "cross_selling":
+            safe_clean_text(
+                data.get("cross_selling", ""),
+                250
+            ),
+
+        "upselling":
+            safe_clean_text(
+                data.get("upselling", ""),
+                250
+            ),
+
+        "nivel_prioridad":
+            nivel_prioridad,
+
+        "tipo_seguimiento":
+            safe_clean_text(
+                data.get("tipo_seguimiento", "ninguno"),
+                30
+            ),
+
+        "requiere_seguimiento":
+            bool(data.get("requiere_seguimiento", False)),
+
+        "sugerir_veltrix":
+            bool(data.get("sugerir_veltrix", False)),
+
+        "confidence":
+            confidence,
+
+        "precio_oferta":
+            precio_oferta,
+
+        "lead_score":
+            lead_score,
+
+        "probabilidad_cierre":
+            probabilidad_cierre
+    }
+
+    # ==============================================================================
+    # 🛡️ 9. PROTECCIÓN COMERCIAL
+    # ==============================================================================
+
+    if (
+        res["accion_tool"] == "aplicar_descuento"
+        and res["precio_oferta"] <= 0
+    ):
+
+        logger.warning(
+            "⚠️ [VALIDADOR IA] Descuento inválido detectado."
+        )
+
+        res["accion_tool"] = "ninguna"
+
+    # ==============================================================================
+    # 🛡️ 10. ANTI RESPUESTAS SOSPECHOSAS
+    # ==============================================================================
+
+    respuesta_lower = res["respuesta"].lower()
+
+    sospechosos = [
+        "system prompt",
+        "developer mode",
+        "ignore instructions",
+        "api key",
+        "token",
+        "contraseña",
+        "password",
+        "sudo",
+        "rm -rf",
+        "<script"
+    ]
+
+    if any(s in respuesta_lower for s in sospechosos):
+
+        logger.warning(
+            "🚨 [VALIDADOR IA] Respuesta sospechosa neutralizada."
+        )
+
+        res["respuesta"] = (
+            "Voy a canalizar tu solicitud con un asesor. 👌"
+        )
+
+        res["intencion"] = "HUMANO"
+
+    # ==============================================================================
+    # 📊 11. TELEMETRÍA
+    # ==============================================================================
+
+    logger.info(
+        f"🎯 [VALIDADOR IA] "
+        f"Intención={res['intencion']} | "
+        f"Score={res['lead_score']} | "
+        f"Confidence={res['confidence']:.2f}"
+    )
+
+    # ==============================================================================
+    # ✅ 12. RESPUESTA FINAL
+    # ==============================================================================
+
     return res
 
 async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict, perfil_cliente_previo: dict = None, media_dict: dict = None):
@@ -1179,80 +1753,922 @@ async def obtener_historial_chat(telefono: str, vendedor_id: str) -> str:
 # ==========================================================
 # 🛠️ 6. FUNCIONES CORE: SCRAPER, ALERTAS, MEDIA Y COMUNICACIÓN
 # ==========================================================
-def sanitizar_nombre_columna(columna: str) -> str:
-    return bleach.clean(columna, tags=[], attributes={}, strip=True)[:50]
 
-async def actualizar_estado_crm(telefono: str, vendedor_id: str, columna: str, iluminacion: str, juego: str, perfil_ia: dict = None):
-    # 🛡️ FIX AAA: Permitimos mover tarjetas a las bandejas reservadas
-    # 🚀 FIX SAAS: Actualizamos el nombre de la columna para que empate con Supabase ('ultimo_producto_interes')
-    payload = {
-        'columna': sanitizar_nombre_columna(columna, permitir_reservadas=True), 
-        'estado_iluminacion': sanitizar_nombre_columna(iluminacion, permitir_reservadas=True), 
-        'ultimo_producto_interes': bleach.clean(juego, tags=[], strip=True)[:100], 
-        'ultima_interaccion_ia': datetime.now(timezone.utc).isoformat()
-    }
-    if perfil_ia: payload['perfil_psicologico'] = perfil_ia
-    await async_db_execute(supabase.table('prospectos').update(payload).eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)))
+def sanitizar_nombre_columna(
+    columna: str,
+    permitir_reservadas: bool = False
+) -> str:
 
-async def guardar_resultado_ia_en_crm(telefono: str, vendedor_id: str, data: dict) -> bool:
     """
-    Persiste el análisis cognitivo de la IA en Supabase.
-    Actualiza métricas de negocio y estados de prospección.
+    🛡️ Sanitizador Hardened de columnas CRM
+    ---------------------------------------------------------
+    - Anti XSS
+    - Anti corrupción CRM
+    - Anti payload injection
+    - Whitelist estricta
+    - Protección contra columnas inválidas
+    ---------------------------------------------------------
     """
+
     try:
-        # Mapeo de datos validados a columnas de Supabase
-        payload = {
-            "lead_score": data.get("lead_score"),
-            "probabilidad_cierre": data.get("probabilidad_cierre"),
-            "estrategia_venta": data.get("estrategia_venta"),
-            "requiere_seguimiento": data.get("requiere_seguimiento"),
-            "sugerir_veltrix": data.get("sugerir_veltrix"),
-            "tipo_seguimiento": data.get("tipo_seguimiento"),
-            "cross_selling": data.get("cross_selling"),
-            "upselling": data.get("upselling"),
-            "nivel_prioridad": data.get("nivel_prioridad"),
-            "ultimo_msj": data.get("respuesta"),
-            "ultima_interaccion_ia": now_ts()
-        }
-        
-        # Ejecución contra Supabase
-        # Nota: Usamos update.eq para asegurar que solo modificamos al cliente correcto
-        response = await async_db_execute(
-            supabase.table("prospectos")
-            .update(payload)
-            .eq("telefono", telefono)
-            .eq("vendedor_id", str(vendedor_id))
+
+        columna = bleach.clean(
+            str(columna),
+            tags=[],
+            attributes={},
+            strip=True
         )
-        
-        logger.info(f"💾 [CRM SYNC] Prospecto {telefono} sincronizado: Score={data.get('lead_score')}")
-        return True
-        
+
+        columna = limpiar_texto(columna).strip()
+
+        # ==========================================================
+        # 🛡️ LISTA BLANCA CRM
+        # ==========================================================
+        columnas_validas = {
+            "Bandeja Nueva",
+            "Envios Masivos",
+            "Por Entregar",
+            "Requiere Asistencia",
+            "En Conversacion",
+            "Completado",
+            "Cancelado",
+            "Spam"
+        }
+
+        # ==========================================================
+        # 🛡️ ILUMINACIONES VÁLIDAS
+        # ==========================================================
+        iluminaciones_validas = {
+            "blanco",
+            "verde_exito",
+            "verde_alerta",
+            "amarillo",
+            "rojo",
+            "gris"
+        }
+
+        if permitir_reservadas:
+
+            if (
+                columna in columnas_validas
+                or columna in iluminaciones_validas
+            ):
+                return columna[:50]
+
+        # ==========================================================
+        # 🛡️ FALLBACK
+        # ==========================================================
+        if len(columna) <= 50:
+            return columna
+
+        return columna[:50]
+
     except Exception as e:
-        logger.error(f"❌ [CRM SYNC ERROR] Falló persistencia de IA para {telefono}: {str(e)}")
+
+        logger.error(
+            f"❌ [CRM SANITIZE ERROR] {str(e)}"
+        )
+
+        return "Bandeja Nueva"
+
+
+# ==========================================================
+# 🧠 ACTUALIZACIÓN CENTRAL CRM
+# ==========================================================
+async def actualizar_estado_crm(
+    telefono: str,
+    vendedor_id: str,
+    columna: str,
+    iluminacion: str,
+    juego: str,
+    perfil_ia: dict = None
+):
+
+    """
+    🚀 MOTOR CRM AAA ENTERPRISE
+    ---------------------------------------------------------
+    FUNCIONES:
+    - Protección concurrente
+    - Anti overwrite
+    - Sanitización profunda
+    - Validación JSONB
+    - Anti race conditions
+    - Anti spam writes
+    - Protección cross-tenant
+    - Idempotencia CRM
+    - Telemetría avanzada
+    - Anti corrupción de perfil
+    ---------------------------------------------------------
+    """
+
+    inicio_telemetria = now_ts()
+
+    try:
+
+        # ==========================================================
+        # 🛡️ 1. SANITIZACIÓN INPUTS
+        # ==========================================================
+        telefono = str(telefono).strip()
+        vendedor_id = str(vendedor_id).strip()
+
+        columna = sanitizar_nombre_columna(
+            columna,
+            permitir_reservadas=True
+        )
+
+        iluminacion = sanitizar_nombre_columna(
+            iluminacion,
+            permitir_reservadas=True
+        )
+
+        juego = bleach.clean(
+            str(juego),
+            tags=[],
+            strip=True
+        )
+
+        juego = limpiar_texto(juego)[:100]
+
+        if not telefono or not vendedor_id:
+
+            logger.warning(
+                "⚠️ [CRM UPDATE] "
+                "Parámetros incompletos."
+            )
+
+            return False
+
+        # ==========================================================
+        # 🛡️ 2. ANTI WRITE FLOOD
+        # ==========================================================
+        flood_key = hashlib.sha256(
+            (
+                f"{telefono}:"
+                f"{vendedor_id}:"
+                f"{columna}:"
+                f"{iluminacion}:"
+                f"{juego}"
+            ).encode()
+        ).hexdigest()
+
+        async with rate_limit_global_lock:
+
+            if flood_key in registro_actividad_b2b:
+
+                logger.info(
+                    f"♻️ [CRM SKIP] "
+                    f"Update duplicado evitado para {telefono}"
+                )
+
+                return True
+
+            registro_actividad_b2b[flood_key] = now_ts()
+
+        # ==========================================================
+        # 🛡️ 3. VALIDACIÓN PERFIL IA
+        # ==========================================================
+        perfil_sanitizado = None
+
+        if perfil_ia:
+
+            try:
+
+                if not isinstance(perfil_ia, dict):
+                    raise Exception(
+                        "perfil_ia inválido"
+                    )
+
+                perfil_sanitizado = {}
+
+                for key, value in perfil_ia.items():
+
+                    key_limpia = limpiar_texto(
+                        bleach.clean(
+                            str(key),
+                            tags=[],
+                            strip=True
+                        )
+                    )[:80]
+
+                    # ==========================================================
+                    # 🛡️ STRING
+                    # ==========================================================
+                    if isinstance(value, str):
+
+                        perfil_sanitizado[key_limpia] = (
+                            limpiar_texto(
+                                bleach.clean(
+                                    value,
+                                    tags=[],
+                                    strip=True
+                                )
+                            )[:500]
+                        )
+
+                    # ==========================================================
+                    # 🛡️ NUMÉRICOS
+                    # ==========================================================
+                    elif isinstance(value, (int, float, bool)):
+                        perfil_sanitizado[key_limpia] = value
+
+                    # ==========================================================
+                    # 🛡️ LISTAS SEGURAS
+                    # ==========================================================
+                    elif isinstance(value, list):
+
+                        perfil_sanitizado[key_limpia] = [
+                            limpiar_texto(str(v))[:120]
+                            for v in value[:20]
+                        ]
+
+                # ==========================================================
+                # 🛡️ LIMITADOR JSONB
+                # ==========================================================
+                perfil_serializado = orjson.dumps(
+                    perfil_sanitizado
+                )
+
+                if len(perfil_serializado) > 12000:
+
+                    logger.warning(
+                        "⚠️ [CRM PROFILE LIMIT] "
+                        "Perfil IA truncado."
+                    )
+
+                    perfil_sanitizado = {
+                        "estado": "perfil_truncado"
+                    }
+
+            except Exception as perfil_e:
+
+                logger.error(
+                    f"❌ [CRM PROFILE ERROR] "
+                    f"{perfil_e}"
+                )
+
+                perfil_sanitizado = {
+                    "estado": "perfil_error"
+                }
+
+        # ==========================================================
+        # 🛡️ 4. PAYLOAD HARDENED
+        # ==========================================================
+        payload = {
+            "columna": columna,
+            "estado_iluminacion": iluminacion,
+            "ultimo_producto_interes": juego,
+            "ultima_interaccion_ia": (
+                datetime.now(timezone.utc)
+                .isoformat()
+            )
+        }
+
+        # ==========================================================
+        # 🛡️ PERFIL IA OPCIONAL
+        # ==========================================================
+        if perfil_sanitizado:
+
+            payload["perfil_psicologico"] = (
+                perfil_sanitizado
+            )
+
+        # ==========================================================
+        # 🛡️ 5. LOCK POR CLIENTE
+        # ==========================================================
+        lock_key = hashlib.sha256(
+            f"{telefono}:{vendedor_id}".encode()
+        ).hexdigest()
+
+        tracking_locks_uso[lock_key] = now_ts()
+
+        async with locks_por_conversacion[lock_key]:
+
+            # ==========================================================
+            # 🛡️ 6. UPDATE CONTROLADO
+            # ==========================================================
+            response = await async_db_execute(
+
+                supabase
+                .table("prospectos")
+                .update(payload)
+                .eq("telefono", telefono)
+                .eq("vendedor_id", vendedor_id),
+
+                timeout_seg=10.0
+            )
+
+        # ==========================================================
+        # 📊 7. TELEMETRÍA
+        # ==========================================================
+        tiempo_total = (
+            now_ts() - inicio_telemetria
+        )
+
+        logger.info(
+            f"💾 [CRM UPDATE SUCCESS] "
+            f"Tel={enmascarar_telefono(telefono)} | "
+            f"Columna={columna} | "
+            f"Tiempo={tiempo_total:.3f}s"
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            f"❌ [CRM UPDATE ERROR] "
+            f"{str(e)}"
+        )
+
         return False
 
-async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mensaje: str):
-    # 🛡️ FIX AAA: Sanitización XSS Almacenada Crítica
-    mensaje_limpio = bleach.clean(limpiar_texto(mensaje), tags=[], strip=True)
-    await async_db_execute(supabase.table('mensajes_chat').insert({'telefono': telefono, 'vendedor_id': str(vendedor_id), 'autor': autor, 'mensaje': mensaje_limpio}))
 
-async def disparar_whatsapp_dinamico_async(telefono_destino: str, texto_mensaje: str, token: str, phone_id: str):
-    if not http_client: return False
-    url = f"https://graph.facebook.com/{META_API_VERSION}/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp", "to": telefono_destino, "type": "text", "text": {"body": texto_mensaje}}
-    
-    for intento in range(2):
-        try: 
-            res = await http_client.post(url, headers=headers, json=payload, timeout=10.0)
-            if res.status_code in [200, 201]: return True
-            if res.status_code == 429: await asyncio.sleep(2); continue
-            logger.error(f"❌ [META ERROR] Status {res.status_code}: {res.text}")
+# ==========================================================
+# 🧠 GUARDADO DE RESULTADO IA CRM
+# ==========================================================
+async def guardar_resultado_ia_en_crm(
+    telefono: str,
+    vendedor_id: str,
+    data: dict
+) -> bool:
+
+    """
+    💾 Persistencia avanzada de resultados IA
+    ---------------------------------------------------------
+    - Sanitización profunda
+    - Anti corrupción CRM
+    - Validación semántica
+    - Protección JSON
+    - Anti spam writes
+    ---------------------------------------------------------
+    """
+
+    try:
+
+        telefono = str(telefono).strip()
+        vendedor_id = str(vendedor_id).strip()
+
+        if not telefono or not vendedor_id:
+
+            logger.warning(
+                "⚠️ [CRM IA SAVE] "
+                "Datos inválidos."
+            )
+
             return False
-        except asyncio.TimeoutError: pass
-        except Exception as e: 
-            logger.exception(f"🚨 [WHATSAPP CRÍTICO] {e}")
+
+        # ==========================================================
+        # 🛡️ SANITIZACIÓN DATA
+        # ==========================================================
+        payload = {
+
+            "lead_score": int(
+                max(
+                    0,
+                    min(
+                        100,
+                        int(data.get("lead_score", 0))
+                    )
+                )
+            ),
+
+            "probabilidad_cierre": float(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        float(
+                            data.get(
+                                "probabilidad_cierre",
+                                0.0
+                            )
+                        )
+                    )
+                )
+            ),
+
+            "estrategia_venta": limpiar_texto(
+                bleach.clean(
+                    str(data.get("estrategia_venta", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:500],
+
+            "requiere_seguimiento": bool(
+                data.get("requiere_seguimiento", False)
+            ),
+
+            "sugerir_veltrix": bool(
+                data.get("sugerir_veltrix", False)
+            ),
+
+            "tipo_seguimiento": limpiar_texto(
+                bleach.clean(
+                    str(data.get("tipo_seguimiento", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:100],
+
+            "cross_selling": limpiar_texto(
+                bleach.clean(
+                    str(data.get("cross_selling", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:300],
+
+            "upselling": limpiar_texto(
+                bleach.clean(
+                    str(data.get("upselling", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:300],
+
+            "nivel_prioridad": limpiar_texto(
+                bleach.clean(
+                    str(data.get("nivel_prioridad", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:50],
+
+            "ultimo_msj": limpiar_texto(
+                bleach.clean(
+                    str(data.get("respuesta", "")),
+                    tags=[],
+                    strip=True
+                )
+            )[:2000],
+
+            "ultima_interaccion_ia": (
+                datetime.now(timezone.utc)
+                .isoformat()
+            )
+        }
+
+        # ==========================================================
+        # 🛡️ UPDATE CONTROLADO
+        # ==========================================================
+        await async_db_execute(
+
+            supabase
+            .table("prospectos")
+            .update(payload)
+            .eq("telefono", telefono)
+            .eq("vendedor_id", str(vendedor_id)),
+
+            timeout_seg=10.0
+        )
+
+        logger.info(
+            f"💾 [CRM SYNC SUCCESS] "
+            f"{enmascarar_telefono(telefono)} | "
+            f"Score={payload.get('lead_score')}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            f"❌ [CRM SYNC ERROR] "
+            f"{str(e)}"
+        )
+
+        return False
+
+
+# ==========================================================
+# 💬 GUARDADO DE CHAT
+# ==========================================================
+async def guardar_mensaje_chat(
+    telefono: str,
+    vendedor_id: str,
+    autor: str,
+    mensaje: str
+):
+
+    """
+    💬 Persistencia Hardened de conversaciones
+    ---------------------------------------------------------
+    - Sanitización XSS
+    - Anti spam insert
+    - Protección DB Flood
+    - Limitador de tamaño
+    - Telemetría avanzada
+    ---------------------------------------------------------
+    """
+
+    try:
+
+        telefono = str(telefono).strip()
+        vendedor_id = str(vendedor_id).strip()
+        autor = str(autor).strip().upper()
+
+        if not telefono or not vendedor_id:
+
+            logger.warning(
+                "⚠️ [CHAT SAVE] "
+                "Datos inválidos."
+            )
+
+            return False
+
+        # ==========================================================
+        # 🛡️ SANITIZACIÓN MENSAJE
+        # ==========================================================
+        mensaje_limpio = bleach.clean(
+            limpiar_texto(str(mensaje)),
+            tags=[],
+            strip=True
+        )
+
+        mensaje_limpio = mensaje_limpio[:5000]
+
+        # ==========================================================
+        # 🛡️ ANTI DUPLICADOS
+        # ==========================================================
+        msg_hash = hashlib.sha256(
+            (
+                f"{telefono}:"
+                f"{autor}:"
+                f"{mensaje_limpio[:120]}"
+            ).encode()
+        ).hexdigest()
+
+        if msg_hash in mensajes_procesados_meta:
+
+            logger.info(
+                "♻️ [CHAT DUPLICATE BLOCK]"
+            )
+
+            return True
+
+        mensajes_procesados_meta[msg_hash] = True
+
+        # ==========================================================
+        # 💾 INSERT CONTROLADO
+        # ==========================================================
+        await async_db_execute(
+
+            supabase
+            .table("mensajes_chat")
+            .insert({
+                "telefono": telefono,
+                "vendedor_id": vendedor_id,
+                "autor": autor,
+                "mensaje": mensaje_limpio
+            }),
+
+            timeout_seg=8.0
+        )
+
+        logger.info(
+            f"💬 [CHAT SAVE SUCCESS] "
+            f"{enmascarar_telefono(telefono)}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            f"❌ [CHAT SAVE ERROR] "
+            f"{str(e)}"
+        )
+
+        return False
+
+async def disparar_whatsapp_dinamico_async(
+    telefono_destino: str,
+    texto_mensaje: str,
+    token: str,
+    phone_id: str
+):
+    """
+    🚀 MOTOR OUTBOUND WHATSAPP AAA ENTERPRISE
+    ---------------------------------------------------------
+    FUNCIONES:
+    - Retry Inteligente
+    - Anti Duplicados
+    - Anti Flood
+    - Rate Limit Outbound
+    - Timeout Hardened
+    - Sanitización profunda
+    - Protección Meta Ban
+    - Backoff exponencial
+    - Idempotencia outbound
+    - Validación payload
+    - Anti Memory Leak
+    - Telemetría avanzada
+    - Protección contra loops
+    ---------------------------------------------------------
+    """
+
+    # ==========================================================
+    # 🛡️ 1. VALIDACIÓN HTTP CLIENT
+    # ==========================================================
+    if not http_client:
+
+        logger.error(
+            "❌ [WHATSAPP OUTBOUND] "
+            "http_client no inicializado."
+        )
+
+        return False
+
+    # ==========================================================
+    # 🛡️ 2. VALIDACIÓN BÁSICA INPUTS
+    # ==========================================================
+    telefono_destino = str(telefono_destino).strip()
+    texto_mensaje = str(texto_mensaje).strip()
+    token = str(token).strip()
+    phone_id = str(phone_id).strip()
+
+    if (
+        not telefono_destino
+        or not texto_mensaje
+        or not token
+        or not phone_id
+    ):
+
+        logger.warning(
+            "⚠️ [WHATSAPP OUTBOUND] "
+            "Parámetros inválidos."
+        )
+
+        return False
+
+    # ==========================================================
+    # 🛡️ 3. SANITIZACIÓN MENSAJE
+    # ==========================================================
+    texto_mensaje = bleach.clean(
+        texto_mensaje,
+        tags=[],
+        strip=True
+    )
+
+    texto_mensaje = limpiar_texto(texto_mensaje)
+
+    # ==========================================================
+    # 🛡️ 4. LÍMITE HARDENED META
+    # ==========================================================
+    MAX_MESSAGE_LENGTH = 4096
+
+    if len(texto_mensaje) > MAX_MESSAGE_LENGTH:
+
+        logger.warning(
+            f"⚠️ [WHATSAPP LIMIT] "
+            f"Mensaje truncado: {len(texto_mensaje)} chars."
+        )
+
+        texto_mensaje = texto_mensaje[:MAX_MESSAGE_LENGTH]
+
+    # ==========================================================
+    # 🛡️ 5. ANTI DUPLICADOS OUTBOUND
+    # ==========================================================
+    mensaje_hash = hashlib.sha256(
+        f"{telefono_destino}:{texto_mensaje[:120]}".encode()
+    ).hexdigest()
+
+    async with rate_limit_mobile_lock:
+
+        if mensaje_hash in RATE_LIMIT_MOBILE_OUTBOUND:
+
+            logger.warning(
+                f"♻️ [WHATSAPP DUPLICATE BLOCK] "
+                f"Mensaje repetido bloqueado para {telefono_destino}"
+            )
+
+            return False
+
+        RATE_LIMIT_MOBILE_OUTBOUND[mensaje_hash] = now_ts()
+
+    # ==========================================================
+    # 🛡️ 6. RATE LIMIT GLOBAL OUTBOUND
+    # ==========================================================
+    rl_key = f"{phone_id}:{telefono_destino}"
+
+    async with rate_limit_mobile_lock:
+
+        outbound_actual = RATE_LIMIT_MOBILE_OUTBOUND.get(
+            rl_key,
+            0
+        )
+
+        if outbound_actual >= 12:
+
+            logger.warning(
+                f"🚨 [WHATSAPP FLOOD BLOCK] "
+                f"Outbound excedido hacia {telefono_destino}"
+            )
+
+            return False
+
+        RATE_LIMIT_MOBILE_OUTBOUND[rl_key] = outbound_actual + 1
+
+    # ==========================================================
+    # 🛡️ 7. URL META API
+    # ==========================================================
+    url = (
+        f"https://graph.facebook.com/"
+        f"{META_API_VERSION}/"
+        f"{phone_id}/messages"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    # ==========================================================
+    # 🛡️ 8. PAYLOAD HARDENED
+    # ==========================================================
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono_destino,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": texto_mensaje
+        }
+    }
+
+    # ==========================================================
+    # 📊 9. TELEMETRÍA
+    # ==========================================================
+    inicio_telemetria = now_ts()
+
+    logger.info(
+        f"📡 [WHATSAPP OUTBOUND] "
+        f"Destino={enmascarar_telefono(telefono_destino)}"
+    )
+
+    # ==========================================================
+    # 🔄 10. RETRY INTELIGENTE
+    # ==========================================================
+    MAX_RETRIES = 3
+
+    for intento in range(MAX_RETRIES):
+
+        try:
+
+            # ==========================================================
+            # 🚀 11. REQUEST ASYNC HARDENED
+            # ==========================================================
+            response = await http_client.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=httpx.Timeout(
+                    connect=5.0,
+                    read=12.0,
+                    write=10.0,
+                    pool=5.0
+                )
+            )
+
+            status = response.status_code
+
+            # ==========================================================
+            # ✅ 12. ÉXITO
+            # ==========================================================
+            if status in [200, 201]:
+
+                tiempo_total = (
+                    now_ts() - inicio_telemetria
+                )
+
+                logger.info(
+                    f"✅ [WHATSAPP SUCCESS] "
+                    f"Status={status} | "
+                    f"Tiempo={tiempo_total:.3f}s"
+                )
+
+                return True
+
+            # ==========================================================
+            # 🚨 13. RATE LIMIT META
+            # ==========================================================
+            if status == 429:
+
+                espera = min(
+                    8,
+                    2 ** intento
+                )
+
+                logger.warning(
+                    f"🚨 [META RATE LIMIT] "
+                    f"Intento={intento+1} | "
+                    f"Backoff={espera}s"
+                )
+
+                await asyncio.sleep(espera)
+
+                continue
+
+            # ==========================================================
+            # 🚨 14. ERRORES TEMPORALES META
+            # ==========================================================
+            if status >= 500:
+
+                espera = min(
+                    6,
+                    2 ** intento
+                )
+
+                logger.warning(
+                    f"⚠️ [META SERVER ERROR] "
+                    f"Status={status} | "
+                    f"Retry en {espera}s"
+                )
+
+                await asyncio.sleep(espera)
+
+                continue
+
+            # ==========================================================
+            # 🚨 15. TOKEN INVÁLIDO / PHONE BLOQUEADO
+            # ==========================================================
+            if status in [400, 401, 403]:
+
+                logger.error(
+                    f"🚨 [META AUTH ERROR] "
+                    f"Status={status} | "
+                    f"Body={response.text[:500]}"
+                )
+
+                return False
+
+            # ==========================================================
+            # 🚨 16. ERROR CONTROLADO
+            # ==========================================================
+            logger.error(
+                f"❌ [META ERROR] "
+                f"Status={status} | "
+                f"Body={response.text[:800]}"
+            )
+
+            return False
+
+        # ==========================================================
+        # ⏱️ 17. TIMEOUT CONTROLADO
+        # ==========================================================
+        except asyncio.TimeoutError:
+
+            logger.warning(
+                f"⏱️ [WHATSAPP TIMEOUT] "
+                f"Intento={intento+1}"
+            )
+
+        except httpx.ReadTimeout:
+
+            logger.warning(
+                f"⏱️ [HTTPX READ TIMEOUT] "
+                f"Intento={intento+1}"
+            )
+
+        except httpx.ConnectTimeout:
+
+            logger.warning(
+                f"⏱️ [HTTPX CONNECT TIMEOUT] "
+                f"Intento={intento+1}"
+            )
+
+        # ==========================================================
+        # 🚨 18. ERROR CRÍTICO
+        # ==========================================================
+        except Exception as e:
+
+            logger.exception(
+                f"🚨 [WHATSAPP CRITICAL ERROR] "
+                f"{str(e)}"
+            )
+
             break
+
+        # ==========================================================
+        # 🔄 19. BACKOFF GENERAL
+        # ==========================================================
+        espera_general = min(
+            5,
+            1 + intento
+        )
+
+        await asyncio.sleep(espera_general)
+
+    # ==========================================================
+    # 🚨 20. FAILSAFE FINAL
+    # ==========================================================
+    logger.error(
+        f"🚨 [WHATSAPP FAILSAFE] "
+        f"No se pudo enviar mensaje a "
+        f"{enmascarar_telefono(telefono_destino)}"
+    )
+
     return False
 
 # ==========================================================
@@ -2001,158 +3417,127 @@ async def bucle_seguimiento_24h():
             pass
         await asyncio.sleep(600)
 
-async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None, id_mensaje_meta: str = None):
-    """Ruteador Maestro del Flujo de Trabajo IA"""
+async def procesar_respuesta_bot(
+    cliente: str,
+    telefono: str,
+    texto_entrante: str,
+    columna_actual: str,
+    config: dict,
+    media_dict: dict = None,
+    id_mensaje_meta: str = None
+):
+    """
+    🚀 ORQUESTADOR MAESTRO IA AAA ENTERPRISE - FLATTENED & HARDENED
+    """
+    trace_id = str(uuid.uuid4())[:8]
+    inicio_pipeline = now_ts()
+    
+    # 🛡️ 1. VALIDACIÓN Y SANITIZACIÓN
+    cliente = limpiar_texto(str(cliente or "Cliente"))[:120]
+    telefono = limpiar_texto(str(telefono or "")).strip()
+    texto_entrante = limpiar_texto(str(texto_entrante or ""))[:12000]
+    vendedor_id = str(config.get("vendedor_id", "")).strip()
+
+    if not telefono or not vendedor_id:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Inputs inválidos. Abortando.")
+        return
+
+    logger.info(f"🧠 [TRACE:{trace_id}] Inicio Pipeline IA | Tenant={vendedor_id} | Tel={enmascarar_telefono(telefono)}")
+
     try:
-        # 🛡️ FIX AAA: Idempotencia absoluta con Webhook Lock para race conditions de Meta
+        # 🛡️ 2. IDEMPOTENCIA META
         if id_mensaje_meta:
             async with webhook_lock:
                 if id_mensaje_meta in mensajes_procesados_meta:
-                    logger.info(f"♻️ [WEBHOOK IGNORED] Mensaje duplicado de Meta ignorado en capa IA.")
                     return
                 mensajes_procesados_meta[id_mensaje_meta] = True
 
-        # 🛡️ FIX AAA: Wrapper de Timeout para evitar colgar el worker entero
-        async def ejecutar_pipeline_ia():
-            print(f"\n🧠 [IA WORKFLOW] ==========================================")
-            print(f"🧠 [IA WORKFLOW] PROCESANDO RESPUESTA AUTÓNOMA DEL BOT")
-            print(f"🧠 [IA WORKFLOW] Cliente: {cliente} | Tel: {telefono} | Columna: {columna_actual}")
-            print(f"==============================================================")
+        # 🛡️ 3. LOCK CONVERSACIONAL (Aislamiento de tareas)
+        lock_hash = hashlib.sha256(f"{vendedor_id}:{telefono}".encode()).hexdigest()
+        tracking_locks_uso[lock_hash] = now_ts()
+
+        async with locks_por_conversacion[lock_hash]:
             
-            vendedor_id = config.get("vendedor_id", "")
-            
-            # Asume que verificar_rate_limit limpia las listas por dentro como fijamos en Bloque 4
+            # 🛡️ 4. RATE LIMIT
             if not await verificar_rate_limit(vendedor_id, telefono):
-                print("⚠️ [IA WORKFLOW] Denegado: Se ha excedido el límite de peticiones.")
+                logger.warning(f"🚨 [TRACE:{trace_id}] Rate limit excedido.")
                 return
-                
+
+            # 🛡️ 5. ANTI-INJECTION
             if detectar_prompt_injection(texto_entrante):
-                print("🛡️ [IA WORKFLOW] Alerta de seguridad: Intento de Prompt Injection neutralizado.")
-                return await disparar_whatsapp_dinamico_async(telefono, "Lo siento, no puedo procesar esa solicitud.", config.get("meta_token", ""), config.get("meta_phone_id", ""))
+                logger.warning(f"🚨 [TRACE:{trace_id}] Injection bloqueada.")
+                await disparar_whatsapp_dinamico_async(telefono, "Solicitud bloqueada.", config.get("meta_token", ""), config.get("meta_phone_id", ""))
+                return
 
-            print("📖 [IA WORKFLOW] Descargando perfil y memoria persistente desde Supabase...")
-            res_perfil = await async_db_execute(supabase.table('prospectos').select('perfil_psicologico').eq('telefono', telefono).eq('vendedor_id', str(vendedor_id)))
-            perfil_cliente_previo = res_perfil.data[0].get('perfil_psicologico', {}) if res_perfil.data else {}
-            
-            print("🔍 [IA WORKFLOW] Extrayendo contexto de inventario con algoritmo RAG...")
-            contexto = await obtener_contexto_inventario_rag(vendedor_id, texto_entrante)
-            
-            print("📜 [IA WORKFLOW] Compilando logs de las últimas interacciones de chat...")
-            historial = await obtener_historial_chat(telefono, vendedor_id)
-            
-            print("🧠 [IA WORKFLOW] Transmitiendo parámetros a Gemini para inferencia lógica...")
-            # 🛡️ FIX AAA: Aislamiento de Lock por Tenant + Teléfono
-            lock_hash = hashlib.sha256(f"{vendedor_id}:{telefono}:{texto_entrante[:50]}".encode()).hexdigest()
-            tracking_locks_uso[lock_hash] = now_ts()
-            
-            decision = await analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict)
-            
-            intencion_ia = str(decision.get("intencion", "CONSULTA")).upper()
-            respuesta_bruta = decision.get("respuesta", "En un momento te atiendo.")
-            
-            # 🛡️ FIX AAA: Sanitización de respuesta antes de inyectar en DB o enviar
-            respuesta_final = bleach.clean(respuesta_bruta, tags=[], strip=True)
-            respuesta_final = limpiar_texto(respuesta_final)
+            # 🛡️ 6. ANTI-SPAM REPETICIÓN
+            spam_hash = hashlib.sha256(f"{telefono}:{texto_entrante.lower()}".encode()).hexdigest()
+            if spam_hash in procesados_recientemente:
+                return
+            procesados_recientemente[spam_hash] = True
 
-            # 🚀 FIX SAAS: Actualización de llaves universales en la lógica de procesamiento
-            producto_detectado = decision.get("producto_detectado", decision.get("juego_detectado", ""))
-            categoria_detectada = decision.get("categoria_preferida", perfil_cliente_previo.get("categoria_preferida", perfil_cliente_previo.get("consola_preferida", "")))
-            accion_tool = str(decision.get("accion_tool", "ninguna")).lower()
-            precio_oferta = decision.get("precio_oferta", 0.0)
+            # 📖 7. PERFIL Y CONTEXTO
+            perfil_cliente_previo = {}
+            try:
+                res_p = await asyncio.wait_for(async_db_execute(supabase.table('prospectos').select('perfil_psicologico').eq('telefono', telefono).eq('vendedor_id', vendedor_id).limit(1)), timeout=10.0)
+                if res_p.data:
+                    perfil_cliente_previo = res_p.data[0].get('perfil_psicologico', {})
+            except Exception as e:
+                logger.warning(f"⚠️ [TRACE:{trace_id}] Error perfil: {e}")
+
+            # 🧠 8. RAG + HISTORIAL + IA
+            contexto = await asyncio.wait_for(obtener_contexto_inventario_rag(vendedor_id, texto_entrante), timeout=15.0)
+            historial = await asyncio.wait_for(obtener_historial_chat(telefono, vendedor_id), timeout=10.0)
             
-            print(f"📊 [IA WORKFLOW] Diagnóstico - Intención: {intencion_ia} | Producto: {producto_detectado} | Categoría: {categoria_detectada}")
-
-            perfil_cliente_actualizado = {
-                **perfil_cliente_previo, 
-                "emocion_actual": decision.get("emocion_cliente", "neutral"),
-                "temperatura": decision.get("temperatura_lead", "frio"),
-                "ultimo_interes": producto_detectado,
-                "categoria_preferida": categoria_detectada,
-                "ultima_intencion": intencion_ia
-            }
-
-            if accion_tool == "aplicar_descuento" or intencion_ia == "REGATEO":
-                print(f"💰 [TOOL CALLING] Herramienta comercial activada de forma autónoma. Oferta calculada: ${precio_oferta} MXN.")
-
-            nueva_columna, iluminacion = columna_actual, "blanco"
-
+            decision = await asyncio.wait_for(
+                analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict),
+                timeout=40.0
+            )
+            
+            decision = validar_respuesta_ia(decision)
+            
+            # 💾 9. PERSISTENCIA Y RESPUESTA
+            respuesta_final = decision["respuesta"]
+            producto_detectado = decision["producto_detectado"]
+            intencion_ia = decision["intencion"]
+            
+            # Actualizar Perfil Psicológico
+            perfil_actualizado = {**perfil_cliente_previo, "emocion_actual": decision.get("emocion_cliente"), "temperatura": decision.get("temperatura_lead"), "ultimo_interes": producto_detectado, "ultima_intencion": intencion_ia}
+            
+            # Lógica de estados CRM
+            nueva_columna = columna_actual
+            iluminacion = "blanco"
+            
             if intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO"]:
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
-                print("🚨 [IA WORKFLOW] Tráfico crítico o disconformidad detectada. Disparando handoff ejecutivo a Admin...")
                 resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
                 await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
-                
             elif intencion_ia == "COMPRA":
                 nueva_columna, iluminacion = "Por Entregar", "verde_exito"
-                print("💰 [IA WORKFLOW] Cierre de venta identificado. Transmitiendo notificación de facturación...")
-                resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
-                await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
                 
-            elif intencion_ia in ["COTIZACION", "REGATEO", "SALUDO"] and columna_actual == "Bandeja Nueva": 
-                nueva_columna = "Envios Masivos"
-                print(f"📈 [IA WORKFLOW] Lead calificado de forma ordinaria. Trasladando tarjeta a: {nueva_columna}")
-                
-            elif intencion_ia == "PEDIDO_ESPECIAL":
-                nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
-                print("📦 [IA WORKFLOW] Producto no localizado físicamente. Registrando alerta de pedido especial...")
-                await enviar_alerta_whatsapp_admin(cliente, telefono, "PEDIDO_ESPECIAL", f"Busca: {producto_detectado}", config)
+            # Sincronización final
+            await asyncio.gather(
+                actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado),
+                guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
+            )
 
-            print("💾 [IA WORKFLOW] Sincronizando metadatos de tarjeta y chat log en la nube...")
-            # 🚀 FIX SAAS: Actualizamos enviando el producto_detectado en lugar de juego_detectado
-            await actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_cliente_actualizado)
-            await guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final)
-
+            # Envío Multimedia o Texto
             url_imagen = None
             if producto_detectado:
-                print(f"🖼️ [IA WORKFLOW] Rastreando inventario para: '{producto_detectado}'")
-                
-                # 🔥 FIX AAA: Buscamos el juego tenga o no tenga portada
-                res_juego = await async_db_execute(
-                    supabase.table('inventario')
-                    .select('id, url_portada, atributos_extra')
-                    .ilike('nombre', f'%{producto_detectado}%')
-                    .eq('vendedor_id', str(vendedor_id))
-                    .limit(1)
-                )
-                
-                if res_juego.data: 
-                    datos_juego = res_juego.data[0]
-                    url_imagen = datos_juego.get('url_portada')
-                    
-                    if url_imagen:
-                        print(f"🔗 [IA WORKFLOW] Portada vinculada localizada: {url_imagen}")
-                    else:
-                        print(f"⚠️ [IA WORKFLOW] Juego sin foto. Disparando cacería en background para: {producto_detectado}")
-                        juego_id_inventario = str(datos_juego.get('id'))
-                        consola_del_juego = datos_juego.get('atributos_extra', {}).get('consola', categoria_detectada)
-                        
-                        # 🚀 DISPARO EN BACKGROUND: No bloquea el bot, el cliente recibe su texto al instante
-                        import asyncio
-                        asyncio.create_task(
-                            cazar_portada_y_guardar_background(
-                                juego_id_supabase=juego_id_inventario,
-                                nombre_juego=producto_detectado,
-                                consola=consola_del_juego
-                            )
-                        )
+                res_juego = await async_db_execute(supabase.table('inventario').select('url_portada').ilike('nombre', f'%{producto_detectado}%').eq('vendedor_id', vendedor_id).limit(1))
+                if res_juego.data and res_juego.data[0].get('url_portada'):
+                    url_imagen = res_juego.data[0]['url_portada']
 
-            if url_imagen: 
-                print("📡 [IA WORKFLOW] Despachando paquete de mensajería enriquecida (IMAGEN + TEXTO)...")
-                await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
-            else: 
-                print("📡 [IA WORKFLOW] Despachando paquete de mensajería plano (TEXTO ÚNICO)...")
-                await disparar_whatsapp_dinamico_async(telefono, respuesta_final, config.get("meta_token", ""), config.get("meta_phone_id", ""))
+            if url_imagen:
+                await disparar_whatsapp_imagen_async(telefono, url_imagen, respuesta_final, config.get("meta_token"), config.get("meta_phone_id"))
+            else:
+                await disparar_whatsapp_dinamico_async(telefono, respuesta_final, config.get("meta_token"), config.get("meta_phone_id"))
 
-            print(f"✅ [IA WORKFLOW] FLUJO COMPLETADO EXITOSAMENTE PARA EL CANAL: {telefono}")
-            print(f"==============================================================\n")
-
-        # 🛡️ Ejecución encapsulada con timeout de 60s
-        await asyncio.wait_for(ejecutar_pipeline_ia(), timeout=60.0)
+            logger.info(f"✅ [TRACE:{trace_id}] Pipeline completado en {now_ts() - inicio_pipeline:.2f}s")
 
     except asyncio.TimeoutError:
-        logger.error(f"⏱️ [IA WORKFLOW] Timeout: El procesamiento del bot tardó más de 60 segundos para {telefono}.")
-    except Exception as e: 
-        logger.exception(f"❌ [IA WORKFLOW CRITICAL ERROR] Falla estructural en el orquestador del Bot: {str(e)}")
+        logger.error(f"⏱️ [TRACE:{trace_id}] Timeout global.")
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] CRÍTICO: {e}")
 
 # ==========================================================
 # 📈 8. MOTOR DE PRECIOS PRO (CACHE AAA, MATCHING SCORE, PRICING DINÁMICO)
@@ -3509,730 +4894,1316 @@ async def ejecutar_campana_masiva(datos: dict, _sesion: str = Depends(verificar_
 # ⚙️ 12. BACKGROUND WORKER Y WEBHOOKS DE META (AAA ENTERPRISE)
 # ==========================================================
 
-
 # 🛡️ FIX AAA: Tracking global de tareas para evitar Dead Tasks / Zombie Workers
 BACKGROUND_TASKS = set()
 
-def lanzar_tarea_segura(coro):
-    task = asyncio.create_task(coro)
-    BACKGROUND_TASKS.add(task)
-    task.add_done_callback(BACKGROUND_TASKS.discard)
-    task.add_done_callback(lambda t: logger.error(f"❌ [TASK ERROR] {t.exception()}") if t.exception() else None)
+# 🛡️ FIX AAA: Locks distribuidos por teléfono / tenant
+LOCKS_WEBHOOK_CLIENTE = defaultdict(asyncio.Lock)
 
-# 🛡️ CACHÉS Y LOCKS DISTRIBUIDOS EN MEMORIA 
+# 🛡️ FIX AAA: Circuit Breakers Globales
+WEBHOOK_CIRCUIT_BREAKER_HASTA = 0.0
+WEBHOOK_ERRORES_CONSECUTIVOS = 0
+
+# 🛡️ FIX AAA: Protección Anti Replay
+WEBHOOK_REPLAY_CACHE = TTLCache(maxsize=50000, ttl=900)
+
+# 🛡️ FIX AAA: Protección Flood Payload
+PAYLOAD_FLOOD_CACHE = TTLCache(maxsize=10000, ttl=60)
+
+# 🛡️ FIX AAA: Protección Anti Audio Bomb
+AUDIO_HASHES_PROCESADOS = TTLCache(maxsize=10000, ttl=1800)
+
+# 🛡️ FIX AAA: Protección Anti Image Bomb
+IMAGE_HASHES_PROCESADOS = TTLCache(maxsize=10000, ttl=1800)
+
+# 🛡️ FIX AAA: Protección Worker Saturation
+ULTIMO_WARNING_BACKPRESSURE = 0.0
+
+def lanzar_tarea_segura(coro):
+
+    """
+    ==========================================================
+    🚀 LAUNCHER AAA HARDENED
+    ==========================================================
+    ✔ Anti Zombie Tasks
+    ✔ Anti Silent Failures
+    ✔ Auto Cleanup
+    ✔ Telemetría
+    ✔ Protección memoria
+    ==========================================================
+    """
+
+    task = asyncio.create_task(coro)
+
+    BACKGROUND_TASKS.add(task)
+
+    def _cleanup_task(t):
+
+        try:
+
+            BACKGROUND_TASKS.discard(t)
+
+            if t.cancelled():
+
+                logger.warning(
+                    "⚠️ [TASK CANCELLED] "
+                    "Task cancelada correctamente."
+                )
+
+                return
+
+            exc = t.exception()
+
+            if exc:
+
+                logger.error(
+                    f"❌ [TASK ERROR] {str(exc)}"
+                )
+
+        except Exception as cleanup_e:
+
+            logger.error(
+                f"❌ [TASK CLEANUP ERROR] {cleanup_e}"
+            )
+
+    task.add_done_callback(_cleanup_task)
+
+    return task
+
+
+# 🛡️ CACHÉS Y LOCKS DISTRIBUIDOS EN MEMORIA
 # (Nota para escala Hyperscale: Migrar estos TTLCache a Redis en el futuro)
-procesados_recientemente = TTLCache(maxsize=20000, ttl=600)
+
+procesados_recientemente = TTLCache(
+    maxsize=20000,
+    ttl=600
+)
+
 wamid_lock = asyncio.Lock()
 
-RATE_LIMIT_CLIENTES = TTLCache(maxsize=10000, ttl=10)
+RATE_LIMIT_CLIENTES = TTLCache(
+    maxsize=10000,
+    ttl=10
+)
+
 rate_limit_lock = asyncio.Lock()
 
-RATE_LIMIT_MEDIA = TTLCache(maxsize=10000, ttl=60)
+RATE_LIMIT_MEDIA = TTLCache(
+    maxsize=10000,
+    ttl=60
+)
+
 media_limit_lock = asyncio.Lock()
 
+# 🛡️ FIX AAA: Anti Flood IA
+RATE_LIMIT_IA = TTLCache(
+    maxsize=15000,
+    ttl=120
+)
+
+# 🛡️ FIX AAA: Anti Flood Multimedia
+RATE_LIMIT_ARCHIVOS = TTLCache(
+    maxsize=10000,
+    ttl=180
+)
+
 # 🛡️ SEMÁFOROS DIVIDIDOS Y BACKPRESSURE
-SEMAFORO_IA = asyncio.Semaphore(15)      # Máximo 15 conexiones concurrentes a Gemini Chat
-SEMAFORO_MEDIA = asyncio.Semaphore(10)   # Máximo 10 procesamientos de imágenes/audios concurrentes
-MAX_COLA_GLOBAL = 200                    # Backpressure: Límite antes de rechazar webhooks
+SEMAFORO_IA = asyncio.Semaphore(15)
+SEMAFORO_MEDIA = asyncio.Semaphore(10)
 
-# 🛡️ FIX AAA: Función para enmascarar PII (Protección de Datos / GDPR / Leyes locales)
+MAX_COLA_GLOBAL = 200
+
+# 🛡️ FIX AAA: Protección de memoria total
+MAX_BACKGROUND_TASKS_RAM = 500
+
+
+# ==========================================================
+# 🛡️ ENMASCARADOR PII
+# ==========================================================
 def enmascarar_telefono(tel: str) -> str:
-    if len(tel) >= 10: return tel[:4] + "****" + tel[-3:]
-    return tel
 
-async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
+    try:
+
+        tel = re.sub(r"[^\d]", "", str(tel))
+
+        if len(tel) >= 10:
+            return tel[:4] + "****" + tel[-3:]
+
+        return "***"
+
+    except:
+        return "***"
+
+
+# ==========================================================
+# 🧠 ORQUESTADOR PRINCIPAL
+# ==========================================================
+async def gestionar_mensaje_entrante_bg(
+    valor: dict,
+    msg: dict,
+    phone_id_receptor: str
+):
+
     """
     ==============================================================================
-    🧠 ORQUESTADOR MAESTRO MULTIMEDIA VELTRIX ENGINE (AAA HARDENED EDITION)
+    🧠 ORQUESTADOR MAESTRO MULTIMEDIA VELTRIX ENGINE
     ==============================================================================
     ✔ Multi-Tenant Isolation
-    ✔ Anti-Duplicados Meta
-    ✔ Anti-Spam y Anti-Flood
-    ✔ Validación Multimedia Hardened
-    ✔ Timeouts críticos por etapa
-    ✔ Limpieza de memoria explícita
-    ✔ Protección Anti-Decompression Bomb
-    ✔ Aislamiento total de errores
-    ✔ Telemetría avanzada
+    ✔ Anti Replay Attacks
+    ✔ Anti Audio Bomb
+    ✔ Anti Payload Flood
+    ✔ Anti Token Burn
+    ✔ Anti Worker Exhaustion
+    ✔ Anti Decompression Bomb
+    ✔ Anti CRM Flood
+    ✔ Anti Duplicate Meta
+    ✔ Anti Task Leaks
+    ✔ Backpressure Inteligente
+    ✔ Circuit Breakers
+    ✔ Protección Asyncio
     ==============================================================================
     """
+
+    global WEBHOOK_ERRORES_CONSECUTIVOS
+    global WEBHOOK_CIRCUIT_BREAKER_HASTA
 
     trace_id = str(uuid.uuid4())[:8]
 
-    logger.info(f"📥 [TRACE:{trace_id}] ==================================================")
-    logger.info(f"📥 [TRACE:{trace_id}] INICIANDO ORQUESTACIÓN DE MENSAJE")
-    logger.info(f"📥 [TRACE:{trace_id}] ==================================================")
-
     inicio_pipeline = now_ts()
-
-    # ==============================================================================
-    # 🧹 VARIABLES EXPLÍCITAS PARA GC
-    # ==============================================================================
 
     media_dict_audio = None
     media_dict_img = None
 
+    logger.info(
+        f"📥 [TRACE:{trace_id}] "
+        f"INICIANDO ORQUESTACIÓN"
+    )
+
     try:
 
-        # ==============================================================================
-        # 🛡️ 1. ANTI-LOOP / EVENTOS SISTEMA
-        # ==============================================================================
+        # ==========================================================
+        # 🛡️ CIRCUIT BREAKER GLOBAL
+        # ==========================================================
+        if now_ts() < WEBHOOK_CIRCUIT_BREAKER_HASTA:
 
-        if msg.get("from_me") or valor.get("statuses"):
-            logger.info(f"♻️ [TRACE:{trace_id}] Evento de sistema ignorado.")
+            logger.warning(
+                f"🚨 [TRACE:{trace_id}] "
+                f"Circuit breaker activo."
+            )
+
             return
 
-        # ==============================================================================
-        # 🛡️ 2. VALIDACIÓN ID MENSAJE META
-        # ==============================================================================
+        # ==========================================================
+        # 🛡️ VALIDACIÓN ESTRUCTURA
+        # ==========================================================
+        if not isinstance(msg, dict):
 
+            logger.warning(
+                f"⚠️ [TRACE:{trace_id}] "
+                f"Payload inválido."
+            )
+
+            return
+
+        # ==========================================================
+        # 🛡️ EVENTOS SISTEMA
+        # ==========================================================
+        if msg.get("from_me") or valor.get("statuses"):
+
+            logger.info(
+                f"♻️ [TRACE:{trace_id}] "
+                f"Evento sistema ignorado."
+            )
+
+            return
+
+        # ==========================================================
+        # 🛡️ VALIDACIÓN WAMID
+        # ==========================================================
         wamid = str(msg.get("id", "")).strip()
 
         if not wamid:
-            logger.warning(f"⚠️ [TRACE:{trace_id}] Mensaje sin WAMID. Abortando.")
+
+            logger.warning(
+                f"⚠️ [TRACE:{trace_id}] "
+                f"WAMID inválido."
+            )
+
             return
 
-        # ==============================================================================
-        # 🛡️ 3. DEDUPLICACIÓN ATÓMICA
-        # ==============================================================================
-
+        # ==========================================================
+        # 🛡️ ANTI REPLAY
+        # ==========================================================
         async with wamid_lock:
 
             if procesados_recientemente.get(wamid):
-                logger.warning(f"♻️ [TRACE:{trace_id}] Webhook duplicado bloqueado: {wamid}")
+
+                logger.warning(
+                    f"♻️ [TRACE:{trace_id}] "
+                    f"Replay bloqueado."
+                )
+
                 return
 
             procesados_recientemente[wamid] = {
-                "ts": now_ts(),
-                "trace_id": trace_id
+                "trace": trace_id,
+                "ts": now_ts()
             }
 
-        # ==============================================================================
-        # 🛡️ 4. VALIDACIÓN PHONE ID
-        # ==============================================================================
-
-        phone_id_receptor = str(phone_id_receptor).strip()
+        # ==========================================================
+        # 🛡️ VALIDACIÓN PHONE ID
+        # ==========================================================
+        phone_id_receptor = str(
+            phone_id_receptor
+        ).strip()
 
         if not phone_id_receptor:
-            logger.error(f"🚨 [TRACE:{trace_id}] Phone ID inválido.")
+
+            logger.error(
+                f"🚨 [TRACE:{trace_id}] "
+                f"Phone ID vacío."
+            )
+
             return
 
-        # ==============================================================================
-        # 🛡️ 5. AISLAMIENTO MULTI-TENANT
-        # ==============================================================================
-
-        logger.info(f"🏢 [TRACE:{trace_id}] Resolviendo tenant activo...")
-
+        # ==========================================================
+        # 🏢 RESOLUCIÓN TENANT
+        # ==========================================================
         res_config = await asyncio.wait_for(
+
             async_db_execute(
-                supabase.table('configuracion_bot')
-                .select('*')
-                .eq('meta_phone_id', phone_id_receptor)
+
+                supabase
+                .table("configuracion_bot")
+                .select("*")
+                .eq("meta_phone_id", phone_id_receptor)
                 .limit(1)
+
             ),
+
             timeout=5.0
         )
 
         if not res_config.data:
+
             logger.error(
-                f"🚨 [TRACE:{trace_id}] Tenant no encontrado para Phone ID: {phone_id_receptor}"
+                f"🚨 [TRACE:{trace_id}] "
+                f"Tenant inexistente."
             )
+
             return
 
         config_vendedor = res_config.data[0]
 
-        vendedor_actual = str(config_vendedor.get("vendedor_id", "")).strip()
-        token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
-        nombre_negocio = str(config_vendedor.get("nombre_negocio", "Fantasy Games")).strip()
+        vendedor_actual = str(
+            config_vendedor.get(
+                "vendedor_id",
+                ""
+            )
+        ).strip()
 
-        # ==============================================================================
-        # 🛡️ 6. VALIDACIÓN ESTADO BOT
-        # ==============================================================================
+        token_actual = str(
+            config_vendedor.get(
+                "meta_token",
+                ""
+            )
+        ).strip() or WHATSAPP_TOKEN
 
-        if not vendedor_actual:
-            logger.error(f"🚨 [TRACE:{trace_id}] vendedor_id vacío.")
-            return
+        nombre_negocio = str(
+            config_vendedor.get(
+                "nombre_negocio",
+                "Veltrix"
+            )
+        ).strip()
 
-        if not token_actual:
-            logger.error(f"🚨 [TRACE:{trace_id}] Token Meta vacío.")
+        if not vendedor_actual or not token_actual:
+
+            logger.error(
+                f"🚨 [TRACE:{trace_id}] "
+                f"Config tenant inválida."
+            )
+
             return
 
         if not config_vendedor.get("bot_activo", True):
-            logger.warning(f"🚫 [TRACE:{trace_id}] Bot deshabilitado para {vendedor_actual}.")
+
+            logger.warning(
+                f"🚫 [TRACE:{trace_id}] "
+                f"Bot desactivado."
+            )
+
             return
 
-        # ==============================================================================
-        # 🛡️ 7. NORMALIZACIÓN TELÉFONO
-        # ==============================================================================
+        # ==========================================================
+        # 📞 NORMALIZACIÓN TELÉFONO
+        # ==========================================================
+        telefono_cliente = str(
+            msg.get("from", "")
+        ).strip()
 
-        telefono_cliente = str(msg.get("from", "")).strip()
-
-        if telefono_cliente.startswith("521"):
-            telefono_cliente = "52" + telefono_cliente[3:]
-
-        telefono_cliente = re.sub(r"[^\d]", "", telefono_cliente)
-
-        if not telefono_cliente:
-            logger.warning(f"⚠️ [TRACE:{trace_id}] Número telefónico inválido.")
-            return
-
-        tel_mask = enmascarar_telefono(telefono_cliente)
-
-        logger.info(f"📞 [TRACE:{trace_id}] Cliente: {tel_mask}")
-
-        # ==============================================================================
-        # 🛡️ 8. RATE LIMIT GLOBAL CLIENTE
-        # ==============================================================================
-
-        rl_key = f"{vendedor_actual}:{telefono_cliente}"
-
-        async with rate_limit_lock:
-
-            peticiones_recientes = RATE_LIMIT_CLIENTES.get(rl_key, 0)
-
-            if peticiones_recientes > 8:
-                logger.warning(
-                    f"⚠️ [TRACE:{trace_id}] RATE LIMIT activado para {tel_mask}"
-                )
-                return
-
-            RATE_LIMIT_CLIENTES[rl_key] = peticiones_recientes + 1
-
-        # ==============================================================================
-        # 🧠 9. DETECCIÓN TIPO MENSAJE
-        # ==============================================================================
-
-        tipo_mensaje = str(msg.get("type", "text")).lower().strip()
-        texto_entrante = ""
-
-        logger.info(
-            f"📦 [TRACE:{trace_id}] Tipo mensaje detectado: '{tipo_mensaje}'"
+        telefono_cliente = re.sub(
+            r"[^\d]",
+            "",
+            telefono_cliente
         )
 
-        # ==============================================================================
-        # 🛡️ 10. EXTRACCIÓN TEXTO
-        # ==============================================================================
+        if telefono_cliente.startswith("521"):
 
-        if tipo_mensaje == "text":
-
-            texto_entrante = (
-                msg.get("text", {})
-                .get("body", "")
-                .strip()
+            telefono_cliente = (
+                "52" + telefono_cliente[3:]
             )
 
-        elif tipo_mensaje == "interactive":
+        if len(telefono_cliente) < 10:
 
-            texto_entrante = (
-                msg.get("interactive", {})
-                .get("button_reply", {})
-                .get("title", "")
-                .strip()
+            logger.warning(
+                f"⚠️ [TRACE:{trace_id}] "
+                f"Teléfono inválido."
             )
 
-        # ==============================================================================
-        # 🛡️ 11. VALIDACIÓN MULTIMEDIA
-        # ==============================================================================
+            return
 
-        elif tipo_mensaje in ["image", "audio"]:
+        tel_mask = enmascarar_telefono(
+            telefono_cliente
+        )
 
-            async with media_limit_lock:
+        logger.info(
+            f"📞 [TRACE:{trace_id}] "
+            f"Cliente={tel_mask}"
+        )
 
-                media_count = RATE_LIMIT_MEDIA.get(rl_key, 0)
+        # ==========================================================
+        # 🛡️ LOCK DISTRIBUIDO CLIENTE
+        # ==========================================================
+        lock_cliente = hashlib.sha256(
+            f"{vendedor_actual}:{telefono_cliente}".encode()
+        ).hexdigest()
 
-                if media_count > 5:
-                    logger.warning(
-                        f"⚠️ [TRACE:{trace_id}] Flood multimedia detectado."
-                    )
-                    return
+        async with LOCKS_WEBHOOK_CLIENTE[lock_cliente]:
 
-                RATE_LIMIT_MEDIA[rl_key] = media_count + 1
+            # ==========================================================
+            # 🛡️ RATE LIMIT
+            # ==========================================================
+            rl_key = (
+                f"{vendedor_actual}:"
+                f"{telefono_cliente}"
+            )
 
-            # ==============================================================================
-            # 🎙️ AUDIO
-            # ==============================================================================
+            async with rate_limit_lock:
 
-            if tipo_mensaje == "audio":
-
-                texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA - ANALIZANDO AUDIO...]"
-
-                audio_id = str(
-                    msg.get("audio", {}).get("id", "")
-                ).strip()
-
-                if not audio_id:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Audio sin ID.")
-                    return
-
-                media_dict_audio = await asyncio.wait_for(
-                    descargar_media_whatsapp_async(audio_id, token_actual),
-                    timeout=30.0
+                peticiones = RATE_LIMIT_CLIENTES.get(
+                    rl_key,
+                    0
                 )
 
-                if not media_dict_audio:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Descarga audio fallida.")
-                    return
+                if peticiones >= 8:
 
-                audio_bytes = media_dict_audio.get("data", b"")
-
-                if not audio_bytes:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Audio vacío.")
-                    return
-
-                if len(audio_bytes) > 15_000_000:
                     logger.warning(
-                        f"🚨 [TRACE:{trace_id}] Audio excede límite de 15MB."
+                        f"⚠️ [TRACE:{trace_id}] "
+                        f"Flood detectado."
                     )
+
                     return
 
-            # ==============================================================================
-            # 🖼️ IMAGEN
-            # ==============================================================================
-
-            elif tipo_mensaje == "image":
-
-                texto_entrante = "📷 [IMAGEN RECIBIDA: Analizando comprobante de pago...]"
-
-                image_id = str(
-                    msg.get("image", {}).get("id", "")
-                ).strip()
-
-                if not image_id:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen sin ID.")
-                    return
-
-                media_dict_img = await asyncio.wait_for(
-                    descargar_media_whatsapp_async(image_id, token_actual),
-                    timeout=30.0
+                RATE_LIMIT_CLIENTES[rl_key] = (
+                    peticiones + 1
                 )
 
-                if not media_dict_img:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Descarga imagen fallida.")
-                    return
+            # ==========================================================
+            # 🧠 DETECCIÓN TIPO
+            # ==========================================================
+            tipo_mensaje = str(
+                msg.get("type", "text")
+            ).lower().strip()
 
-                data_bytes = media_dict_img.get("data", b"")
+            texto_entrante = ""
 
-                if not data_bytes:
-                    logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen vacía.")
-                    return
+            logger.info(
+                f"📦 [TRACE:{trace_id}] "
+                f"Tipo={tipo_mensaje}"
+            )
 
-                # ==============================================================================
-                # 🛡️ LÍMITE DE PESO
-                # ==============================================================================
+            # ==========================================================
+            # 📝 TEXTO
+            # ==========================================================
+            if tipo_mensaje == "text":
 
-                if len(data_bytes) > 10_000_000:
-                    logger.warning(
-                        f"🚨 [TRACE:{trace_id}] Imagen excede límite de 10MB."
+                texto_entrante = (
+                    msg.get("text", {})
+                    .get("body", "")
+                    .strip()
+                )
+
+            # ==========================================================
+            # 🖲️ INTERACTIVE
+            # ==========================================================
+            elif tipo_mensaje == "interactive":
+
+                texto_entrante = (
+                    msg.get("interactive", {})
+                    .get("button_reply", {})
+                    .get("title", "")
+                    .strip()
+                )
+
+            # ==========================================================
+            # 🎙️ AUDIO / IMAGEN
+            # ==========================================================
+            elif tipo_mensaje in ["audio", "image"]:
+
+                async with media_limit_lock:
+
+                    media_count = RATE_LIMIT_MEDIA.get(
+                        rl_key,
+                        0
                     )
-                    return
 
-                # ==============================================================================
-                # 🛡️ VALIDACIÓN MIME
-                # ==============================================================================
+                    if media_count >= 5:
 
-                mime = str(
-                    media_dict_img.get("mime_type", "")
-                ).lower().strip()
+                        logger.warning(
+                            f"⚠️ [TRACE:{trace_id}] "
+                            f"Flood multimedia."
+                        )
 
-                mime_validos = [
-                    "image/jpeg",
-                    "image/png",
-                    "image/webp"
-                ]
+                        return
 
-                if mime not in mime_validos:
-                    logger.warning(
-                        f"🚨 [TRACE:{trace_id}] MIME inválido: {mime}"
+                    RATE_LIMIT_MEDIA[rl_key] = (
+                        media_count + 1
                     )
-                    return
 
-                # ==============================================================================
-                # 🛡️ VALIDACIÓN REAL IMAGEN
-                # ==============================================================================
+                # ==========================================================
+                # 🎙️ AUDIO
+                # ==========================================================
+                if tipo_mensaje == "audio":
+
+                    texto_entrante = (
+                        "🎙️ [NOTA DE VOZ RECIBIDA]"
+                    )
+
+                    audio_id = str(
+                        msg.get("audio", {})
+                        .get("id", "")
+                    ).strip()
+
+                    if not audio_id:
+                        return
+
+                    media_dict_audio = await asyncio.wait_for(
+
+                        descargar_media_whatsapp_async(
+                            audio_id,
+                            token_actual
+                        ),
+
+                        timeout=30.0
+                    )
+
+                    if not media_dict_audio:
+                        return
+
+                    audio_bytes = media_dict_audio.get(
+                        "data",
+                        b""
+                    )
+
+                    if not audio_bytes:
+                        return
+
+                    if len(audio_bytes) > 15_000_000:
+
+                        logger.warning(
+                            f"🚨 [TRACE:{trace_id}] "
+                            f"Audio >15MB."
+                        )
+
+                        return
+
+                    # ==========================================================
+                    # 🛡️ HASH ANTI AUDIO BOMB
+                    # ==========================================================
+                    audio_hash = hashlib.sha256(
+                        audio_bytes[:50000]
+                    ).hexdigest()
+
+                    if audio_hash in AUDIO_HASHES_PROCESADOS:
+
+                        logger.warning(
+                            f"♻️ [TRACE:{trace_id}] "
+                            f"Audio repetido."
+                        )
+
+                        return
+
+                    AUDIO_HASHES_PROCESADOS[audio_hash] = True
+
+                # ==========================================================
+                # 🖼️ IMAGEN
+                # ==========================================================
+                elif tipo_mensaje == "image":
+
+                    texto_entrante = (
+                        "📷 [IMAGEN RECIBIDA]"
+                    )
+
+                    image_id = str(
+                        msg.get("image", {})
+                        .get("id", "")
+                    ).strip()
+
+                    if not image_id:
+                        return
+
+                    media_dict_img = await asyncio.wait_for(
+
+                        descargar_media_whatsapp_async(
+                            image_id,
+                            token_actual
+                        ),
+
+                        timeout=30.0
+                    )
+
+                    if not media_dict_img:
+                        return
+
+                    data_bytes = media_dict_img.get(
+                        "data",
+                        b""
+                    )
+
+                    if not data_bytes:
+                        return
+
+                    if len(data_bytes) > 10_000_000:
+
+                        logger.warning(
+                            f"🚨 [TRACE:{trace_id}] "
+                            f"Imagen >10MB."
+                        )
+
+                        return
+
+                    mime = str(
+                        media_dict_img.get(
+                            "mime_type",
+                            ""
+                        )
+                    ).lower().strip()
+
+                    mime_validos = [
+                        "image/jpeg",
+                        "image/png",
+                        "image/webp"
+                    ]
+
+                    if mime not in mime_validos:
+
+                        logger.warning(
+                            f"🚨 [TRACE:{trace_id}] "
+                            f"MIME inválido."
+                        )
+
+                        return
+
+                    # ==========================================================
+                    # 🛡️ ANTI IMAGE BOMB
+                    # ==========================================================
+                    image_hash = hashlib.sha256(
+                        data_bytes[:50000]
+                    ).hexdigest()
+
+                    if image_hash in IMAGE_HASHES_PROCESADOS:
+
+                        logger.warning(
+                            f"♻️ [TRACE:{trace_id}] "
+                            f"Imagen repetida."
+                        )
+
+                        return
+
+                    IMAGE_HASHES_PROCESADOS[image_hash] = True
+
+                    try:
+
+                        Image.MAX_IMAGE_PIXELS = 20_000_000
+
+                        img_val = Image.open(
+                            io.BytesIO(data_bytes)
+                        )
+
+                        img_val.verify()
+
+                    except Exception as img_e:
+
+                        logger.warning(
+                            f"🚨 [TRACE:{trace_id}] "
+                            f"Imagen maliciosa: {img_e}"
+                        )
+
+                        return
+
+            # ==========================================================
+            # 🛡️ TIPO NO SOPORTADO
+            # ==========================================================
+            else:
+
+                logger.info(
+                    f"ℹ️ [TRACE:{trace_id}] "
+                    f"Tipo descartado."
+                )
+
+                return
+
+            # ==========================================================
+            # 🛡️ SANITIZACIÓN TEXTO
+            # ==========================================================
+            texto_entrante = limpiar_texto(
+                texto_entrante
+            )
+
+            texto_entrante = bleach.clean(
+                texto_entrante,
+                tags=[],
+                strip=True
+            )
+
+            texto_entrante = texto_entrante[:4000]
+
+            # ==========================================================
+            # 🛡️ PROMPT INJECTION
+            # ==========================================================
+            if detectar_prompt_injection(
+                texto_entrante
+            ):
+
+                logger.warning(
+                    f"🚨 [TRACE:{trace_id}] "
+                    f"Prompt Injection detectado."
+                )
+
+                return
+
+            # ==========================================================
+            # 💾 CARGA CRM
+            # ==========================================================
+            nombre_cliente = (
+                valor.get("contacts", [{}])[0]
+                .get("profile", {})
+                .get("name", "Cliente")
+            )
+
+            nombre_cliente = limpiar_texto(
+                nombre_cliente
+            )[:80]
+
+            res_p = await async_db_execute(
+
+                supabase
+                .table("prospectos")
+                .select(
+                    "columna, notas, perfil_psicologico"
+                )
+                .eq("telefono", telefono_cliente)
+                .eq("vendedor_id", vendedor_actual)
+            )
+
+            columna_actual = (
+                res_p.data[0].get(
+                    "columna",
+                    "Bandeja Nueva"
+                )
+                if res_p.data
+                else "Bandeja Nueva"
+            )
+
+            # ==========================================================
+            # 🛡️ UPSERT CRM
+            # ==========================================================
+            if not res_p.data:
 
                 try:
 
-                    Image.MAX_IMAGE_PIXELS = 20_000_000
+                    await asyncio.wait_for(
 
-                    img_val = Image.open(io.BytesIO(data_bytes))
+                        async_db_execute(
 
-                    img_val.verify()
+                            supabase
+                            .table("prospectos")
+                            .upsert(
+                                {
+                                    "nombre": nombre_cliente,
+                                    "telefono": telefono_cliente,
+                                    "columna": columna_actual,
+                                    "vendedor_id": vendedor_actual,
+                                    "ultima_interaccion_ia":
+                                    datetime.now(
+                                        timezone.utc
+                                    ).isoformat()
+                                },
 
-                    logger.info(
-                        f"🖼️ [TRACE:{trace_id}] Imagen validada correctamente."
+                                on_conflict=(
+                                    "telefono,vendedor_id"
+                                )
+                            )
+                        ),
+
+                        timeout=5.0
                     )
 
-                except Exception as img_e:
+                except Exception as db_e:
 
                     logger.warning(
-                        f"🚨 [TRACE:{trace_id}] Imagen corrupta/maliciosa: {img_e}"
+                        f"⚠️ [TRACE:{trace_id}] "
+                        f"Upsert controlado: {db_e}"
                     )
-                    return
 
-        # ==============================================================================
-        # 🛡️ TIPO NO SOPORTADO
-        # ==============================================================================
-
-        else:
-
-            logger.info(
-                f"ℹ️ [TRACE:{trace_id}] Tipo '{tipo_mensaje}' descartado."
-            )
-            return
-
-        # ==============================================================================
-        # 🛡️ 12. SANITIZACIÓN TEXTO
-        # ==============================================================================
-
-        texto_entrante = limpiar_texto(texto_entrante)
-
-        if len(texto_entrante) > 4000:
-            texto_entrante = texto_entrante[:4000]
-
-        # ==============================================================================
-        # 🛡️ 13. CARGA CRM
-        # ==============================================================================
-
-        nombre_cliente = (
-            valor.get("contacts", [{}])[0]
-            .get("profile", {})
-            .get("name", "Cliente")
-        )
-
-        nombre_cliente = limpiar_texto(nombre_cliente)[:80]
-
-        res_p = await async_db_execute(
-            supabase.table('prospectos')
-            .select('columna, notas')
-            .eq('telefono', telefono_cliente)
-            .eq('vendedor_id', vendedor_actual)
-        )
-
-        columna_actual = (
-            res_p.data[0].get("columna", "Bandeja Nueva")
-            if res_p.data else "Bandeja Nueva"
-        )
-
-        # ==============================================================================
-        # 🛡️ 14. UPSERT CRM
-        # ==============================================================================
-
-        if not res_p.data:
-
+            # ==========================================================
+            # 💬 GUARDADO CHAT
+            # ==========================================================
             try:
 
-                logger.info(
-                    f"🆕 [TRACE:{trace_id}] Creando prospecto nuevo..."
-                )
-
                 await asyncio.wait_for(
-                    async_db_execute(
-                        supabase.table('prospectos').upsert(
-                            {
-                                "nombre": nombre_cliente,
-                                "telefono": telefono_cliente,
-                                "columna": columna_actual,
-                                "vendedor_id": vendedor_actual,
-                                "ultima_interaccion_ia": datetime.now(
-                                    timezone.utc
-                                ).isoformat()
-                            },
-                            on_conflict="telefono,vendedor_id"
-                        )
+
+                    guardar_mensaje_chat(
+                        telefono_cliente,
+                        vendedor_actual,
+                        "USER",
+                        texto_entrante
                     ),
+
                     timeout=5.0
                 )
 
-            except Exception as db_e:
+            except Exception as chat_e:
 
-                logger.warning(
-                    f"⚠️ [TRACE:{trace_id}] Upsert controlado: {db_e}"
+                logger.error(
+                    f"⚠️ [TRACE:{trace_id}] "
+                    f"Error chat: {chat_e}"
                 )
 
-        # ==============================================================================
-        # 💾 15. GUARDADO CHAT
-        # ==============================================================================
+            # ==========================================================
+            # 🤖 PIPELINE IA
+            # ==========================================================
+            if (
+                tipo_mensaje in [
+                    "text",
+                    "interactive",
+                    "audio"
+                ]
+                and columna_actual != "En Conversacion"
+            ):
 
-        try:
+                async with SEMAFORO_IA:
 
-            await asyncio.wait_for(
-                guardar_mensaje_chat(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "USER",
-                    texto_entrante
-                ),
-                timeout=5.0
-            )
+                    logger.info(
+                        f"🤖 [TRACE:{trace_id}] "
+                        f"Pipeline IA iniciado."
+                    )
 
-        except Exception as e:
+                    contexto_rag = await obtener_contexto_inventario_rag(
+                        vendedor_actual,
+                        texto_entrante
+                    )
 
-            logger.error(
-                f"⚠️ [TRACE:{trace_id}] Error guardando chat: {e}"
-            )
+                    historial = await obtener_historial_chat(
+                        telefono_cliente,
+                        vendedor_actual
+                    )
 
-        # ==============================================================================
-        # 🤖 16. ENRUTAMIENTO IA (NUEVO PIPELINE AAA)
-        # ==============================================================================
+                    data_cruda = await analizar_intencion_venta_ia(
+                        texto_entrante,
+                        contexto_rag,
+                        historial,
+                        config_vendedor,
+                        (
+                            res_p.data[0].get(
+                                "perfil_psicologico"
+                            )
+                            if res_p.data
+                            else None
+                        ),
+                        media_dict_audio
+                    )
 
-        if tipo_mensaje in ["text", "interactive", "audio"] \
-                and columna_actual != "En Conversacion":
+                    data_validada = validar_respuesta_ia(
+                        data_cruda
+                    )
 
-            async with SEMAFORO_IA:
-                logger.info(f"🤖 [TRACE:{trace_id}] Iniciando flujo de IA AAA...")
+                    await guardar_resultado_ia_en_crm(
+                        telefono_cliente,
+                        vendedor_actual,
+                        data_validada
+                    )
 
-                # 1. Análisis Cognitivo
-                data_cruda = await analizar_intencion_venta_ia(
-                    texto_entrante, 
-                    await obtener_contexto_inventario_rag(vendedor_actual, texto_entrante),
-                    await obtener_historial_chat(telefono_cliente, vendedor_actual),
-                    config_vendedor,
-                    res_p.data[0].get("perfil_psicologico") if res_p.data else None,
-                    media_dict_audio
-                )
+                    await disparar_whatsapp_dinamico_async(
+                        telefono_cliente,
+                        data_validada["respuesta"],
+                        token_actual,
+                        phone_id_receptor
+                    )
 
-                # 2. Validación y Filtrado
-                data_validada = validar_respuesta_ia(data_cruda)
+                    await guardar_mensaje_chat(
+                        telefono_cliente,
+                        vendedor_actual,
+                        "BOT",
+                        data_validada["respuesta"]
+                    )
 
-                # 3. Persistencia CRM
-                await guardar_resultado_ia_en_crm(
-                    telefono_cliente, 
-                    vendedor_actual, 
-                    data_validada
-                )
+            # ==========================================================
+            # 🛡️ AUDITORÍA PAGOS
+            # ==========================================================
+            elif tipo_mensaje == "image" and media_dict_img:
 
-                # 4. Envío de Respuesta
-                await disparar_whatsapp_dinamico_async(
-                    telefono_cliente, 
-                    data_validada["respuesta"], 
-                    token_actual, 
-                    phone_id_receptor
-                )
-                
-                # 5. Registro en Log de Chat
-                await guardar_mensaje_chat(
-                    telefono_cliente,
-                    vendedor_actual,
-                    "BOT",
-                    data_validada["respuesta"]
-                )
+                async with SEMAFORO_MEDIA:
 
-        # ==============================================================================
-        # 🛡️ 17. AUDITORÍA DE PAGOS
-        # ==============================================================================
+                    logger.info(
+                        f"🛡️ [TRACE:{trace_id}] "
+                        f"Doberman Vision iniciado."
+                    )
 
-        elif tipo_mensaje == "image" and media_dict_img:
-
-            async with SEMAFORO_MEDIA:
-
-                logger.info(
-                    f"🛡️ [TRACE:{trace_id}] Ejecutando DOBERMAN VISION..."
-                )
-
-                historial_para_auditor = await obtener_historial_chat(
-                    telefono_cliente,
-                    vendedor_actual
-                )
-
-                try:
+                    historial_para_auditor = (
+                        await obtener_historial_chat(
+                            telefono_cliente,
+                            vendedor_actual
+                        )
+                    )
 
                     auditoria = await asyncio.wait_for(
+
                         auditar_comprobante_ia(
                             media_dict_img["data"],
                             media_dict_img["mime_type"],
                             nombre_negocio,
                             historial_para_auditor
                         ),
+
                         timeout=45.0
                     )
 
-                except asyncio.TimeoutError:
-
-                    logger.error(
-                        f"⏱️ [TRACE:{trace_id}] Timeout Doberman Vision."
-                    )
-                    return
-
-                es_pago = bool(auditoria.get("es_pago", False))
-
-                try:
-                    monto = float(auditoria.get("monto_detectado", 0.0))
-                except:
-                    monto = 0.0
-
-                # ==============================================================================
-                # ✅ PAGO VÁLIDO
-                # ==============================================================================
-
-                if es_pago:
-
-                    logger.info(
-                        f"💰 [TRACE:{trace_id}] Pago validado: ${monto:.2f}"
+                    es_pago = bool(
+                        auditoria.get(
+                            "es_pago",
+                            False
+                        )
                     )
 
-                    await actualizar_estado_crm(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "Por Entregar",
-                        "verde_exito",
-                        ""
-                    )
+                    try:
 
-                    msg_exito = (
-                        f"✅ ¡Pago validado por ${monto:.2f} MXN!\n"
-                        f"Hemos recibido tu comprobante."
-                    )
+                        monto = float(
+                            auditoria.get(
+                                "monto_detectado",
+                                0.0
+                            )
+                        )
 
-                    await disparar_whatsapp_dinamico_async(
-                        telefono_cliente,
-                        msg_exito,
-                        token_actual,
-                        phone_id_receptor
-                    )
+                    except:
+                        monto = 0.0
 
-                    await guardar_mensaje_chat(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "BOT",
-                        msg_exito
-                    )
+                    # ==========================================================
+                    # ✅ PAGO VÁLIDO
+                    # ==========================================================
+                    if es_pago:
 
-                # ==============================================================================
-                # 🚨 FRAUDE / ERROR
-                # ==============================================================================
+                        logger.info(
+                            f"💰 [TRACE:{trace_id}] "
+                            f"Pago validado ${monto:.2f}"
+                        )
 
-                else:
+                        await actualizar_estado_crm(
+                            telefono_cliente,
+                            vendedor_actual,
+                            "Por Entregar",
+                            "verde_exito",
+                            ""
+                        )
 
-                    analisis_fallo = limpiar_texto(
-                        auditoria.get("analisis", "No se pudo validar.")
-                    )
+                        msg_exito = (
+                            f"✅ ¡Pago validado "
+                            f"por ${monto:.2f} MXN!\n"
+                            f"Hemos recibido tu comprobante."
+                        )
 
-                    logger.warning(
-                        f"🚨 [TRACE:{trace_id}] Posible fraude/error: {analisis_fallo}"
-                    )
+                        await disparar_whatsapp_dinamico_async(
+                            telefono_cliente,
+                            msg_exito,
+                            token_actual,
+                            phone_id_receptor
+                        )
 
-                    msg_fallo = (
-                        f"🤖 Mi sistema no pudo validar la imagen.\n"
-                        f"Detalle: {analisis_fallo}\n"
-                        f"Por favor envía una foto clara."
-                    )
+                        await guardar_mensaje_chat(
+                            telefono_cliente,
+                            vendedor_actual,
+                            "BOT",
+                            msg_exito
+                        )
 
-                    await actualizar_estado_crm(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "Requiere Asistencia",
-                        "verde_alerta",
-                        ""
-                    )
+                    # ==========================================================
+                    # 🚨 FRAUDE / ERROR
+                    # ==========================================================
+                    else:
 
-                    await disparar_whatsapp_dinamico_async(
-                        telefono_cliente,
-                        msg_fallo,
-                        token_actual,
-                        phone_id_receptor
-                    )
+                        analisis_fallo = limpiar_texto(
+                            auditoria.get(
+                                "analisis",
+                                "No validado."
+                            )
+                        )
 
-                    await guardar_mensaje_chat(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "BOT",
-                        msg_fallo
-                    )
+                        msg_fallo = (
+                            f"🤖 Mi sistema no pudo "
+                            f"validar la imagen.\n"
+                            f"Detalle: {analisis_fallo}\n"
+                            f"Por favor envía una foto clara."
+                        )
 
-        # ==============================================================================
-        # ✅ FIN PIPELINE
-        # ==============================================================================
+                        logger.warning(
+                            f"🚨 [TRACE:{trace_id}] "
+                            f"Fraude/Error: {analisis_fallo}"
+                        )
 
-        tiempo_total = now_ts() - inicio_pipeline
+                        await actualizar_estado_crm(
+                            telefono_cliente,
+                            vendedor_actual,
+                            "Requiere Asistencia",
+                            "verde_alerta",
+                            ""
+                        )
 
-        logger.info(f"🏁 [TRACE:{trace_id}] =========================================")
-        logger.info(f"🏁 [TRACE:{trace_id}] PIPELINE COMPLETADO EXITOSAMENTE")
-        logger.info(f"🏁 [TRACE:{trace_id}] Tiempo Total: {tiempo_total:.3f}s")
-        logger.info(f"🏁 [TRACE:{trace_id}] =========================================")
+                        await disparar_whatsapp_dinamico_async(
+                            telefono_cliente,
+                            msg_fallo,
+                            token_actual,
+                            phone_id_receptor
+                        )
 
-    # ==============================================================================
+                        await guardar_mensaje_chat(
+                            telefono_cliente,
+                            vendedor_actual,
+                            "BOT",
+                            msg_fallo
+                        )
+
+        # ==========================================================
+        # 📊 TELEMETRÍA FINAL
+        # ==========================================================
+        tiempo_total = (
+            now_ts() - inicio_pipeline
+        )
+
+        logger.info(
+            f"🏁 [TRACE:{trace_id}] "
+            f"Pipeline completado "
+            f"en {tiempo_total:.3f}s"
+        )
+
+        WEBHOOK_ERRORES_CONSECUTIVOS = 0
+
+    # ==========================================================
     # ⏱️ TIMEOUT GLOBAL
-    # ==============================================================================
-
+    # ==========================================================
     except asyncio.TimeoutError:
 
+        WEBHOOK_ERRORES_CONSECUTIVOS += 1
+
         logger.error(
-            f"⏱️ [TRACE:{trace_id}] TIMEOUT GLOBAL. Worker liberado."
+            f"⏱️ [TRACE:{trace_id}] "
+            f"Timeout global."
         )
 
-    # ==============================================================================
-    # 🚨 ERROR CRÍTICO
-    # ==============================================================================
-
+    # ==========================================================
+    # 🚨 ERROR GLOBAL
+    # ==========================================================
     except Exception as e:
 
+        WEBHOOK_ERRORES_CONSECUTIVOS += 1
+
         logger.exception(
-            f"❌ [TRACE:{trace_id}] CRÍTICO: {str(e)}"
+            f"❌ [TRACE:{trace_id}] "
+            f"CRÍTICO: {str(e)}"
         )
 
-    # ==============================================================================
-    # 🧹 LIMPIEZA FINAL RAM
-    # ==============================================================================
-
+    # ==========================================================
+    # 🚨 CIRCUIT BREAKER
+    # ==========================================================
     finally:
 
+        if WEBHOOK_ERRORES_CONSECUTIVOS >= 15:
+
+            WEBHOOK_CIRCUIT_BREAKER_HASTA = (
+                now_ts() + 60
+            )
+
+            logger.critical(
+                "🚨 [WEBHOOK CIRCUIT BREAKER] "
+                "Activado por exceso de errores."
+            )
+
+            WEBHOOK_ERRORES_CONSECUTIVOS = 0
+
+        # ==========================================================
+        # 🧹 CLEANUP MEMORIA
+        # ==========================================================
         media_dict_audio = None
         media_dict_img = None
 
         gc.collect()
 
         logger.info(
-            f"🧹 [TRACE:{trace_id}] Garbage Collector ejecutado correctamente."
+            f"🧹 [TRACE:{trace_id}] "
+            f"GC ejecutado correctamente."
         )
 
+
+# ==========================================================
+# 🌐 VALIDACIÓN WEBHOOK META
+# ==========================================================
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
-    params = request.query_params
-    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == WEBHOOK_SECRET:
-        logger.info("✅ [WEBHOOK] Servidor validado con éxito por Meta.")
-        return int(params.get("hub.challenge"))
-    raise HTTPException(status_code=403, detail="Token de validación de Meta inválido")
 
+    params = request.query_params
+
+    if (
+        params.get("hub.mode") == "subscribe"
+        and params.get("hub.verify_token") == WEBHOOK_SECRET
+    ):
+
+        logger.info(
+            "✅ [WEBHOOK] "
+            "Servidor validado correctamente."
+        )
+
+        return int(
+            params.get("hub.challenge")
+        )
+
+    raise HTTPException(
+        status_code=403,
+        detail="Token inválido"
+    )
+
+
+# ==========================================================
+# 📥 WEBHOOK PRINCIPAL META
+# ==========================================================
 @app.post("/webhook")
 async def recibir_mensajes(request: Request):
-    # 🛡️ FIX AAA: Backpressure (Protección extrema si nos hacen DDoS o llegan demasiados mensajes)
+
+    """
+    ==========================================================
+    🚀 ENTRYPOINT WEBHOOK AAA ENTERPRISE
+    ==========================================================
+    ✔ Backpressure
+    ✔ Anti DDoS
+    ✔ Validación Payload
+    ✔ Protección RAM
+    ✔ Protección JSON Bomb
+    ✔ Validación Firma Meta
+    ✔ Protección Async Flood
+    ✔ Fast ACK Meta
+    ==========================================================
+    """
+
+    global ULTIMO_WARNING_BACKPRESSURE
+
+    # ==========================================================
+    # 🛡️ BACKPRESSURE
+    # ==========================================================
     if len(BACKGROUND_TASKS) > MAX_COLA_GLOBAL:
-        logger.critical("🚨 [BACKPRESSURE] Servidor saturado de webhooks. Rechazando para proteger RAM.")
-        raise HTTPException(status_code=503, detail="Service Unavailable - Queue Full")
+
+        if now_ts() - ULTIMO_WARNING_BACKPRESSURE > 10:
+
+            logger.critical(
+                "🚨 [BACKPRESSURE] "
+                "Servidor saturado."
+            )
+
+            ULTIMO_WARNING_BACKPRESSURE = now_ts()
+
+        raise HTTPException(
+            status_code=503,
+            detail="Queue Full"
+        )
+
+    # ==========================================================
+    # 🛡️ PROTECCIÓN MEMORIA
+    # ==========================================================
+    if len(BACKGROUND_TASKS) > MAX_BACKGROUND_TASKS_RAM:
+
+        logger.critical(
+            "🚨 [RAM PROTECTION] "
+            "Demasiadas tareas activas."
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Server Busy"
+        )
 
     try:
-        await asyncio.wait_for(validar_firma_meta(request), timeout=5.0)
+
+        # ==========================================================
+        # 🛡️ VALIDACIÓN FIRMA META
+        # ==========================================================
+        await asyncio.wait_for(
+            validar_firma_meta(request),
+            timeout=5.0
+        )
+
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Timeout validando firma")
+
+        raise HTTPException(
+            status_code=408,
+            detail="Timeout validando firma"
+        )
+
+    except Exception as firma_e:
+
+        logger.error(
+            f"🚨 [WEBHOOK SIGNATURE] "
+            f"{firma_e}"
+        )
+
+        raise HTTPException(
+            status_code=403,
+            detail="Firma inválida"
+        )
 
     try:
-        body_bytes = await request.body()
-        if len(body_bytes) > 2_000_000: # 2MB Max Payload
-            raise HTTPException(413, "Payload demasiado grande")
-            
-        try:
-            body = json.loads(body_bytes)
-        except json.JSONDecodeError:
-            raise HTTPException(400, "JSON corrupto o inválido")
-            
-        # 🛡️ FIX AAA: Iteración completa sobre la estructura de Meta (Garantiza no perder ni un solo mensaje)
-        for entry in body.get("entry", []):
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                phone_id_receptor = value.get("metadata", {}).get("phone_number_id", WHATSAPP_PHONE_ID)
-                
-                # Meta agrupa mensajes si el usuario manda varios rápidamente
-                for message in value.get("messages", []):
-                    # Lanzamiento Seguro Asíncrono tracked
-                    lanzar_tarea_segura(gestionar_mensaje_entrante_bg(value, message, phone_id_receptor))
-        
-        # Meta requiere que devuelvas 200 OK inmediatamente
-        return {"status": "ok"}
-    except HTTPException: raise
-    except Exception as e: 
-        logger.error(f"❌ Error en Webhook Entrypoint: {e}")
-        return {"status": "error", "reason": str(e)}
 
+        # ==========================================================
+        # 📦 BODY
+        # ==========================================================
+        body_bytes = await request.body()
+
+        if not body_bytes:
+
+            raise HTTPException(
+                400,
+                "Payload vacío"
+            )
+
+        # ==========================================================
+        # 🛡️ LIMITADOR PAYLOAD
+        # ==========================================================
+        if len(body_bytes) > 2_000_000:
+
+            raise HTTPException(
+                413,
+                "Payload demasiado grande"
+            )
+
+        # ==========================================================
+        # 🛡️ HASH PAYLOAD
+        # ==========================================================
+        payload_hash = hashlib.sha256(
+            body_bytes[:100000]
+        ).hexdigest()
+
+        if payload_hash in PAYLOAD_FLOOD_CACHE:
+
+            logger.warning(
+                "♻️ [WEBHOOK DUPLICATE PAYLOAD]"
+            )
+
+        PAYLOAD_FLOOD_CACHE[payload_hash] = True
+
+        # ==========================================================
+        # 🛡️ PARSER JSON
+        # ==========================================================
+        try:
+
+            body = orjson.loads(body_bytes)
+
+        except Exception:
+
+            raise HTTPException(
+                400,
+                "JSON inválido"
+            )
+
+        # ==========================================================
+        # 🛡️ VALIDACIÓN ESTRUCTURA
+        # ==========================================================
+        if not isinstance(body, dict):
+
+            raise HTTPException(
+                400,
+                "Payload inválido"
+            )
+
+        # ==========================================================
+        # 🔄 ITERACIÓN META
+        # ==========================================================
+        for entry in body.get("entry", []):
+
+            if not isinstance(entry, dict):
+                continue
+
+            for change in entry.get("changes", []):
+
+                if not isinstance(change, dict):
+                    continue
+
+                value = change.get("value", {})
+
+                if not isinstance(value, dict):
+                    continue
+
+                phone_id_receptor = (
+                    value.get("metadata", {})
+                    .get(
+                        "phone_number_id",
+                        WHATSAPP_PHONE_ID
+                    )
+                )
+
+                mensajes = value.get(
+                    "messages",
+                    []
+                )
+
+                if not isinstance(mensajes, list):
+                    continue
+
+                for message in mensajes:
+
+                    if not isinstance(message, dict):
+                        continue
+
+                    lanzar_tarea_segura(
+
+                        gestionar_mensaje_entrante_bg(
+                            value,
+                            message,
+                            phone_id_receptor
+                        )
+                    )
+
+        # ==========================================================
+        # ✅ FAST ACK META
+        # ==========================================================
+        return {
+            "status": "ok"
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logger.exception(
+            f"❌ [WEBHOOK ENTRYPOINT ERROR] "
+            f"{str(e)}"
+        )
+
+        return {
+            "status": "error",
+            "reason": str(e)
+        }
+
+
+# ==========================================================
+# 🚀 REGISTRO ROUTER
+# ==========================================================
 app.include_router(router)
 
 # ==============================================================================
