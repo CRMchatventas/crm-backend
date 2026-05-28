@@ -841,6 +841,12 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
     RAWG_API_KEY = "7762b63e3ae74e85bfb9a8f2c4f501db"
     url_publica = None
     
+    # 1. Intentar limpiar el ID para evitar errores de tipo float/bigint
+    try:
+        juego_id_int = int(float(juego_id_supabase))
+    except:
+        juego_id_int = juego_id_supabase # Fallback seguro
+    
     # =====================================================================
     # ESTRATEGIA 1: RAWG API (Prioridad Alta)
     # =====================================================================
@@ -884,19 +890,26 @@ async def cazar_portada_y_guardar_background(juego_id_supabase: str, nombre_jueg
     # =====================================================================
     if url_publica:
         try:
+            # Buscamos el catálogo
             res_cat = await async_db_execute(supabase.table('catalogo_maestro').select('id').eq('nombre', nombre_juego).limit(1))
             
+            id_catalogo_final = None
             if res_cat.data and len(res_cat.data) > 0:
                 id_catalogo_final = res_cat.data[0]['id']
                 await async_db_execute(supabase.table('catalogo_maestro').update({'url_portada_oficial': url_publica}).eq('id', id_catalogo_final))
             else:
                 res_insert = await async_db_execute(supabase.table('catalogo_maestro').insert({'nombre': nombre_juego, 'consola': consola, 'url_portada_oficial': url_publica}))
-                id_catalogo_final = res_insert.data[0]['id'] if res_insert.data else None
+                if res_insert.data:
+                    id_catalogo_final = res_insert.data[0]['id']
             
+            # Actualizamos inventario usando el ID convertido a entero limpio
             update_data = {"url_portada": url_publica}
             if id_catalogo_final: update_data["id_catalogo"] = id_catalogo_final
-            await async_db_execute(supabase.table('inventario').update(update_data).eq('id', juego_id_supabase))
-            logger.info(f"✅ [CORE] Portada vinculada exitosamente: {nombre_juego}")
+            
+            # 🔥 AQUÍ ESTÁ LA CORRECCIÓN: Usamos juego_id_int que es entero puro
+            await async_db_execute(supabase.table('inventario').update(update_data).eq('id', juego_id_int))
+            
+            logger.info(f"✅ [CORE] Portada vinculada exitosamente a ID: {juego_id_int}")
         except Exception as e:
             logger.error(f"⚠️ Error escribiendo DB: {e}")
 
