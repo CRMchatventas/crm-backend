@@ -347,12 +347,33 @@ def crear_token_jwt(vendedor_id: str, email: str):
 
 async def verificar_sesion_b2b(authorization: str = Header(None), auth_token: str = Header(None)):
     token = authorization.split(" ", 1)[1].strip() if authorization and authorization.startswith("Bearer ") else (auth_token.strip() if auth_token else None)
-    if not token: raise HTTPException(status_code=401, detail="Token faltante")
+    
+    if not token: 
+        raise HTTPException(status_code=401, detail="Token faltante")
+    
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], audience="veltrix-clients", issuer="veltrix-engine")
+        # 🔍 PASO 1: Diagnóstico - Decodificamos sin validar restricciones para ver qué trae el token
+        unverified_payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False, "verify_iss": False})
+        logger.info(f"🔍 [AUTH DEBUG] El token contiene estos datos (Claims): {unverified_payload}")
+        
+        # 🔍 PASO 2: Intentamos la validación estricta
+        payload = jwt.decode(
+            token, 
+            JWT_SECRET, 
+            algorithms=["HS256"], 
+            audience="veltrix-clients", 
+            issuer="veltrix-engine"
+        )
         return str(payload.get("sub"))
+        
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado. Inicie sesión nuevamente.")
+    except jwt.InvalidIssuerError:
+        logger.error(f"❌ [AUTH ERROR] Issuer inválido. El token dice que el emisor es: {unverified_payload.get('iss', 'NO DEFINIDO')}")
+        raise HTTPException(status_code=401, detail="Invalid issuer")
+    except jwt.InvalidAudienceError:
+        logger.error(f"❌ [AUTH ERROR] Audience inválido. El token dice que la audiencia es: {unverified_payload.get('aud', 'NO DEFINIDA')}")
+        raise HTTPException(status_code=401, detail="Invalid audience")
     except jwt.InvalidTokenError as e:
         logger.error(f"❌ [AUTH ERROR] Token inválido: {e}")
         raise HTTPException(status_code=401, detail="Token inválido")
