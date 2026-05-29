@@ -40,6 +40,7 @@ from starlette.concurrency import run_in_threadpool
 from PIL import Image
 
 load_dotenv()
+router = APIRouter(prefix="/api/v1/dashboard")
 
 # ==========================================================
 # 🛡️ 1. REGLAS DE SEGURIDAD Y LÍMITES ENTERPRISE
@@ -777,6 +778,11 @@ class PeticionCopy(BaseModel):
     juego: str
     prompt_interno: str
 
+class LeadAction(BaseModel):
+    lead_id: str = Field(..., min_length=1, max_length=100)
+    accion: str = Field(..., pattern="^(mover_columna|actualizar_notas)$")
+    valor: str = Field(..., max_length=100)
+
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD (AAA HARDENED EDITION)
 # ==========================================================
@@ -1164,7 +1170,7 @@ async def validar_firma_meta(request: Request):
     )
 
     return True
-    
+
 # ==========================================================
 # 🚦 RATE LIMIT AAA ENTERPRISE
 # ==========================================================
@@ -1249,6 +1255,7 @@ async def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
 
 # ==========================================================
 # 🧠 5. CEREBRO IA GEMINI Y RAG (RUTEADOR) SAAS ENTERPRISE
+# 🚀 VELTRIX ENGINE - AAA HARDENED ULTRA EDITION
 # ==========================================================
 
 async def consultar_gemini_json(
@@ -1260,27 +1267,27 @@ async def consultar_gemini_json(
 ) -> dict:
 
     """
-    🚀 MOTOR GEMINI AAA ENTERPRISE
-    ---------------------------------------------------------
-    FUNCIONES:
-    - Caché Inteligente
-    - Rate Limit por Tenant
-    - Anti Flood Tokens
-    - Failover Multi Modelo
-    - JSON Hardened Parser
-    - Protección Anti Basura IA
-    - Telemetría avanzada
-    - Anti Memory Leak
-    - Anti Hallucination
-    - Validación multimodal
-    - Recuperación automática
-    - Retry exponencial
-    - Circuit Breaker
-    - Anti Prompt Bomb
-    - Anti Semantic Flood
-    - Anti Response Poisoning
-    - Anti Retry Storm
-    ---------------------------------------------------------
+    🚀 MOTOR GEMINI AAA ENTERPRISE ULTRA HARDENED
+
+    ✔ Cache Inteligente
+    ✔ Circuit Breaker Global
+    ✔ Failover Multi-Modelo
+    ✔ Anti Prompt Bomb
+    ✔ Anti Semantic Flood
+    ✔ Anti Retry Storm
+    ✔ JSON Hardened Parser
+    ✔ Sanitización Profunda
+    ✔ Validación Multimodal
+    ✔ Protección Anti Costos
+    ✔ Protección Tokens
+    ✔ Protección RAM
+    ✔ Protección Deadlocks
+    ✔ Protección Hallucinations
+    ✔ Protección Response Poisoning
+    ✔ Timeout Estricto
+    ✔ Retry Exponencial
+    ✔ Observabilidad Enterprise
+    ✔ Respuesta Failsafe
     """
 
     global gemini_bloqueado_hasta
@@ -1288,42 +1295,85 @@ async def consultar_gemini_json(
     inicio_telemetria = now_ts()
 
     # ==========================================================
-    # 🛡️ 0. VALIDACIÓN TEMPRANA DE ARGUMENTOS
+    # 🛡️ CONFIG HARDENED
     # ==========================================================
+
+    MAX_PROMPT_CHARS = 45000
+    MAX_RESPONSE_CHARS = 15000
+    MAX_MEDIA_SIZE = 20_000_000
+    MAX_OUTPUT_TOKENS = 2048
+    MAX_PALABRAS_PROMPT = 5000
+    MAX_RETRIES = 4
+
+    MODELOS_FAILOVER = [
+        "gemini-2.5-flash",
+        "gemini-1.5-flash"
+    ]
+
+    MIME_VALIDOS = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "audio/ogg",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/aac"
+    }
+
+    RESPUESTA_FAILSAFE = {
+        "respuesta": (
+            "Tuve un micro-corte en mi sistema. "
+            "¿Me repites tu mensaje por favor?"
+        ),
+        "intencion": "HUMANO",
+        "confidence": 0.1,
+        "accion_tool": "ninguna"
+    }
+
+    # ==========================================================
+    # 🛡️ 0. VALIDACIÓN TEMPRANA
+    # ==========================================================
+
     try:
 
-        if retries < 1:
-            retries = 1
-
-        retries = min(retries, 4)
+        retries = int(retries)
+        retries = max(1, min(retries, MAX_RETRIES))
 
         temperature = float(temperature)
+        temperature = max(0.0, min(temperature, 1.0))
 
-        if temperature < 0:
-            temperature = 0.0
+        vendedor_id = limpiar_texto(
+            str(vendedor_id)
+        )[:80]
 
-        if temperature > 1:
-            temperature = 1.0
+    except Exception as config_error:
 
-    except Exception:
+        logger.warning(
+            f"⚠️ [GEMINI CONFIG] "
+            f"Fallback config aplicado: {config_error}"
+        )
 
         retries = 2
         temperature = 0.2
+        vendedor_id = "V-001"
 
     # ==========================================================
     # 🛡️ 1. CIRCUIT BREAKER GLOBAL
     # ==========================================================
-    if now_ts() < gemini_bloqueado_hasta:
 
-        tiempo_restante = round(
-            gemini_bloqueado_hasta - now_ts(),
+    tiempo_actual = now_ts()
+
+    if tiempo_actual < gemini_bloqueado_hasta:
+
+        restante = round(
+            gemini_bloqueado_hasta - tiempo_actual,
             2
         )
 
         logger.warning(
             f"🚨 [GEMINI CIRCUIT BREAKER] "
             f"Gemini bloqueado temporalmente "
-            f"({tiempo_restante}s restantes)"
+            f"({restante}s restantes)"
         )
 
         return {
@@ -1337,12 +1387,16 @@ async def consultar_gemini_json(
         }
 
     # ==========================================================
-    # 🛡️ 2. SERIALIZACIÓN SEGURA DEL PROMPT
+    # 🛡️ 2. SERIALIZACIÓN SEGURA
     # ==========================================================
+
     try:
 
         if isinstance(prompt, (dict, list)):
-            prompt_serializado = orjson.dumps(prompt).decode("utf-8")
+            prompt_serializado = orjson.dumps(
+                prompt
+            ).decode("utf-8")
+
         else:
             prompt_serializado = str(prompt)
 
@@ -1350,20 +1404,27 @@ async def consultar_gemini_json(
 
         logger.warning(
             f"⚠️ [PROMPT SERIALIZER] "
-            f"Fallback activado: {serial_error}"
+            f"Fallback serializer: {serial_error}"
         )
 
         prompt_serializado = str(prompt)
 
     # ==========================================================
-    # 🧹 3. SANITIZACIÓN AVANZADA PROMPT
+    # 🧹 3. SANITIZACIÓN PROFUNDA
     # ==========================================================
-    prompt_serializado = limpiar_texto(prompt_serializado)
+
+    prompt_serializado = limpiar_texto(
+        prompt_serializado
+    )
 
     # 🛡️ Anti null bytes
-    prompt_serializado = prompt_serializado.replace("\x00", "")
+    prompt_serializado = (
+        prompt_serializado
+        .replace("\x00", "")
+        .replace("\r", "")
+    )
 
-    # 🛡️ Anti markdown injection
+    # 🛡️ Anti markdown/code injection
     prompt_serializado = re.sub(
         r"```.*?```",
         "",
@@ -1371,19 +1432,25 @@ async def consultar_gemini_json(
         flags=re.DOTALL
     )
 
-    # 🛡️ Anti pseudo roles
+    # 🛡️ Anti role injection
     patrones_roles = [
         r"<\|system\|>",
         r"<\|assistant\|>",
         r"<\|user\|>",
         r"role\s*:\s*system",
         r"role\s*:\s*assistant",
+        r"role\s*:\s*user",
         r"BEGIN\s+OVERRIDE",
         r"SYSTEM\s+INSTRUCTION",
-        r"DEVELOPER\s+MODE"
+        r"DEVELOPER\s+MODE",
+        r"IGNORE\s+PREVIOUS\s+INSTRUCTIONS",
+        r"YOU\s+ARE\s+NOW",
+        r"ACT\s+AS",
+        r"JAILBREAK"
     ]
 
     for patron in patrones_roles:
+
         prompt_serializado = re.sub(
             patron,
             "",
@@ -1392,14 +1459,13 @@ async def consultar_gemini_json(
         )
 
     # ==========================================================
-    # 🛡️ 4. LIMITADOR DE TAMAÑO PROMPT
+    # 🛡️ 4. LIMITADOR HARD PROMPT
     # ==========================================================
-    MAX_PROMPT_CHARS = 45000
 
     if len(prompt_serializado) > MAX_PROMPT_CHARS:
 
         logger.warning(
-            f"⚠️ [GEMINI PROMPT LIMIT] "
+            f"⚠️ [PROMPT LIMIT] "
             f"Prompt truncado "
             f"({len(prompt_serializado)} chars)"
         )
@@ -1411,13 +1477,18 @@ async def consultar_gemini_json(
     # ==========================================================
     # 🛡️ 5. ANTI SEMANTIC FLOOD
     # ==========================================================
-    palabras_prompt = prompt_serializado.lower().split()
 
-    if len(palabras_prompt) > 5000:
+    palabras_prompt = (
+        prompt_serializado
+        .lower()
+        .split()
+    )
+
+    if len(palabras_prompt) > MAX_PALABRAS_PROMPT:
 
         logger.warning(
-            "🚨 [PROMPT FLOOD] "
-            "Demasiadas palabras en prompt."
+            "🚨 [SEMANTIC FLOOD] "
+            "Demasiadas palabras detectadas."
         )
 
         return {
@@ -1431,54 +1502,90 @@ async def consultar_gemini_json(
         }
 
     # ==========================================================
-    # ⚡ 6. CACHE INTELIGENTE
+    # 🛡️ 6. ANTI PROMPT REPETITIVO
     # ==========================================================
+
+    palabras_unicas = len(set(palabras_prompt))
+
+    if (
+        len(palabras_prompt) > 100
+        and palabras_unicas <= 10
+    ):
+
+        logger.warning(
+            "🚨 [PROMPT SPAM] "
+            "Patrón repetitivo detectado."
+        )
+
+        return {
+            "respuesta": (
+                "No pude procesar correctamente "
+                "el contenido recibido."
+            ),
+            "intencion": "SPAM",
+            "confidence": 1.0,
+            "accion_tool": "ninguna"
+        }
+
+    # ==========================================================
+    # ⚡ 7. CACHE INTELIGENTE
+    # ==========================================================
+
     cache_key = generar_hash_cache(
         prompt_serializado,
         vendedor_id,
         temperature
     )
 
-    cache_item = cache_respuestas_ia.get(cache_key)
+    try:
 
-    if cache_item:
+        cache_item = cache_respuestas_ia.get(
+            cache_key
+        )
 
-        edad_cache = now_ts() - cache_item.get("ts", 0)
+        if cache_item:
 
-        if edad_cache < CACHE_TTL_SECONDS:
-
-            logger.info(
-                f"⚡ [GEMINI CACHE HIT] "
-                f"Tenant={vendedor_id} | "
-                f"Edad={edad_cache:.2f}s"
+            edad_cache = (
+                now_ts() -
+                cache_item.get("ts", 0)
             )
 
-            return cache_item["data"]
+            if edad_cache < CACHE_TTL_SECONDS:
 
-    # ==========================================================
-    # 🧠 7. FAILOVER DE MODELOS
-    # ==========================================================
-    modelos = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
-    ]
+                logger.info(
+                    f"⚡ [CACHE HIT] "
+                    f"Tenant={vendedor_id} | "
+                    f"Edad={edad_cache:.2f}s"
+                )
+
+                return cache_item["data"]
+
+    except Exception as cache_error:
+
+        logger.warning(
+            f"⚠️ [CACHE ERROR] {cache_error}"
+        )
 
     # ==========================================================
     # 📊 8. ESTIMACIÓN TOKENS
     # ==========================================================
+
     tokens_estimados = max(
         1,
         len(prompt_serializado) // 4
     )
 
     # ==========================================================
-    # 🛡️ 9. RATE LIMIT GLOBAL
+    # 🛡️ 9. RATE LIMIT TOKENS
     # ==========================================================
+
     async with rate_limit_global_lock:
 
-        tokens_actuales = tokens_consumidos_tenant.get(
-            vendedor_id,
-            0
+        tokens_actuales = (
+            tokens_consumidos_tenant.get(
+                vendedor_id,
+                0
+            )
         )
 
         nuevo_total = (
@@ -1504,12 +1611,15 @@ async def consultar_gemini_json(
                 "accion_tool": "ninguna"
             }
 
-        tokens_consumidos_tenant[vendedor_id] = nuevo_total
+        tokens_consumidos_tenant[vendedor_id] = (
+            nuevo_total
+        )
 
     # ==========================================================
     # 🧠 10. FAILOVER MULTI MODELO
     # ==========================================================
-    for nombre_modelo in modelos:
+
+    for nombre_modelo in MODELOS_FAILOVER:
 
         logger.info(
             f"🧠 [GEMINI] "
@@ -1522,14 +1632,17 @@ async def consultar_gemini_json(
             try:
 
                 # ==========================================================
-                # 🛡️ 11. CONFIG IA AAA
+                # 🛡️ 11. GENERATION CONFIG
                 # ==========================================================
-                generation_config = genai.types.GenerationConfig(
-                    temperature=temperature,
-                    top_p=0.90,
-                    top_k=32,
-                    candidate_count=1,
-                    max_output_tokens=2048
+
+                generation_config = (
+                    genai.types.GenerationConfig(
+                        temperature=temperature,
+                        top_p=0.90,
+                        top_k=32,
+                        candidate_count=1,
+                        max_output_tokens=MAX_OUTPUT_TOKENS
+                    )
                 )
 
                 model = genai.GenerativeModel(
@@ -1539,6 +1652,7 @@ async def consultar_gemini_json(
                 # ==========================================================
                 # 📦 12. CONSTRUCCIÓN CONTENIDO
                 # ==========================================================
+
                 contenido = (
                     prompt
                     if isinstance(prompt, list)
@@ -1548,36 +1662,61 @@ async def consultar_gemini_json(
                 # ==========================================================
                 # 🖼️ 13. INYECCIÓN MULTIMEDIA
                 # ==========================================================
+
                 if media_dict and "data" in media_dict:
 
-                    media_bytes = media_dict.get(
-                        "data",
-                        b""
-                    )
+                    try:
 
-                    mime_type = media_dict.get(
-                        "mime_type",
-                        "image/jpeg"
-                    )
-
-                    # 🛡️ Hard Limit
-                    if len(media_bytes) > 20_000_000:
-
-                        logger.warning(
-                            "🚨 [MEDIA LIMIT] "
-                            "Multimedia excede 20MB."
+                        media_bytes = media_dict.get(
+                            "data",
+                            b""
                         )
 
-                    else:
+                        mime_type = str(
+                            media_dict.get(
+                                "mime_type",
+                                "image/jpeg"
+                            )
+                        ).lower().strip()
 
-                        contenido.append({
-                            "mime_type": mime_type,
-                            "data": media_bytes
-                        })
+                        if mime_type not in MIME_VALIDOS:
+
+                            logger.warning(
+                                f"🚨 [MEDIA MIME] "
+                                f"MIME inválido: {mime_type}"
+                            )
+
+                        elif not media_bytes:
+
+                            logger.warning(
+                                "⚠️ [MEDIA] Payload vacío."
+                            )
+
+                        elif len(media_bytes) > MAX_MEDIA_SIZE:
+
+                            logger.warning(
+                                "🚨 [MEDIA LIMIT] "
+                                "Multimedia excede 20MB."
+                            )
+
+                        else:
+
+                            contenido.append({
+                                "mime_type": mime_type,
+                                "data": media_bytes
+                            })
+
+                    except Exception as media_error:
+
+                        logger.warning(
+                            f"⚠️ [MEDIA ERROR] "
+                            f"{media_error}"
+                        )
 
                 # ==========================================================
                 # 🚀 14. LLAMADA GEMINI
                 # ==========================================================
+
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         model.generate_content,
@@ -1590,6 +1729,7 @@ async def consultar_gemini_json(
                 # ==========================================================
                 # 🛡️ 15. VALIDACIÓN RESPONSE
                 # ==========================================================
+
                 if not response:
 
                     raise Exception(
@@ -1609,8 +1749,9 @@ async def consultar_gemini_json(
                     )
 
                 # ==========================================================
-                # 🧹 16. LIMPIEZA MARKDOWN
+                # 🧹 16. LIMPIEZA RESPUESTA
                 # ==========================================================
+
                 texto_limpio = (
                     texto_respuesta
                     .replace("```json", "")
@@ -1619,12 +1760,14 @@ async def consultar_gemini_json(
                     .strip()
                 )
 
-                # 🛡️ Anti basura extrema
-                texto_limpio = texto_limpio[:15000]
+                texto_limpio = (
+                    texto_limpio[:MAX_RESPONSE_CHARS]
+                )
 
                 # ==========================================================
-                # 🛡️ 17. JSON PARSER AAA
+                # 🛡️ 17. JSON PARSER HARDENED
                 # ==========================================================
+
                 obj = None
 
                 try:
@@ -1656,16 +1799,17 @@ async def consultar_gemini_json(
                                 match.group()
                             )
 
-                        except Exception as regex_e:
+                        except Exception as regex_error:
 
                             logger.error(
                                 f"❌ [REGEX PARSER ERROR] "
-                                f"{regex_e}"
+                                f"{regex_error}"
                             )
 
                 # ==========================================================
                 # 🛡️ 18. VALIDACIÓN OBJETO
                 # ==========================================================
+
                 if not isinstance(obj, dict):
 
                     raise ValueError(
@@ -1676,6 +1820,7 @@ async def consultar_gemini_json(
                 # ==========================================================
                 # 🧹 19. SANITIZACIÓN RESPUESTA
                 # ==========================================================
+
                 for key, value in list(obj.items()):
 
                     if isinstance(value, str):
@@ -1686,41 +1831,74 @@ async def consultar_gemini_json(
                             strip=True
                         )
 
-                        value = limpiar_texto(value)
+                        value = limpiar_texto(
+                            value
+                        )
 
-                        # 🛡️ Hard truncate
+                        value = value.replace(
+                            "\x00",
+                            ""
+                        )
+
                         value = value[:5000]
 
                         obj[key] = value
 
                 # ==========================================================
-                # 🛡️ 20. VALIDACIÓN CAMPOS CRÍTICOS
+                # 🛡️ 20. VALIDACIÓN CAMPOS
                 # ==========================================================
-                if "respuesta" not in obj:
+
+                obj.setdefault(
+                    "respuesta",
+                    "No pude generar respuesta."
+                )
+
+                obj.setdefault(
+                    "intencion",
+                    "HUMANO"
+                )
+
+                obj.setdefault(
+                    "confidence",
+                    0.5
+                )
+
+                obj.setdefault(
+                    "accion_tool",
+                    "ninguna"
+                )
+
+                # 🛡️ Hard Validation
+                if not isinstance(
+                    obj["respuesta"],
+                    str
+                ):
                     obj["respuesta"] = (
-                        "No pude generar respuesta."
+                        "Respuesta inválida."
                     )
-
-                if "intencion" not in obj:
-                    obj["intencion"] = "HUMANO"
-
-                if "confidence" not in obj:
-                    obj["confidence"] = 0.5
-
-                if "accion_tool" not in obj:
-                    obj["accion_tool"] = "ninguna"
 
                 # ==========================================================
                 # ⚡ 21. GUARDADO CACHE
                 # ==========================================================
-                cache_respuestas_ia[cache_key] = {
-                    "data": obj,
-                    "ts": now_ts()
-                }
+
+                try:
+
+                    cache_respuestas_ia[cache_key] = {
+                        "data": obj,
+                        "ts": now_ts()
+                    }
+
+                except Exception as cache_save_error:
+
+                    logger.warning(
+                        f"⚠️ [CACHE SAVE ERROR] "
+                        f"{cache_save_error}"
+                    )
 
                 # ==========================================================
                 # 📊 22. TELEMETRÍA
                 # ==========================================================
+
                 tiempo_total = (
                     now_ts() -
                     inicio_telemetria
@@ -1730,7 +1908,8 @@ async def consultar_gemini_json(
                     f"✅ [GEMINI SUCCESS] "
                     f"Modelo={nombre_modelo} | "
                     f"Tiempo={tiempo_total:.3f}s | "
-                    f"Tokens≈{tokens_estimados}"
+                    f"Tokens≈{tokens_estimados} | "
+                    f"Tenant={vendedor_id}"
                 )
 
                 return obj
@@ -1738,6 +1917,7 @@ async def consultar_gemini_json(
             # ==========================================================
             # ⏱️ 23. TIMEOUT CONTROLADO
             # ==========================================================
+
             except asyncio.TimeoutError:
 
                 logger.warning(
@@ -1749,6 +1929,7 @@ async def consultar_gemini_json(
             # ==========================================================
             # 🚨 24. ERRORES CONTROLADOS
             # ==========================================================
+
             except Exception as e:
 
                 logger.error(
@@ -1761,12 +1942,14 @@ async def consultar_gemini_json(
                 error_str = str(e).lower()
 
                 # ==========================================================
-                # 🚨 429 / QUOTA / SATURACIÓN
+                # 🚨 QUOTA / 429
                 # ==========================================================
+
                 if (
                     "429" in error_str
                     or "quota" in error_str
                     or "resource exhausted" in error_str
+                    or "rate limit" in error_str
                 ):
 
                     gemini_bloqueado_hasta = (
@@ -1783,6 +1966,7 @@ async def consultar_gemini_json(
                 # ==========================================================
                 # 🔄 BACKOFF EXPONENCIAL
                 # ==========================================================
+
                 espera = min(
                     8,
                     2 ** intento
@@ -1793,20 +1977,19 @@ async def consultar_gemini_json(
     # ==========================================================
     # 🚨 25. FAILSAFE FINAL
     # ==========================================================
-    logger.error(
-        "🚨 [GEMINI FAILSAFE] "
-        "Todos los modelos fallaron."
+
+    tiempo_total = (
+        now_ts() -
+        inicio_telemetria
     )
 
-    return {
-        "respuesta": (
-            "Tuve un micro-corte en mi sistema. "
-            "¿Me repites tu mensaje por favor?"
-        ),
-        "intencion": "HUMANO",
-        "confidence": 0.1,
-        "accion_tool": "ninguna"
-    }
+    logger.error(
+        f"🚨 [GEMINI FAILSAFE] "
+        f"Todos los modelos fallaron | "
+        f"Tiempo={tiempo_total:.3f}s"
+    )
+
+    return RESPUESTA_FAILSAFE
 
 # ==========================================================
 # 🛡️ VALIDADOR UNIVERSAL IA AAA ENTERPRISE HARDENED
@@ -5142,6 +5325,103 @@ async def procesar_respuesta_bot(
         logger.error(f"⏱️ [TRACE:{trace_id}] Timeout global.")
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] CRÍTICO: {e}")
+
+
+# ==========================================================
+# 📊 7.5 STATS
+# ==========================================================
+# ==========================================================
+#               📊 1. DASHBOARD STATS (TELEMETRÍA DE NEGOCIO)
+# ==========================================================
+@router.get("/stats")
+async def get_dashboard_stats(vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """
+    Retorna métricas consolidadas del negocio en tiempo real.
+    """
+    try:
+        # Consulta optimizada (Multi-tenant aislada)
+        res_leads = await async_db_execute(
+            supabase.table("prospectos")
+            .select("columna", count='exact')
+            .eq("vendedor_id", vendedor_id)
+        )
+        
+        # Procesamiento lógico ligero
+        stats = {
+            "total_leads": res_leads.count or 0,
+            "leads_nuevos": sum(1 for x in res_leads.data if x['columna'] == 'Bandeja Nueva'),
+            "pendientes": sum(1 for x in res_leads.data if x['columna'] == 'Por Entregar')
+        }
+        
+        return {"status": "success", "data": stats}
+
+    except Exception as e:
+        logger.error(f"❌ [API STATS ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Error recuperando stats.")
+
+# ==========================================================
+#                           📋 2. LISTADO DE LEADS
+# ==========================================================
+@router.get("/leads")
+async def get_leads(
+    columna: Optional[str] = None, 
+    vendedor_id: str = Depends(verificar_sesion_b2b)
+):
+    """
+    Retorna lista de prospectos filtrados por vendedor.
+    """
+    try:
+        query = supabase.table("prospectos").select("*").eq("vendedor_id", vendedor_id)
+        
+        if columna:
+            query = query.eq("columna", columna)
+            
+        res = await async_db_execute(query.order("ultima_interaccion_ia", desc=True).limit(50))
+        
+        return {"status": "success", "data": res.data}
+    
+    except Exception as e:
+        logger.error(f"❌ [API LEADS ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Error recuperando leads.")
+
+# ==========================================================
+#                       ⚙️ 3. ACCIÓN MANUAL (CRM CONTROL)
+# ==========================================================
+@router.post("/leads/accion")
+async def ejecutar_accion_lead(
+    payload: LeadAction,
+    vendedor_id: str = Depends(verificar_sesion_b2b)
+):
+    """
+    Endpoint para mover leads o actualizar estados desde Godot.
+    """
+    try:
+        # Validación de seguridad: el lead debe pertenecer al vendedor
+        res_check = await async_db_execute(
+            supabase.table("prospectos")
+            .select("telefono")
+            .eq("id", payload.lead_id)
+            .eq("vendedor_id", vendedor_id)
+        )
+        
+        if not res_check.data:
+            raise HTTPException(status_code=404, detail="Lead no encontrado.")
+
+        # Ejecución de acción segura
+        if payload.accion == "mover_columna":
+            await actualizar_estado_crm(
+                telefono=res_check.data[0]['telefono'],
+                vendedor_id=vendedor_id,
+                columna=payload.valor,
+                iluminacion="blanco",
+                juego=""
+            )
+            
+        return {"status": "success", "msg": "Acción ejecutada."}
+
+    except Exception as e:
+        logger.error(f"❌ [API ACTION ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Error ejecutando acción.")
 
 # ==========================================================
 # 📈 8. MOTOR DE PRECIOS PRO (CACHE AAA, MATCHING SCORE, PRICING DINÁMICO)
