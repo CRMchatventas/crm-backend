@@ -35,7 +35,6 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 from collections import defaultdict, deque
-import google.generativeai as genai
 from passlib.context import CryptContext
 from rapidfuzz import process, fuzz
 from cachetools import TTLCache
@@ -84,8 +83,6 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "").strip()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-if GENAI_KEY:
-    genai.configure(api_key=GENAI_KEY)
 
 async def async_db_execute(query_builder, timeout_seg: float = 15.0):
     """
@@ -1494,7 +1491,11 @@ async def consultar_gemini_json(
     # 🧠 10. FAILOVER MULTI MODELO (BYPASS HTTP REST)
     # ==========================================================
 
-    API_KEY = os.getenv("GENAI_KEY")
+    API_KEY = os.getenv("GENAI_KEY", "").strip()
+
+    if not API_KEY:
+        logger.critical("❌ [CONFIG CRÍTICA] La variable GENAI_KEY no está configurada en Render.")
+        return RESPUESTA_FAILSAFE
 
     for nombre_modelo in MODELOS_FAILOVER:
         logger.info(f"🧠 [GEMINI] Iniciando inferencia HTTP con: {nombre_modelo}")
@@ -7801,30 +7802,45 @@ app.include_router(router)
 async def api_generar_copy_imagen(datos: PeticionCopy):
     print(f"✨ [IA] Generando copy comercial AAA para: {datos.juego}")
     
+    # 1. Definimos la URL de bypass con el modelo 2.5 flash
+    url_api = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GENAI_KEY}"
+    
+    prompt_maestro = f"""
+    Eres un experto copywriter de videojuegos físicos. Tu objetivo es vender en Marketplace.
+    Genera un texto vendedor ultra-persuasivo para este juego: {datos.juego}
+    
+    Reglas estrictas de Veltrix Engine:
+    1. Devuelve ÚNICAMENTE un objeto JSON válido, sin formato Markdown (NO uses ```json).
+    2. El JSON debe tener exactamente dos llaves: "titulo_generado" y "estado_generado".
+    3. "titulo_generado": Debe ser un título llamativo, en MAYÚSCULAS, MÁXIMO 4 palabras. Ej: "¡GOD OF WAR REMATADO!"
+    4. "estado_generado": Debe incluir emojis y texto comercial corto. Sugiere entregas en puntos clave como Altaria, San Pancho o punto a convenir. Ej: "🔥 ENTREGA INMEDIATA | ESTADO 10/10 | ENTREGAS EN ALTARIA"
+    """
+    
     try:
-        # Usamos el modelo Flash de Gemini: ultra rápido para no hacer esperar a Godot
-        modelo = genai.GenerativeModel('gemini-2.5-flash')
+        # 2. Construcción del payload
+        payload = {
+            "contents": [{"parts": [{"text": prompt_maestro}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024}
+        }
         
-        prompt_maestro = f"""
-        Eres un experto copywriter de videojuegos físicos. Tu objetivo es vender en Marketplace.
-        Genera un texto vendedor ultra-persuasivo para este juego: {datos.juego}
+        # 3. Llamada HTTP asíncrona directa (Bypass al SDK obsoleto)
+        response = await asyncio.to_thread(
+            requests.post,
+            url_api,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20.0
+        )
         
-        Reglas estrictas de Veltrix Engine:
-        1. Devuelve ÚNICAMENTE un objeto JSON válido, sin formato Markdown (NO uses ```json).
-        2. El JSON debe tener exactamente dos llaves: "titulo_generado" y "estado_generado".
-        3. "titulo_generado": Debe ser un título llamativo, en MAYÚSCULAS, MÁXIMO 4 palabras. Ej: "¡GOD OF WAR REMATADO!"
-        4. "estado_generado": Debe incluir emojis y texto comercial corto. Para hacerlo muy realista y local, sugiere entregas en puntos clave como Altaria, San Pancho o punto a convenir. Ej: "🔥 ENTREGA INMEDIATA | ESTADO 10/10 | ENTREGAS EN ALTARIA"
-        """
+        if response.status_code != 200:
+            raise Exception(f"API Error {response.status_code}: {response.text}")
+            
+        # 4. Extracción y Limpieza Blindada
+        data = response.json()
+        texto_ia = data['candidates'][0]['content']['parts'][0]['text'].strip()
         
-        # Ejecutamos la petición asíncrona a la IA
-        respuesta = await modelo.generate_content_async(prompt_maestro)
-        texto_ia = respuesta.text.strip()
-        
-        # 🛡️ BLINDAJE AAA: Limpieza por si Gemini se pone terco y devuelve markdown
-        if texto_ia.startswith("```json"):
-            texto_ia = texto_ia.replace("```json", "").replace("```", "").strip()
-        elif texto_ia.startswith("```"):
-            texto_ia = texto_ia.replace("```", "").strip()
+        # Blindaje contra Markdown
+        texto_ia = texto_ia.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
             
         json_ia = json.loads(texto_ia)
         
@@ -7834,7 +7850,7 @@ async def api_generar_copy_imagen(datos: PeticionCopy):
     except Exception as e:
         print(f"❌ [IA ERROR] Fallo al generar copy: {str(e)}")
         
-        # 🛡️ FALLBACK DE SEGURIDAD: Nunca dejamos que Godot reciba un error vacío
+        # FALLBACK DE SEGURIDAD
         return {
             "titulo_generado": f"¡{datos.juego.upper()}!",
             "estado_generado": "🔥 DISPONIBLE AHORA | EXCELENTE ESTADO | PUNTO A CONVENIR"
