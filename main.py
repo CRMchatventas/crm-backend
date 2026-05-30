@@ -1309,8 +1309,9 @@ async def consultar_gemini_json(
     MAX_RETRIES = 4
 
     MODELOS_FAILOVER = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-001",
+        "gemini-pro"
     ]
 
     MIME_VALIDOS = {
