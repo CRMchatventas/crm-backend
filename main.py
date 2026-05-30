@@ -7924,33 +7924,32 @@ async def recibir_mensajes(request: Request):
             detail="Server Busy"
         )
 
-    try:
 
-        # ==========================================================
-        # 🛡️ VALIDACIÓN FIRMA META (PUENTE MODO LAB)
-        # ==========================================================
-        if not MODO_LABORATORIO:
-            try:
-                await asyncio.wait_for(
-                    validar_firma_meta(request),
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                raise HTTPException(
-                    status_code=408,
-                    detail="Timeout validando firma"
-                )
-            except Exception as firma_e:
-                logger.error(
-                    f"🚨 [WEBHOOK SIGNATURE] "
-                    f"{firma_e}"
-                )
-                raise HTTPException(
-                    status_code=403,
-                    detail="Firma inválida"
-                )
-        else:
-            logger.warning("🧪 [WEBHOOK MODO LAB] !!! ALERTA: Saltando validación de firma")
+    # ==========================================================
+    # 🛡️ VALIDACIÓN FIRMA META (PUENTE MODO LAB)
+    # ==========================================================
+    if getattr(sys.modules[__name__], 'MODO_LABORATORIO', True): # Fuerza a True si no está definida arriba
+        logger.warning("🧪 [WEBHOOK MODO LAB] !!! ALERTA: Saltando validación de firma")
+    else:
+        try:
+            await asyncio.wait_for(
+                validar_firma_meta(request),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=408,
+                detail="Timeout validando firma"
+            )
+        except Exception as firma_e:
+            logger.error(
+                f"🚨 [WEBHOOK SIGNATURE] "
+                f"{firma_e}"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Firma inválida"
+            )
 
     try:
 
