@@ -23,7 +23,7 @@ import bleach
 import gc
 import io
 import sys
-import request
+import requests
 import base64
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
