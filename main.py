@@ -41,6 +41,8 @@ from PIL import Image
 
 load_dotenv()
 router = APIRouter(prefix="/api/v1/dashboard")
+# 🧪 MODO LABORATORIO: True = Permite pruebas locales / False = Bloquea todo (Producción)
+MODO_LABORATORIO = True
 
 # ==========================================================
 # 🛡️ 1. REGLAS DE SEGURIDAD Y LÍMITES ENTERPRISE
@@ -7925,31 +7927,30 @@ async def recibir_mensajes(request: Request):
     try:
 
         # ==========================================================
-        # 🛡️ VALIDACIÓN FIRMA META
+        # 🛡️ VALIDACIÓN FIRMA META (PUENTE MODO LAB)
         # ==========================================================
-        await asyncio.wait_for(
-            validar_firma_meta(request),
-            timeout=5.0
-        )
-
-    except asyncio.TimeoutError:
-
-        raise HTTPException(
-            status_code=408,
-            detail="Timeout validando firma"
-        )
-
-    except Exception as firma_e:
-
-        logger.error(
-            f"🚨 [WEBHOOK SIGNATURE] "
-            f"{firma_e}"
-        )
-
-        raise HTTPException(
-            status_code=403,
-            detail="Firma inválida"
-        )
+        if not MODO_LABORATORIO:
+            try:
+                await asyncio.wait_for(
+                    validar_firma_meta(request),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=408,
+                    detail="Timeout validando firma"
+                )
+            except Exception as firma_e:
+                logger.error(
+                    f"🚨 [WEBHOOK SIGNATURE] "
+                    f"{firma_e}"
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="Firma inválida"
+                )
+        else:
+            logger.warning("🧪 [WEBHOOK MODO LAB] !!! ALERTA: Saltando validación de firma")
 
     try:
 
