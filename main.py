@@ -1310,12 +1310,9 @@ async def consultar_gemini_json(
     MAX_PALABRAS_PROMPT = 5000
     MAX_RETRIES = 4
 
-    # 🚀 Bypass Rest API: Nombres canónicos oficiales
     MODELOS_FAILOVER = [
-        "gemini-1.5-pro",
-        "gemini-1.5-flash",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash"
+        "gemini-2.5-flash",
+        "gemini-2.0-flash"
     ]
 
     MIME_VALIDOS = {
