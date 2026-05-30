@@ -23,6 +23,8 @@ import bleach
 import gc
 import io
 import sys
+import request
+import base64
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -1270,17 +1272,17 @@ async def consultar_gemini_json(
 ) -> dict:
 
     """
-    🚀 MOTOR GEMINI AAA ENTERPRISE ULTRA HARDENED
+    🚀 MOTOR GEMINI AAA ENTERPRISE ULTRA HARDENED (REST API EDITION)
 
     ✔ Cache Inteligente
     ✔ Circuit Breaker Global
-    ✔ Failover Multi-Modelo
+    ✔ Failover Multi-Modelo (HTTP Bypass)
     ✔ Anti Prompt Bomb
     ✔ Anti Semantic Flood
     ✔ Anti Retry Storm
     ✔ JSON Hardened Parser
     ✔ Sanitización Profunda
-    ✔ Validación Multimodal
+    ✔ Validación Multimodal (Base64)
     ✔ Protección Anti Costos
     ✔ Protección Tokens
     ✔ Protección RAM
@@ -1308,9 +1310,12 @@ async def consultar_gemini_json(
     MAX_PALABRAS_PROMPT = 5000
     MAX_RETRIES = 4
 
+    # 🚀 Bypass Rest API: Nombres canónicos oficiales
     MODELOS_FAILOVER = [
+        "gemini-1.5-pro",
         "gemini-1.5-flash",
-        "gemini-1.5-pro"
+        "gemini-2.0-flash",
+        "gemini-2.5-flash"
     ]
 
     MIME_VALIDOS = {
@@ -1338,7 +1343,6 @@ async def consultar_gemini_json(
     # ==========================================================
 
     try:
-
         retries = int(retries)
         retries = max(1, min(retries, MAX_RETRIES))
 
@@ -1350,12 +1354,10 @@ async def consultar_gemini_json(
         )[:80]
 
     except Exception as config_error:
-
         logger.warning(
             f"⚠️ [GEMINI CONFIG] "
             f"Fallback config aplicado: {config_error}"
         )
-
         retries = 2
         temperature = 0.2
         vendedor_id = "V-001"
@@ -1367,23 +1369,13 @@ async def consultar_gemini_json(
     tiempo_actual = now_ts()
 
     if tiempo_actual < gemini_bloqueado_hasta:
-
-        restante = round(
-            gemini_bloqueado_hasta - tiempo_actual,
-            2
-        )
-
+        restante = round(gemini_bloqueado_hasta - tiempo_actual, 2)
         logger.warning(
             f"🚨 [GEMINI CIRCUIT BREAKER] "
-            f"Gemini bloqueado temporalmente "
-            f"({restante}s restantes)"
+            f"Gemini bloqueado temporalmente ({restante}s restantes)"
         )
-
         return {
-            "respuesta": (
-                "En este momento estoy atendiendo "
-                "a varios clientes. ⏳"
-            ),
+            "respuesta": "En este momento estoy atendiendo a varios clientes. ⏳",
             "intencion": "HUMANO",
             "confidence": 1.0,
             "accion_tool": "ninguna"
@@ -1394,111 +1386,53 @@ async def consultar_gemini_json(
     # ==========================================================
 
     try:
-
         if isinstance(prompt, (dict, list)):
-            prompt_serializado = orjson.dumps(
-                prompt
-            ).decode("utf-8")
-
+            prompt_serializado = orjson.dumps(prompt).decode("utf-8")
         else:
             prompt_serializado = str(prompt)
-
     except Exception as serial_error:
-
         logger.warning(
-            f"⚠️ [PROMPT SERIALIZER] "
-            f"Fallback serializer: {serial_error}"
+            f"⚠️ [PROMPT SERIALIZER] Fallback serializer: {serial_error}"
         )
-
         prompt_serializado = str(prompt)
 
     # ==========================================================
     # 🧹 3. SANITIZACIÓN PROFUNDA
     # ==========================================================
 
-    prompt_serializado = limpiar_texto(
-        prompt_serializado
-    )
+    prompt_serializado = limpiar_texto(prompt_serializado)
+    prompt_serializado = prompt_serializado.replace("\x00", "").replace("\r", "")
 
-    # 🛡️ Anti null bytes
-    prompt_serializado = (
-        prompt_serializado
-        .replace("\x00", "")
-        .replace("\r", "")
-    )
+    prompt_serializado = re.sub(r"```.*?```", "", prompt_serializado, flags=re.DOTALL)
 
-    # 🛡️ Anti markdown/code injection
-    prompt_serializado = re.sub(
-        r"```.*?```",
-        "",
-        prompt_serializado,
-        flags=re.DOTALL
-    )
-
-    # 🛡️ Anti role injection
     patrones_roles = [
-        r"<\|system\|>",
-        r"<\|assistant\|>",
-        r"<\|user\|>",
-        r"role\s*:\s*system",
-        r"role\s*:\s*assistant",
-        r"role\s*:\s*user",
-        r"BEGIN\s+OVERRIDE",
-        r"SYSTEM\s+INSTRUCTION",
-        r"DEVELOPER\s+MODE",
-        r"IGNORE\s+PREVIOUS\s+INSTRUCTIONS",
-        r"YOU\s+ARE\s+NOW",
-        r"ACT\s+AS",
-        r"JAILBREAK"
+        r"<\|system\|>", r"<\|assistant\|>", r"<\|user\|>",
+        r"role\s*:\s*system", r"role\s*:\s*assistant", r"role\s*:\s*user",
+        r"BEGIN\s+OVERRIDE", r"SYSTEM\s+INSTRUCTION", r"DEVELOPER\s+MODE",
+        r"IGNORE\s+PREVIOUS\s+INSTRUCTIONS", r"YOU\s+ARE\s+NOW", r"ACT\s+AS", r"JAILBREAK"
     ]
 
     for patron in patrones_roles:
-
-        prompt_serializado = re.sub(
-            patron,
-            "",
-            prompt_serializado,
-            flags=re.IGNORECASE
-        )
+        prompt_serializado = re.sub(patron, "", prompt_serializado, flags=re.IGNORECASE)
 
     # ==========================================================
     # 🛡️ 4. LIMITADOR HARD PROMPT
     # ==========================================================
 
     if len(prompt_serializado) > MAX_PROMPT_CHARS:
-
-        logger.warning(
-            f"⚠️ [PROMPT LIMIT] "
-            f"Prompt truncado "
-            f"({len(prompt_serializado)} chars)"
-        )
-
-        prompt_serializado = (
-            prompt_serializado[-MAX_PROMPT_CHARS:]
-        )
+        logger.warning(f"⚠️ [PROMPT LIMIT] Prompt truncado ({len(prompt_serializado)} chars)")
+        prompt_serializado = prompt_serializado[-MAX_PROMPT_CHARS:]
 
     # ==========================================================
     # 🛡️ 5. ANTI SEMANTIC FLOOD
     # ==========================================================
 
-    palabras_prompt = (
-        prompt_serializado
-        .lower()
-        .split()
-    )
+    palabras_prompt = prompt_serializado.lower().split()
 
     if len(palabras_prompt) > MAX_PALABRAS_PROMPT:
-
-        logger.warning(
-            "🚨 [SEMANTIC FLOOD] "
-            "Demasiadas palabras detectadas."
-        )
-
+        logger.warning("🚨 [SEMANTIC FLOOD] Demasiadas palabras detectadas.")
         return {
-            "respuesta": (
-                "Tu mensaje es demasiado grande "
-                "para procesarlo."
-            ),
+            "respuesta": "Tu mensaje es demasiado grande para procesarlo.",
             "intencion": "HUMANO",
             "confidence": 0.0,
             "accion_tool": "ninguna"
@@ -1510,21 +1444,10 @@ async def consultar_gemini_json(
 
     palabras_unicas = len(set(palabras_prompt))
 
-    if (
-        len(palabras_prompt) > 100
-        and palabras_unicas <= 10
-    ):
-
-        logger.warning(
-            "🚨 [PROMPT SPAM] "
-            "Patrón repetitivo detectado."
-        )
-
+    if len(palabras_prompt) > 100 and palabras_unicas <= 10:
+        logger.warning("🚨 [PROMPT SPAM] Patrón repetitivo detectado.")
         return {
-            "respuesta": (
-                "No pude procesar correctamente "
-                "el contenido recibido."
-            ),
+            "respuesta": "No pude procesar correctamente el contenido recibido.",
             "intencion": "SPAM",
             "confidence": 1.0,
             "accion_tool": "ninguna"
@@ -1534,222 +1457,126 @@ async def consultar_gemini_json(
     # ⚡ 7. CACHE INTELIGENTE
     # ==========================================================
 
-    cache_key = generar_hash_cache(
-        prompt_serializado,
-        vendedor_id,
-        temperature
-    )
+    cache_key = generar_hash_cache(prompt_serializado, vendedor_id, temperature)
 
     try:
-
-        cache_item = cache_respuestas_ia.get(
-            cache_key
-        )
-
+        cache_item = cache_respuestas_ia.get(cache_key)
         if cache_item:
-
-            edad_cache = (
-                now_ts() -
-                cache_item.get("ts", 0)
-            )
-
+            edad_cache = now_ts() - cache_item.get("ts", 0)
             if edad_cache < CACHE_TTL_SECONDS:
-
-                logger.info(
-                    f"⚡ [CACHE HIT] "
-                    f"Tenant={vendedor_id} | "
-                    f"Edad={edad_cache:.2f}s"
-                )
-
+                logger.info(f"⚡ [CACHE HIT] Tenant={vendedor_id} | Edad={edad_cache:.2f}s")
                 return cache_item["data"]
-
     except Exception as cache_error:
-
-        logger.warning(
-            f"⚠️ [CACHE ERROR] {cache_error}"
-        )
+        logger.warning(f"⚠️ [CACHE ERROR] {cache_error}")
 
     # ==========================================================
     # 📊 8. ESTIMACIÓN TOKENS
     # ==========================================================
 
-    tokens_estimados = max(
-        1,
-        len(prompt_serializado) // 4
-    )
+    tokens_estimados = max(1, len(prompt_serializado) // 4)
 
     # ==========================================================
     # 🛡️ 9. RATE LIMIT TOKENS
     # ==========================================================
 
     async with rate_limit_global_lock:
-
-        tokens_actuales = (
-            tokens_consumidos_tenant.get(
-                vendedor_id,
-                0
-            )
-        )
-
-        nuevo_total = (
-            tokens_actuales +
-            tokens_estimados
-        )
+        tokens_actuales = tokens_consumidos_tenant.get(vendedor_id, 0)
+        nuevo_total = tokens_actuales + tokens_estimados
 
         if nuevo_total > MAX_TOKENS_POR_MINUTO_TENANT:
-
-            logger.warning(
-                f"🚨 [TOKEN FLOOD] "
-                f"Tenant={vendedor_id} "
-                f"superó límite."
-            )
-
+            logger.warning(f"🚨 [TOKEN FLOOD] Tenant={vendedor_id} superó límite.")
             return {
-                "respuesta": (
-                    "Estoy procesando demasiadas "
-                    "solicitudes ahora mismo."
-                ),
+                "respuesta": "Estoy procesando demasiadas solicitudes ahora mismo.",
                 "intencion": "HUMANO",
                 "confidence": 0.0,
                 "accion_tool": "ninguna"
             }
-
-        tokens_consumidos_tenant[vendedor_id] = (
-            nuevo_total
-        )
+        tokens_consumidos_tenant[vendedor_id] = nuevo_total
 
     # ==========================================================
-    # 🧠 10. FAILOVER MULTI MODELO
+    # 🧠 10. FAILOVER MULTI MODELO (BYPASS HTTP REST)
     # ==========================================================
+
+    API_KEY = os.getenv("GENAI_KEY")
 
     for nombre_modelo in MODELOS_FAILOVER:
-
-        logger.info(
-            f"🧠 [GEMINI] "
-            f"Iniciando inferencia con: "
-            f"{nombre_modelo}"
-        )
+        logger.info(f"🧠 [GEMINI] Iniciando inferencia HTTP con: {nombre_modelo}")
+        
+        url_api = f"https://generativelanguage.googleapis.com/v1beta/models/{nombre_modelo}:generateContent?key={API_KEY}"
 
         for intento in range(retries):
-
             try:
-
                 # ==========================================================
-                # 🛡️ 11. GENERATION CONFIG
+                # 📦 11 & 12. CONSTRUCCIÓN CONTENIDO Y MULTIMEDIA (BASE64)
                 # ==========================================================
-
-                generation_config = (
-                    genai.types.GenerationConfig(
-                        temperature=temperature,
-                        top_p=0.90,
-                        top_k=32,
-                        candidate_count=1,
-                        max_output_tokens=MAX_OUTPUT_TOKENS
-                    )
-                )
-
-                model = genai.GenerativeModel(
-                    nombre_modelo
-                )
-
-                # ==========================================================
-                # 📦 12. CONSTRUCCIÓN CONTENIDO
-                # ==========================================================
-
-                contenido = (
-                    prompt
-                    if isinstance(prompt, list)
-                    else [prompt_serializado]
-                )
-
-                # ==========================================================
-                # 🖼️ 13. INYECCIÓN MULTIMEDIA
-                # ==========================================================
+                
+                partes_contenido = [{"text": prompt_serializado}]
 
                 if media_dict and "data" in media_dict:
-
                     try:
+                        media_bytes = media_dict.get("data", b"")
+                        mime_type = str(media_dict.get("mime_type", "image/jpeg")).lower().strip()
 
-                        media_bytes = media_dict.get(
-                            "data",
-                            b""
-                        )
-
-                        mime_type = str(
-                            media_dict.get(
-                                "mime_type",
-                                "image/jpeg"
-                            )
-                        ).lower().strip()
-
-                        if mime_type not in MIME_VALIDOS:
-
-                            logger.warning(
-                                f"🚨 [MEDIA MIME] "
-                                f"MIME inválido: {mime_type}"
-                            )
-
-                        elif not media_bytes:
-
-                            logger.warning(
-                                "⚠️ [MEDIA] Payload vacío."
-                            )
+                        if mime_type in MIME_VALIDOS and media_bytes and len(media_bytes) <= MAX_MEDIA_SIZE:
+                            
+                            b64_data = base64.b64encode(media_bytes).decode("utf-8")
+                            
+                            partes_contenido.append({
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": b64_data
+                                }
+                            })
+                            logger.info(f"📸 [MEDIA HTTP] Archivo {mime_type} adjuntado con éxito al payload.")
 
                         elif len(media_bytes) > MAX_MEDIA_SIZE:
-
-                            logger.warning(
-                                "🚨 [MEDIA LIMIT] "
-                                "Multimedia excede 20MB."
-                            )
-
-                        else:
-
-                            contenido.append({
-                                "mime_type": mime_type,
-                                "data": media_bytes
-                            })
+                            logger.warning("🚨 [MEDIA LIMIT] Multimedia excede 20MB.")
 
                     except Exception as media_error:
-
-                        logger.warning(
-                            f"⚠️ [MEDIA ERROR] "
-                            f"{media_error}"
-                        )
+                        logger.warning(f"⚠️ [MEDIA ERROR] {media_error}")
 
                 # ==========================================================
-                # 🚀 14. LLAMADA GEMINI
+                # 🚀 13. ENSAMBLAJE DE PAYLOAD JSON Y GENERATION CONFIG
+                # ==========================================================
+
+                payload = {
+                    "contents": [{"parts": partes_contenido}],
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "topP": 0.90,
+                        "topK": 32,
+                        "maxOutputTokens": MAX_OUTPUT_TOKENS
+                    }
+                }
+
+                # ==========================================================
+                # 🌐 14. LLAMADA HTTP DIRECTA (TIMEOUT CONTROLADO)
                 # ==========================================================
 
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
-                        model.generate_content,
-                        contenido,
-                        generation_config=generation_config
+                        requests.post,
+                        url_api,
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=25.0
                     ),
-                    timeout=25.0
+                    timeout=26.0
                 )
 
                 # ==========================================================
-                # 🛡️ 15. VALIDACIÓN RESPONSE
+                # 🛡️ 15. VALIDACIÓN RESPONSE HTTP
                 # ==========================================================
 
-                if not response:
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-                    raise Exception(
-                        "Gemini devolvió response vacío."
-                    )
+                data = response.json()
+                
+                if not data.get('candidates') or not data['candidates'][0].get('content'):
+                    raise Exception("Estructura devuelta por Gemini vacía o bloqueada.")
 
-                texto_respuesta = getattr(
-                    response,
-                    "text",
-                    ""
-                )
-
-                if not texto_respuesta:
-
-                    raise Exception(
-                        "Gemini devolvió texto vacío."
-                    )
+                texto_respuesta = data['candidates'][0]['content']['parts'][0]['text']
 
                 # ==========================================================
                 # 🧹 16. LIMPIEZA RESPUESTA
@@ -1763,9 +1590,7 @@ async def consultar_gemini_json(
                     .strip()
                 )
 
-                texto_limpio = (
-                    texto_limpio[:MAX_RESPONSE_CHARS]
-                )
+                texto_limpio = texto_limpio[:MAX_RESPONSE_CHARS]
 
                 # ==========================================================
                 # 🛡️ 17. JSON PARSER HARDENED
@@ -1774,144 +1599,68 @@ async def consultar_gemini_json(
                 obj = None
 
                 try:
-
                     decoder = json.JSONDecoder()
-
-                    obj, idx = decoder.raw_decode(
-                        texto_limpio
-                    )
-
+                    obj, idx = decoder.raw_decode(texto_limpio)
                 except json.JSONDecodeError:
-
-                    logger.warning(
-                        "⚠️ [JSON PARSER] "
-                        "Fallback regex activado."
-                    )
-
-                    match = re.search(
-                        r'\{.*\}',
-                        texto_limpio,
-                        re.DOTALL
-                    )
-
+                    logger.warning("⚠️ [JSON PARSER] Fallback regex activado.")
+                    match = re.search(r'\{.*\}', texto_limpio, re.DOTALL)
                     if match:
-
                         try:
-
-                            obj = orjson.loads(
-                                match.group()
-                            )
-
+                            obj = orjson.loads(match.group())
                         except Exception as regex_error:
-
-                            logger.error(
-                                f"❌ [REGEX PARSER ERROR] "
-                                f"{regex_error}"
-                            )
+                            logger.error(f"❌ [REGEX PARSER ERROR] {regex_error}")
 
                 # ==========================================================
                 # 🛡️ 18. VALIDACIÓN OBJETO
                 # ==========================================================
 
                 if not isinstance(obj, dict):
-
-                    raise ValueError(
-                        "Gemini devolvió "
-                        "estructura inválida."
-                    )
+                    raise ValueError("Gemini devolvió estructura inválida.")
 
                 # ==========================================================
                 # 🧹 19. SANITIZACIÓN RESPUESTA
                 # ==========================================================
 
                 for key, value in list(obj.items()):
-
                     if isinstance(value, str):
-
-                        value = bleach.clean(
-                            value,
-                            tags=[],
-                            strip=True
-                        )
-
-                        value = limpiar_texto(
-                            value
-                        )
-
-                        value = value.replace(
-                            "\x00",
-                            ""
-                        )
-
+                        value = bleach.clean(value, tags=[], strip=True)
+                        value = limpiar_texto(value)
+                        value = value.replace("\x00", "")
                         value = value[:5000]
-
                         obj[key] = value
 
                 # ==========================================================
                 # 🛡️ 20. VALIDACIÓN CAMPOS
                 # ==========================================================
 
-                obj.setdefault(
-                    "respuesta",
-                    "No pude generar respuesta."
-                )
+                obj.setdefault("respuesta", "No pude generar respuesta.")
+                obj.setdefault("intencion", "HUMANO")
+                obj.setdefault("confidence", 0.5)
+                obj.setdefault("accion_tool", "ninguna")
 
-                obj.setdefault(
-                    "intencion",
-                    "HUMANO"
-                )
-
-                obj.setdefault(
-                    "confidence",
-                    0.5
-                )
-
-                obj.setdefault(
-                    "accion_tool",
-                    "ninguna"
-                )
-
-                # 🛡️ Hard Validation
-                if not isinstance(
-                    obj["respuesta"],
-                    str
-                ):
-                    obj["respuesta"] = (
-                        "Respuesta inválida."
-                    )
+                if not isinstance(obj["respuesta"], str):
+                    obj["respuesta"] = "Respuesta inválida."
 
                 # ==========================================================
                 # ⚡ 21. GUARDADO CACHE
                 # ==========================================================
 
                 try:
-
                     cache_respuestas_ia[cache_key] = {
                         "data": obj,
                         "ts": now_ts()
                     }
-
                 except Exception as cache_save_error:
-
-                    logger.warning(
-                        f"⚠️ [CACHE SAVE ERROR] "
-                        f"{cache_save_error}"
-                    )
+                    logger.warning(f"⚠️ [CACHE SAVE ERROR] {cache_save_error}")
 
                 # ==========================================================
                 # 📊 22. TELEMETRÍA
                 # ==========================================================
 
-                tiempo_total = (
-                    now_ts() -
-                    inicio_telemetria
-                )
-
+                tiempo_total = now_ts() - inicio_telemetria
                 logger.info(
-                    f"✅ [GEMINI SUCCESS] "
-                    f"Modelo={nombre_modelo} | "
-                    f"Tiempo={tiempo_total:.3f}s | "
-                    f"Tokens≈{tokens_estimados} | "
+                    f"✅ [GEMINI SUCCESS HTTP] Modelo={nombre_modelo} | "
+                    f"Tiempo={tiempo_total:.3f}s | Tokens≈{tokens_estimados} | "
                     f"Tenant={vendedor_id}"
                 )
 
@@ -1920,77 +1669,33 @@ async def consultar_gemini_json(
             # ==========================================================
             # ⏱️ 23. TIMEOUT CONTROLADO
             # ==========================================================
-
             except asyncio.TimeoutError:
-
-                logger.warning(
-                    f"⏱️ [GEMINI TIMEOUT] "
-                    f"Modelo={nombre_modelo} | "
-                    f"Intento={intento+1}"
-                )
+                logger.warning(f"⏱️ [GEMINI TIMEOUT] Modelo={nombre_modelo} | Intento={intento+1}")
 
             # ==========================================================
             # 🚨 24. ERRORES CONTROLADOS
             # ==========================================================
-
             except Exception as e:
-
-                logger.error(
-                    f"❌ [GEMINI ERROR] "
-                    f"Modelo={nombre_modelo} | "
-                    f"Intento={intento+1} | "
-                    f"Error={str(e)}"
-                )
+                logger.error(f"❌ [GEMINI ERROR] Modelo={nombre_modelo} | Intento={intento+1} | Error={str(e)}")
 
                 error_str = str(e).lower()
 
-                # ==========================================================
-                # 🚨 QUOTA / 429
-                # ==========================================================
+                # QUOTA / 429
+                if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str or "rate limit" in error_str:
+                    gemini_bloqueado_hasta = now_ts() + 60.0
+                    logger.warning("🚨 [QUOTA LIMIT] Circuit breaker 60s.")
+                    break # Salta al siguiente modelo si se agotó la cuota de este
 
-                if (
-                    "429" in error_str
-                    or "quota" in error_str
-                    or "resource exhausted" in error_str
-                    or "rate limit" in error_str
-                ):
-
-                    gemini_bloqueado_hasta = (
-                        now_ts() + 60.0
-                    )
-
-                    logger.warning(
-                        "🚨 [QUOTA LIMIT] "
-                        "Circuit breaker 60s."
-                    )
-
-                    break
-
-                # ==========================================================
-                # 🔄 BACKOFF EXPONENCIAL
-                # ==========================================================
-
-                espera = min(
-                    8,
-                    2 ** intento
-                )
-
+                # BACKOFF EXPONENCIAL
+                espera = min(8, 2 ** intento)
                 await asyncio.sleep(espera)
 
     # ==========================================================
     # 🚨 25. FAILSAFE FINAL
     # ==========================================================
 
-    tiempo_total = (
-        now_ts() -
-        inicio_telemetria
-    )
-
-    logger.error(
-        f"🚨 [GEMINI FAILSAFE] "
-        f"Todos los modelos fallaron | "
-        f"Tiempo={tiempo_total:.3f}s"
-    )
+    tiempo_total = now_ts() - inicio_telemetria
+    logger.error(f"🚨 [GEMINI FAILSAFE] Todos los modelos HTTP fallaron | Tiempo={tiempo_total:.3f}s")
 
     return RESPUESTA_FAILSAFE
 
