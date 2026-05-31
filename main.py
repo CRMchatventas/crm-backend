@@ -5365,33 +5365,25 @@ async def api_consultar_precio(nombre: str, consola: str = "", vendedor_id: str 
     return respuesta_final
 
 # ==========================================================
-# 🔐 9. AUTENTICACIÓN Y LOGIN B2B (MIGRACIÓN COMPLETA Y RATE LIMIT HARDENING)
+# 🔐 9. AUTENTICACIÓN Y LOGIN B2B (AAA ENTERPRISE - MASTER RELEASE)
 # ==========================================================
-
-# 🛡️ FIX AAA: Semáforo CPU-Bound para proteger a bcrypt de ataques de denegación de servicio (DDoS)
-LOGIN_CONCURRENCY = asyncio.Semaphore(20)
-
-# Hash simulado para igualar el tiempo de respuesta y evitar "Timing Attacks"
-DUMMY_HASH = "$2b$12$DummyHashDummyHashDummyHashDummyHashDummyHashDummyHashDu"
 
 @app.post("/api/login")
 async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: BackgroundTasks):
-    # 🛡️ FIX AAA: Protección contra Spoofing de X-Forwarded-For
     ip_cliente = request.client.host if request.client else "127.0.0.1"
-    
-    # 🛡️ FIX AAA: Validación de correo para evitar inyección u homolografía
     email_normalizado = datos.email.lower().strip()
+    
+    # 🛡️ FIX AAA: Validación de regex centralizada
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email_normalizado):
         raise HTTPException(status_code=401, detail="Credenciales inválidas.")
 
     llave_limite = f"{ip_cliente}:{email_normalizado}"
     
-    # 🛡️ FIX AAA: Manejo integral del rate limit dentro del lock
     async with rate_limit_login_lock:
         intentos_previos = LOGIN_RATE_LIMIT.get(llave_limite, 0)
         if intentos_previos >= 5:
-            logger.warning(f"🚨 [ANTI-BRUTEFORCE] IP bloqueada preventivamente: {llave_limite}")
-            raise HTTPException(status_code=429, detail="Demasiados intentos fallidos. Cuenta bloqueada por 5 minutos.")
+            logger.warning(f"🚨 [ANTI-BRUTEFORCE] IP bloqueada: {llave_limite}")
+            raise HTTPException(status_code=429, detail="Demasiados intentos. Intenta en 5 min.")
 
     logger.info(f"🔑 [LOGIN] Autenticando: {email_normalizado} desde {ip_cliente}")
     
@@ -5404,63 +5396,60 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
         
         usuario_existe = bool(res.data)
         usuario = res.data[0] if usuario_existe else {}
-        
-        # 🛡️ FIX AAA: Prevención de Timing Attack (Respuesta igual de lenta aunque no exista el usuario)
         password_guardada = str(usuario.get('password', DUMMY_HASH))
         
-        if not password_guardada.startswith('$2b$'):
-            if usuario_existe:
-                logger.critical(f"🚨 [RIESGO DE SEGURIDAD] Cuenta con password legacy detectada: {email_normalizado}")
-            password_guardada = DUMMY_HASH
-            usuario_existe = False 
+        password_valida = False
+        es_legacy = False
 
-        # 🛡️ FIX AAA: Límite de concurrencia en tareas intensivas de CPU
-        async with LOGIN_CONCURRENCY:
-            password_valida = await run_in_threadpool(pwd_context.verify, datos.password, password_guardada)
-            
-        # 🛡️ FIX AAA: Mitigación de enumeración de usuarios (Mismo mensaje de error siempre)
-        if not usuario_existe or not password_valida: 
+        # 🛡️ FIX AAA: Verificación de Hash BCrypt vs Legacy Plaintext
+        if usuario_existe:
+            if password_guardada.startswith('$2b$'):
+                # Es un hash moderno
+                password_valida = await run_in_threadpool(pwd_context.verify, datos.password, password_guardada)
+            else:
+                # Es password legacy (texto plano)
+                es_legacy = True
+                if datos.password == password_guardada:
+                    password_valida = True
+                else:
+                    password_valida = False
+        else:
+            # Timing attack: Ejecutamos una verificación dummy si no existe el usuario
+            await run_in_threadpool(pwd_context.verify, datos.password, DUMMY_HASH)
+            password_valida = False
+
+        # 🛡️ FIX AAA: Mitigación de enumeración (Unificar errores)
+        if not password_valida:
             async with rate_limit_login_lock:
-                LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1 
+                LOGIN_RATE_LIMIT[llave_limite] = intentos_previos + 1
             raise HTTPException(status_code=401, detail="Credenciales inválidas.")
-            
-        # --- 🛡️ VALIDACIÓN DE ESTADO (ACCOUNT HEALTH) ---
-        # Normalizamos a minúsculas y eliminamos espacios para evitar errores de DB
-        estado_usuario = str(usuario.get('estado', '')).lower().strip()
-        if estado_usuario != 'activo':
-            logger.warning(f"🚫 [LOGIN] Ingreso denegado. Usuario '{email_normalizado}' con estado: '{estado_usuario}'")
-            raise HTTPException(status_code=401, detail="Cuenta no activa o suspendida.")
 
-        # --- 💳 VALIDACIÓN UNIFICADA DE SUSCRIPCIÓN (BILLING HEALTH) ---
-        suscripcion_activa_db = usuario.get('suscripcion_activa', False)
-        fecha_pago_str = usuario.get('fecha_proximo_pago')
-        fecha_vencida = False
-        
-        if fecha_pago_str:
-            try:
-                from datetime import date
-                if date.today() > date.fromisoformat(fecha_pago_str):
-                    fecha_vencida = True
-                    # Actualizamos a False en background para no bloquear el login
-                    background_tasks.add_task(
-                        async_db_execute,
-                        supabase.table('usuarios_veltrix').update({"suscripcion_activa": False}).eq('id', usuario['id'])
-                    )
-            except ValueError: 
-                logger.error(f"❌ Formato de fecha de pago corrupto: {email_normalizado}")
+        # --- 🛡️ MIGRACIÓN DE PASSWORD (Legacy -> BCrypt) ---
+        if es_legacy:
+            logger.warning(f"🚨 [SEGURIDAD] Migrando cuenta legacy: {email_normalizado}")
+            nuevo_hash = await run_in_threadpool(pwd_context.hash, datos.password)
+            background_tasks.add_task(
+                async_db_execute,
+                supabase.table('usuarios_veltrix').update({"password": nuevo_hash}).eq('id', usuario['id'])
+            )
 
-        if not suscripcion_activa_db or fecha_vencida:
-            logger.warning(f"💳 [LOGIN] Ingreso denegado. Usuario '{email_normalizado}' sin suscripción activa.")
-            raise HTTPException(status_code=402, detail="Suscripción inactiva. Por favor realiza tu pago.")
+        # --- 🛡️ VALIDACIÓN DE ESTADO ---
+        if str(usuario.get('estado', '')).lower().strip() != 'activo':
+            raise HTTPException(status_code=401, detail="Cuenta no activa.")
+
+        # --- 💳 VALIDACIÓN DE SUSCRIPCIÓN ---
+        if not usuario.get('suscripcion_activa', False):
+            raise HTTPException(status_code=402, detail="Suscripción inactiva.")
 
         # Finalizamos el rate limit exitoso
         async with rate_limit_login_lock:
             LOGIN_RATE_LIMIT[llave_limite] = max(0, intentos_previos - 1)
 
+        # --- 🎫 GENERACIÓN JWT ---
         vendedor_id = str(usuario.get('vendedor_id', 'V-001'))
         ahora = datetime.now(timezone.utc)
         
-        payload_jwt = {
+        token_jwt = jwt.encode({
             "sub": vendedor_id,
             "email": usuario['email'],
             "jti": str(uuid.uuid4()),
@@ -5469,34 +5458,29 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
             "iat": ahora,
             "nbf": ahora,
             "exp": ahora + timedelta(days=1)
-        }
+        }, JWT_SECRET, algorithm="HS256")
         
-        token_jwt = jwt.encode(payload_jwt, JWT_SECRET, algorithm="HS256")
-        logger.info(f"✅ [LOGIN EXITOSO] {vendedor_id} autenticado desde {ip_cliente}.")
+        logger.info(f"✅ [LOGIN EXITOSO] {vendedor_id} autenticado.")
 
         return {
             "status": "ok",
+            "access_token": token_jwt,
+            "token_type": "bearer",
             "datos": {
                 "vendedor_id": vendedor_id,
                 "email": usuario['email'],
-                "estado": estado_usuario,
-                "pais": usuario.get('pais', 'México'),
-                "suscripcion_activa": True,
-                "token": token_jwt 
-            },
-            "access_token": token_jwt,
-            "token_type": "bearer",
-            "vendedor_id": vendedor_id,
-            "nombre": usuario.get('nombre', 'Vendedor'),
-            "rol": usuario.get('rol', 'vendedor')
+                "nombre": usuario.get('nombre', 'Vendedor'),
+                "rol": usuario.get('rol', 'vendedor')
+            }
         }
+
     except HTTPException: raise
     except asyncio.TimeoutError:
-        logger.error("⏱️ [LOGIN] Timeout conectando a la base de datos.")
-        raise HTTPException(status_code=504, detail="Tiempo de espera agotado. Intenta de nuevo.")
+        logger.error("⏱️ [LOGIN] Timeout de DB.")
+        raise HTTPException(status_code=504, detail="Servicio temporalmente no disponible.")
     except Exception as e:
-        logger.exception(f"❌ [LOGIN ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor de acceso.")
+        logger.exception(f"❌ [LOGIN ERROR CRÍTICO] {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno de autenticación.")
 
 # ==========================================================
 # 🌐 10. RUTAS CRM Y MÓVIL (DATA CLEANING & CONTRASTES DE ERROR UNIFORMES)
