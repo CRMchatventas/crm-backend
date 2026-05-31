@@ -853,9 +853,8 @@ def crear_token_jwt(vendedor_id: str, email: str):
 
     return token
 
-
 # ==========================================================
-# 🔐 VERIFICADOR DE SESIÓN B2B (AAA HARDENED)
+# 🔐 VERIFICADOR DE SESIÓN B2B (AAA HARDENED - MASTER RELEASE)
 # ==========================================================
 async def verificar_sesion_b2b(
     authorization: str = Header(None),
@@ -865,93 +864,54 @@ async def verificar_sesion_b2b(
     ==========================================================
     🛡️ VALIDADOR JWT ENTERPRISE
     ==========================================================
-    ✔ Verificación issuer/audience
-    ✔ Protección Bearer malformado
-    ✔ Protección algoritmo none
-    ✔ Sanitización token
-    ✔ Anti-token gigante
-    ✔ Logs seguros
-    ✔ Validación claims críticas
-    ✔ Anti-session confusion
+    ✔ Verificación estricta de claims (iss, aud, sub, jti)
+    ✔ Protección contra ataques de algoritmo (force HS256)
+    ✔ Sanitización y restricción de tamaño de token
+    ✔ Prevención de enumeración (errores genéricos al cliente)
+    ✔ Logs de auditoría controlados (sin datos sensibles)
     ==========================================================
     """
 
     # ==========================================================
-    # 🛡️ EXTRACCIÓN SEGURA TOKEN
+    # 🛡️ EXTRACCIÓN SEGURA
     # ==========================================================
     token = None
+    
+    # Prioridad: Header Authorization (Bearer) > Header Custom
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ")[1].strip()
+    elif auth_token:
+        token = auth_token.strip()
 
-    try:
-
-        if authorization and authorization.startswith("Bearer "):
-            partes = authorization.split(" ", 1)
-
-            if len(partes) == 2:
-                token = partes[1].strip()
-
-        elif auth_token:
-            token = auth_token.strip()
-
-    except Exception:
-        token = None
-
-    # ==========================================================
     # 🚫 TOKEN FALTANTE
-    # ==========================================================
     if not token:
-        logger.warning("🚨 [AUTH] Token faltante.")
+        logger.warning("🚨 [AUTH] Intento de acceso sin token.")
         raise HTTPException(
             status_code=401,
-            detail="Token faltante"
+            detail="Credenciales de acceso requeridas"
+        )
+
+    # 🛡️ PROTECCIÓN TAMAÑO (Prevención de DoS/Payloads gigantes)
+    if len(token) > 4096:
+        logger.warning("🚨 [AUTH] Token sospechosamente grande: %d chars", len(token))
+        raise HTTPException(
+            status_code=401,
+            detail="Credenciales inválidas"
         )
 
     # ==========================================================
-    # 🛡️ PROTECCIÓN TAMAÑO TOKEN
-    # ==========================================================
-    if len(token) > 5000:
-        logger.warning("🚨 [AUTH] Token sospechosamente grande.")
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido"
-        )
-
-    # ==========================================================
-    # 🛡️ VALIDACIÓN JWT
+    # 🔐 VALIDACIÓN JWT
     # ==========================================================
     try:
-
-        # ==========================================================
-        # 🔍 DEBUG CONTROLADO
-        # (Sin exponer token completo)
-        # ==========================================================
-        logger.info(
-            f"🔍 [AUTH] Validando JWT | "
-            f"Chars={len(token)}"
-        )
-
-        # ==========================================================
-        # 🔐 VALIDACIÓN ESTRICTA
-        # ==========================================================
+        # Validación con opciones estrictas
         payload = jwt.decode(
             token,
             JWT_SECRET,
             algorithms=["HS256"],
-
-            # 🛡️ Claims obligatorias
             audience="veltrix-clients",
             issuer="veltrix-engine",
-
-            # 🛡️ Endurecimiento
             options={
-                "require": [
-                    "sub",
-                    "exp",
-                    "iat",
-                    "nbf",
-                    "iss",
-                    "aud",
-                    "jti"
-                ],
+                "require": ["sub", "exp", "iat", "nbf", "iss", "aud", "jti"],
                 "verify_signature": True,
                 "verify_exp": True,
                 "verify_iat": True,
@@ -960,99 +920,43 @@ async def verificar_sesion_b2b(
         )
 
         # ==========================================================
-        # 🛡️ VALIDACIÓN CLAIMS
+        # 🛡️ VALIDACIÓN CLAIMS (Sanitización post-decodificación)
         # ==========================================================
-        vendedor_id = limpiar_texto(
-            str(payload.get("sub", ""))
-        ).strip()
+        vendedor_id = limpiar_texto(str(payload.get("sub", ""))).strip()
+        email = limpiar_texto(str(payload.get("email", ""))).strip()
+        jti = payload.get("jti") # AAA: Ideal para implementar JTI Blacklist aquí
 
-        email = limpiar_texto(
-            str(payload.get("email", ""))
-        ).strip()
+        # Validación de integridad de claims
+        if not vendedor_id or not email:
+            logger.warning("🚨 [AUTH] Token incompleto (missing sub/email).")
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-        if not vendedor_id:
-            logger.warning("🚨 [AUTH] JWT sin sub.")
-            raise HTTPException(
-                status_code=401,
-                detail="Token inválido"
-            )
-
-        if not email:
-            logger.warning("🚨 [AUTH] JWT sin email.")
-            raise HTTPException(
-                status_code=401,
-                detail="Token inválido"
-            )
-
-        logger.info(
-            f"✅ [AUTH] Sesión validada correctamente "
-            f"para vendedor={vendedor_id}"
-        )
-
+        logger.info("✅ [AUTH] Sesión validada. Vendedor: %s", vendedor_id)
         return vendedor_id
 
     # ==========================================================
-    # ⏰ TOKEN EXPIRADO
+    # 🚨 GESTIÓN DE ERRORES (Unificación para evitar enumeración)
     # ==========================================================
     except jwt.ExpiredSignatureError:
-
         logger.warning("⏰ [AUTH] Token expirado.")
-
         raise HTTPException(
             status_code=401,
-            detail="Token expirado. Inicie sesión nuevamente."
+            detail="Sesión expirada. Inicie sesión nuevamente."
         )
 
-    # ==========================================================
-    # 🚨 ISSUER INVÁLIDO
-    # ==========================================================
-    except jwt.InvalidIssuerError:
-
-        logger.error("🚨 [AUTH] Issuer inválido.")
-
+    except (jwt.InvalidIssuerError, jwt.InvalidAudienceError, jwt.InvalidTokenError) as e:
+        # Log técnico específico, respuesta genérica al cliente
+        logger.error("🚨 [AUTH] Intento de acceso inválido: %s", str(e))
         raise HTTPException(
             status_code=401,
-            detail="Invalid issuer"
+            detail="Credenciales inválidas"
         )
 
-    # ==========================================================
-    # 🚨 AUDIENCE INVÁLIDA
-    # ==========================================================
-    except jwt.InvalidAudienceError:
-
-        logger.error("🚨 [AUTH] Audience inválida.")
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid audience"
-        )
-
-    # ==========================================================
-    # 🚨 JWT MALFORMADO
-    # ==========================================================
-    except jwt.InvalidTokenError as e:
-
-        logger.error(
-            f"🚨 [AUTH] Token inválido: {str(e)}"
-        )
-
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido"
-        )
-
-    # ==========================================================
-    # 🚨 ERROR CRÍTICO
-    # ==========================================================
     except Exception as e:
-
-        logger.exception(
-            f"❌ [AUTH CRITICAL] {str(e)}"
-        )
-
+        logger.exception("❌ [AUTH CRITICAL] Error inesperado: %s", str(e))
         raise HTTPException(
             status_code=500,
-            detail="Error interno autenticando sesión"
+            detail="Error interno del sistema de autenticación"
         )
 
 
