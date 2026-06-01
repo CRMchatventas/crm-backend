@@ -2237,11 +2237,7 @@ async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: s
         logger.exception(f"❌ [CEREBRO ERROR] Falla estructural: {str(e)}")
         return {"intencion": "HUMANO", "respuesta": "Hubo un micro-corte. Un asesor revisará tu mensaje enseguida. ⏳", "emocion_cliente": "neutral", "temperatura_lead": "frio", "producto_detectado": "", "categoria_preferida": "", "confidence": 0.0, "accion_tool": "ninguna", "precio_oferta": 0.0, "lead_score": 0, "probabilidad_cierre": 0.0, "estrategia_venta": "fallback", "requiere_seguimiento": False, "sugerir_veltrix": False, "tipo_seguimiento": "ninguno", "cross_selling": "", "upselling": "", "nivel_prioridad": "media"}
 
-async def obtener_contexto_inventario_rag(
-    vendedor_id: str,
-    texto_cliente: str = ""
-) -> str:
-
+async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str = "") -> str:
     """
     ==============================================================================
     🧠 RAG INVENTARIO AAA ENTERPRISE HARDENED
@@ -2258,363 +2254,159 @@ async def obtener_contexto_inventario_rag(
     ✔ Optimizado para Gemini Cost Saving
     ==============================================================================
     """
-
-    logger.info(
-        f"🔍 [RAG INVENTARIO] "
-        f"Buscando coincidencias para: '{texto_cliente}' "
-        f"(Tenant: {vendedor_id})"
-    )
+    logger.info(f"🔍 [RAG INVENTARIO] Buscando coincidencias para: '{texto_cliente}' (Tenant: {vendedor_id})")
 
     try:
-
         # ==============================================================================
         # 🛡️ 1. SANITIZACIÓN HARDENED
         # ==============================================================================
-
-        texto_limpio = limpiar_texto(
-            bleach.clean(
-                str(texto_cliente),
-                tags=[],
-                strip=True
-            )
-        )
-
-        texto_limpio = re.sub(
-            r"[^\w\sáéíóúüñÁÉÍÓÚÜÑ\-]",
-            " ",
-            texto_limpio
-        )
-
-        texto_limpio = re.sub(
-            r"\s+",
-            " ",
-            texto_limpio
-        ).strip().lower()
+        texto_limpio = limpiar_texto(bleach.clean(str(texto_cliente), tags=[], strip=True))
+        texto_limpio = re.sub(r"[^\w\sáéíóúüñÁÉÍÓÚÜÑ\-]", " ", texto_limpio)
+        texto_limpio = re.sub(r"\s+", " ", texto_limpio).strip().lower()
 
         # ==============================================================================
         # 🛡️ 2. LIMITADOR ANTI TOKEN DRAIN
         # ==============================================================================
-
         if len(texto_limpio) > 120:
-
-            logger.warning(
-                "⚠️ [RAG INVENTARIO] "
-                "Texto cliente truncado para evitar token inflation."
-            )
-
+            logger.warning("⚠️ [RAG INVENTARIO] Texto cliente truncado para evitar token inflation.")
             texto_limpio = texto_limpio[:120]
 
         # ==============================================================================
         # 🛡️ 3. CACHE KEY NORMALIZADA
         # ==============================================================================
-
-        cache_key = hashlib.sha256(
-            f"{vendedor_id}:{texto_limpio}".encode()
-        ).hexdigest()
-
+        cache_key = hashlib.sha256(f"{vendedor_id}:{texto_limpio}".encode()).hexdigest()
         cache_item = cache_respuestas_ia.get(cache_key)
-
+        
         if cache_item:
-
             edad = now_ts() - cache_item.get("ts", 0)
-
             if edad <= 20:
-
-                logger.info(
-                    f"⚡ [RAG CACHE HIT] "
-                    f"Edad={edad:.2f}s"
-                )
-
+                logger.info(f"⚡ [RAG CACHE HIT] Edad={edad:.2f}s")
                 return cache_item["data"]
 
         # ==============================================================================
         # 🧠 4. TOKENIZACIÓN CONTROLADA
         # ==============================================================================
-
-        palabras = [
-            p.strip()
-            for p in texto_limpio.split()
-            if len(p.strip()) >= 2
-        ]
-
+        palabras = [p.strip() for p in texto_limpio.split() if len(p.strip()) >= 2]
+        
         # 🛡️ Anti Query Explosion
         palabras = palabras[:5]
-
-        logger.info(
-            f"🧠 [RAG INVENTARIO] "
-            f"Keywords útiles: {palabras}"
-        )
+        logger.info(f"🧠 [RAG INVENTARIO] Keywords útiles: {palabras}")
 
         # ==============================================================================
         # 🛡️ 5. QUERY BASE HARDENED
         # ==============================================================================
-
         query = (
             supabase
             .table('inventario')
-            .select(
-                'nombre, precio, stock, atributos_extra'
-            )
+            .select('nombre, precio, stock, atributos_extra')
             .eq('vendedor_id', str(vendedor_id))
             .gt('stock', 0)
         )
 
-# ==============================================================================
-# 🚀 6. PREFILTRO SQL OPTIMIZADO (ANTI-STOPWORDS + TÍTULOS COMPUESTOS AAA)
-# ==============================================================================
+        # ==============================================================================
+        # 🚀 6. PREFILTRO SQL OPTIMIZADO (ANTI-STOPWORDS + TÍTULOS COMPUESTOS AAA)
+        # ==============================================================================
+        # ==============================================================================
+        # 🎮 DETECTOR DE TÍTULOS COMPUESTOS
+        # ==============================================================================
+        frases_prioritarias = [
+            "last of us", "god of war", "red dead redemption", "call of duty", "grand theft auto",
+            "gta san andreas", "gta v", "gta iv", "assassins creed", "assassin's creed",
+            "resident evil", "metal gear", "metal gear solid", "ghost of tsushima", "horizon zero dawn",
+            "horizon forbidden west", "the witcher", "witcher 3", "bloodborne", "dark souls",
+            "elden ring", "demon souls", "the last guardian", "shadow of the colossus", "final fantasy",
+            "gran turismo", "need for speed", "crash bandicoot", "spyro reignited", "mortal kombat",
+            "street fighter", "tekken", "dragon ball", "dragon ball z", "dragon ball xenoverse",
+            "dragon ball fighterz", "lego star wars", "star wars battlefront", "battlefield",
+            "far cry", "watch dogs", "dying light", "dead island", "the evil within"
+        ]
 
-# ==============================================================================
-# 🎮 DETECTOR DE TÍTULOS COMPUESTOS
-# ==============================================================================
-
-frases_prioritarias = [
-    "last of us",
-    "god of war",
-    "red dead redemption",
-    "call of duty",
-    "grand theft auto",
-    "gta san andreas",
-    "gta v",
-    "gta iv",
-    "assassins creed",
-    "assassin's creed",
-    "resident evil",
-    "metal gear",
-    "metal gear solid",
-    "ghost of tsushima",
-    "horizon zero dawn",
-    "horizon forbidden west",
-    "the witcher",
-    "witcher 3",
-    "bloodborne",
-    "dark souls",
-    "elden ring",
-    "demon souls",
-    "the last guardian",
-    "shadow of the colossus",
-    "final fantasy",
-    "gran turismo",
-    "need for speed",
-    "crash bandicoot",
-    "spyro reignited",
-    "mortal kombat",
-    "street fighter",
-    "tekken",
-    "dragon ball",
-    "dragon ball z",
-    "dragon ball xenoverse",
-    "dragon ball fighterz",
-    "lego star wars",
-    "star wars battlefront",
-    "battlefield",
-    "far cry",
-    "watch dogs",
-    "dying light",
-    "dead island",
-    "the evil within"
-]
-
-frase_detectada = None
-
-for frase in frases_prioritarias:
-
-    if frase in texto_limpio:
-
-        frase_detectada = frase
-
-        logger.info(
-            f"🎮 [RAG INVENTARIO] Título compuesto detectado: '{frase_detectada}'"
-        )
-
-        break
-
-# ==============================================================================
-# 🎯 PRIORIDAD 1: TÍTULO COMPLETO
-# ==============================================================================
-
-if frase_detectada:
-
-    logger.info(
-        f"🎯 [RAG INVENTARIO] Prefiltro SQL usando título completo: '{frase_detectada}'"
-    )
-
-    query = query.ilike(
-        'nombre',
-        f"%{frase_detectada}%"
-    )
-
-# ==============================================================================
-# 🎯 PRIORIDAD 2: KEYWORDS FILTRADAS
-# ==============================================================================
-
-elif palabras:
-
-    # ==========================================================================
-    # 🧠 STOPWORDS COMERCIALES
-    # ==========================================================================
-
-    STOPWORDS = {
-        "hola",
-        "buenas",
-        "buenos",
-        "dias",
-        "tardes",
-        "noches",
-        "el",
-        "la",
-        "los",
-        "las",
-        "un",
-        "una",
-        "unos",
-        "unas",
-        "de",
-        "del",
-        "al",
-        "y",
-        "o",
-        "que",
-        "para",
-        "con",
-        "sin",
-        "por",
-        "tienes",
-        "tiene",
-        "tendras",
-        "hay",
-        "vendes",
-        "venden",
-        "manejas",
-        "busco",
-        "buscando",
-        "quiero",
-        "necesito",
-        "precio",
-        "cuanto",
-        "cuesta",
-        "disponible",
-        "disponibilidad",
-        "algun",
-        "alguna",
-        "otro",
-        "otra",
-        "parecido",
-        "similar",
-        "alguno",
-        "algunos",
-        "juego",
-        "juegos",
-        "videojuego",
-        "videojuegos"
-    }
-
-    # ==========================================================================
-    # 🧠 FILTRADO DE PALABRAS ÚTILES
-    # ==========================================================================
-
-    keywords_utiles = [
-        p
-        for p in palabras
-        if (
-            p not in STOPWORDS
-            and len(p) >= 3
-        )
-    ]
-
-    logger.info(
-        f"🧠 [RAG INVENTARIO] Keywords filtradas: {keywords_utiles}"
-    )
-
-    # ==========================================================================
-    # 🎯 SELECCIÓN DE KEYWORD PRINCIPAL
-    # ==========================================================================
-
-    keyword_principal = ""
-
-    if keywords_utiles:
-
-        keyword_principal = keywords_utiles[0]
-
-        logger.info(
-            f"🎯 [RAG INVENTARIO] Prefiltro SQL usando keyword: '{keyword_principal}'"
-        )
-
-        query = query.ilike(
-            'nombre',
-            f"%{keyword_principal}%"
-        )
-
-    else:
-
-        logger.warning(
-            "⚠️ [RAG INVENTARIO] No se encontraron keywords útiles. Se usará fallback."
-        )
+        frase_detectada = None
+        for frase in frases_prioritarias:
+            if frase in texto_limpio:
+                frase_detectada = frase
+                logger.info(f"🎮 [RAG INVENTARIO] Título compuesto detectado: '{frase_detectada}'")
+                break
 
         # ==============================================================================
-        # 🛡️ 7. LIMITADOR HARDENED
+        # 🎯 PRIORIDAD 1: TÍTULO COMPLETO
         # ==============================================================================
+        if frase_detectada:
+            logger.info(f"🎯 [RAG INVENTARIO] Prefiltro SQL usando título completo: '{frase_detectada}'")
+            query = query.ilike('nombre', f"%{frase_detectada}%")
 
+        # ==============================================================================
+        # 🎯 PRIORIDAD 2: KEYWORDS FILTRADAS
+        # ==============================================================================
+        elif palabras:
+            # ==========================================================================
+            # 🧠 STOPWORDS COMERCIALES
+            # ==========================================================================
+            STOPWORDS = {
+                "hola", "buenas", "buenos", "dias", "tardes", "noches", "el", "la", "los", "las",
+                "un", "una", "unos", "unas", "de", "del", "al", "y", "o", "que", "para", "con",
+                "sin", "por", "tienes", "tiene", "tendras", "hay", "vendes", "venden", "manejas",
+                "busco", "buscando", "quiero", "necesito", "precio", "cuanto", "cuesta", "disponible",
+                "disponibilidad", "algun", "alguna", "otro", "otra", "parecido", "similar", "alguno",
+                "algunos", "juego", "juegos", "videojuego", "videojuegos"
+            }
+            # ==========================================================================
+            # 🧠 FILTRADO DE PALABRAS ÚTILES
+            # ==========================================================================
+            keywords_utiles = [p for p in palabras if (p not in STOPWORDS and len(p) >= 3)]
+            logger.info(f"🧠 [RAG INVENTARIO] Keywords filtradas: {keywords_utiles}")
+
+            # ==========================================================================
+            # 🎯 SELECCIÓN DE KEYWORD PRINCIPAL
+            # ==========================================================================
+            keyword_principal = ""
+            if keywords_utiles:
+                keyword_principal = keywords_utiles[0]
+                logger.info(f"🎯 [RAG INVENTARIO] Prefiltro SQL usando keyword: '{keyword_principal}'")
+                query = query.ilike('nombre', f"%{keyword_principal}%")
+            else:
+                logger.warning("⚠️ [RAG INVENTARIO] No se encontraron keywords útiles. Se usará fallback.")
+
+        # ==============================================================================
+        # 🛡️ 7. LIMITADOR HARDENED Y EJECUCIÓN DB
+        # ==============================================================================
         LIMITE_DB = 60
-
         res_inv = await asyncio.wait_for(
-            async_db_execute(
-                query.limit(LIMITE_DB)
-            ),
+            async_db_execute(query.limit(LIMITE_DB)), 
             timeout=8.0
         )
 
         # ==============================================================================
         # 🛡️ 8. FALLBACK RESILIENTE
         # ==============================================================================
-
         if not res_inv.data:
-
-            logger.warning(
-                "⚠️ [RAG INVENTARIO] "
-                "Prefiltro vacío. Activando fallback."
-            )
-
+            logger.warning("⚠️ [RAG INVENTARIO] Prefiltro vacío. Activando fallback.")
             fallback_query = (
                 supabase
                 .table('inventario')
-                .select(
-                    'nombre, precio, stock, atributos_extra'
-                )
+                .select('nombre, precio, stock, atributos_extra')
                 .eq('vendedor_id', str(vendedor_id))
                 .gt('stock', 0)
                 .limit(20)
             )
-
             res_inv = await asyncio.wait_for(
-                async_db_execute(fallback_query),
+                async_db_execute(fallback_query), 
                 timeout=8.0
             )
-
+            
             if not res_inv.data:
-
-                logger.warning(
-                    "⚠️ [RAG INVENTARIO] "
-                    "Catálogo vacío."
-                )
-
-                return (
-                    "Catálogo temporalmente vacío "
-                    "o sin stock disponible."
-                )
+                logger.warning("⚠️ [RAG INVENTARIO] Catálogo vacío.")
+                return "Catálogo temporalmente vacío o sin stock disponible."
 
         inventario = res_inv.data[:LIMITE_DB]
 
         # ==============================================================================
         # 🛡️ 9. NORMALIZADOR ATRIBUTOS EXTRA
         # ==============================================================================
-
         def _obtener_info_extra(item_db: dict) -> str:
-
             extras = item_db.get('atributos_extra') or {}
-
             if not isinstance(extras, dict):
                 return ""
-
             info_valiosa = (
                 extras.get('consola')
                 or extras.get('marca')
@@ -2622,95 +2414,49 @@ elif palabras:
                 or extras.get('categoria')
                 or ""
             )
-
-            info_valiosa = limpiar_texto(
-                str(info_valiosa)
-            )[:40]
-
-            return (
-                f" ({info_valiosa})"
-                if info_valiosa else ""
-            )
+            info_valiosa = limpiar_texto(str(info_valiosa))[:40]
+            return f" ({info_valiosa})" if info_valiosa else ""
 
         # ==============================================================================
         # 📋 10. RESPUESTA GENERAL SI NO HAY CONTEXTO
         # ==============================================================================
-
         if not palabras:
-
-            logger.info(
-                "📋 [RAG INVENTARIO] "
-                "Sin keywords. Retornando TOP GENERAL."
-            )
-
+            logger.info("📋 [RAG INVENTARIO] Sin keywords. Retornando TOP GENERAL.")
             lineas_generales = []
-
             for item in inventario[:10]:
-
-                nombre = limpiar_texto(
-                    str(item.get("nombre", "Producto"))
-                )[:80]
-
+                nombre = limpiar_texto(str(item.get("nombre", "Producto")))[:80]
                 precio = item.get("precio", 0)
                 stock = item.get("stock", 0)
-
-                linea = (
-                    f"- {nombre}"
-                    f"{_obtener_info_extra(item)}"
-                    f" | Precio: ${precio}"
-                    f" | Disp: {stock}"
-                )
-
+                linea = f"- {nombre}{_obtener_info_extra(item)} | Precio: ${precio} | Disp: {stock}"
                 lineas_generales.append(linea)
-
+                
             resultado = "\n".join(lineas_generales)
-
             cache_respuestas_ia[cache_key] = {
                 "data": resultado,
                 "ts": now_ts()
             }
-
             return resultado
 
         # ==============================================================================
         # 🧠 11. ÍNDICE DIFUSO OPTIMIZADO
         # ==============================================================================
-
         diccionario_opciones = {}
-
         for item in inventario:
-
-            nombre = limpiar_texto(
-                str(item.get("nombre", ""))
-            )[:120]
-
-            llave = (
-                f"{nombre} "
-                f"{_obtener_info_extra(item)}"
-            ).strip().lower()
-
+            nombre = limpiar_texto(str(item.get("nombre", "")))[:120]
+            llave = f"{nombre} {_obtener_info_extra(item)}".strip().lower()
             if llave:
                 diccionario_opciones[llave] = item
 
         # ==============================================================================
         # 🛡️ 12. PROTECCIÓN ANTI FUZZY EXPLOSION
         # ==============================================================================
-
         if len(diccionario_opciones) > 200:
-
-            logger.warning(
-                "⚠️ [RAG INVENTARIO] "
-                "Reduciendo índice fuzzy por protección RAM."
-            )
-
-            diccionario_opciones = dict(
-                list(diccionario_opciones.items())[:200]
-            )
+            logger.warning("⚠️ [RAG INVENTARIO] Reduciendo índice fuzzy por protección RAM.")
+            diccionario_opciones = dict(list(diccionario_opciones.items())[:200])
 
         # ==============================================================================
         # 🚀 13. MATCHING DIFUSO HARDENED
         # ==============================================================================
-
         matches = process.extract(
             texto_limpio,
             diccionario_opciones.keys(),
@@ -2719,109 +2465,59 @@ elif palabras:
         )
 
         items_filtrados = []
-
         for match_str, score, _ in matches:
-
             # 🛡️ Score endurecido
             if score >= 45:
-
                 item = diccionario_opciones.get(match_str)
-
                 if item:
                     items_filtrados.append(item)
 
         # ==============================================================================
         # 🛡️ 14. FALLBACK SEMÁNTICO
         # ==============================================================================
-
         if not items_filtrados:
-
-            logger.warning(
-                "⚠️ [RAG INVENTARIO] "
-                "Sin matches fuertes. Activando fallback semántico."
-            )
-
+            logger.warning("⚠️ [RAG INVENTARIO] Sin matches fuertes. Activando fallback semántico.")
             items_filtrados = inventario[:5]
 
         # ==============================================================================
         # 📦 15. CONSTRUCCIÓN RAG OPTIMIZADA
         # ==============================================================================
-
         lineas = []
-
         for item in items_filtrados[:8]:
-
-            nombre = limpiar_texto(
-                str(item.get("nombre", "Producto"))
-            )[:80]
-
+            nombre = limpiar_texto(str(item.get("nombre", "Producto")))[:80]
             precio = item.get("precio", 0)
             stock = item.get("stock", 0)
-
-            linea = (
-                f"- {nombre}"
-                f"{_obtener_info_extra(item)}"
-                f" | Precio: ${precio}"
-                f" | Disp: {stock}"
-            )
-
+            linea = f"- {nombre}{_obtener_info_extra(item)} | Precio: ${precio} | Disp: {stock}"
             lineas.append(linea)
-
+            
         resultado = "\n".join(lineas)
 
         # ==============================================================================
         # 🛡️ 16. LIMITADOR FINAL TOKENS
         # ==============================================================================
-
         MAX_RAG_CHARS = 1800
-
         if len(resultado) > MAX_RAG_CHARS:
-
-            logger.warning(
-                "⚠️ [RAG INVENTARIO] "
-                "Contexto truncado para ahorro tokens."
-            )
-
+            logger.warning("⚠️ [RAG INVENTARIO] Contexto truncado para ahorro tokens.")
             resultado = resultado[:MAX_RAG_CHARS]
 
         # ==============================================================================
         # ⚡ 17. CACHE FINAL
         # ==============================================================================
-
         cache_respuestas_ia[cache_key] = {
             "data": resultado,
             "ts": now_ts()
         }
-
-        logger.info(
-            f"✅ [RAG INVENTARIO] "
-            f"Contexto generado correctamente "
-            f"({len(lineas)} items)."
-        )
-
+        
+        logger.info(f"✅ [RAG INVENTARIO] Contexto generado correctamente ({len(lineas)} items).")
         return resultado
 
     except asyncio.TimeoutError:
-
-        logger.error(
-            "⏱️ [RAG INVENTARIO] Timeout recuperando inventario."
-        )
-
-        return (
-            "El catálogo está tardando más de lo normal. "
-            "Intenta nuevamente."
-        )
-
+        logger.error("⏱️ [RAG INVENTARIO] Timeout recuperando inventario.")
+        return "El catálogo está tardando más de lo normal. Intenta nuevamente."
+        
     except Exception as e:
-
-        logger.error(
-            f"❌ [RAG ERROR] "
-            f"Falló la construcción del contexto: {str(e)}"
-        )
-
-        return (
-            "Error técnico recuperando productos disponibles."
-        )
+        logger.error(f"❌ [RAG ERROR] Falló la construcción del contexto: {str(e)}")
+        return "Error técnico recuperando productos disponibles."
 
 
 async def obtener_historial_chat(
