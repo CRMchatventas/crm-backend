@@ -5790,7 +5790,7 @@ async def borrar_prospecto(datos: BorrarRequest, _sesion: str = Depends(verifica
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
-                .update({'fila': 'Papelera'}) 
+                .update({'fila': 'papelera'}) 
                 .eq('vendedor_id', str(_sesion))
                 .eq('nombre', datos.nombre.strip())
             ),
