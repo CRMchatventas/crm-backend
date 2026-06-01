@@ -1606,6 +1606,12 @@ async def consultar_gemini_json(
                 obj.setdefault("confidence", 0.5)
                 obj.setdefault("accion_tool", "ninguna")
 
+                logger.warning(
+                    f"\n\n================ RESPUESTA GEMINI =================\n"
+                    f"{json.dumps(obj, ensure_ascii=False, indent=2)}\n"
+                    f"===================================================\n"
+                )
+
                 if not isinstance(obj["respuesta"], str):
                     obj["respuesta"] = "Respuesta inválida."
 
@@ -2141,6 +2147,10 @@ def validar_respuesta_ia(data: dict) -> dict:
 
 async def analizar_intencion_venta_ia(texto_cliente: str, inventario_contexto: str, historial_chat: str, config: dict, perfil_cliente_previo: dict = None, media_dict: dict = None):
     """🧠 CEREBRO CENTRAL DE VENTAS IA AAA - COMPRIMIDO"""
+    logger.warning(
+        f"🧪 TEXTO CLIENTE = [{texto_cliente}]"
+    )
+
     try:
         # 🛡️ 1. ESCUDO DE SEGURIDAD
         if detectar_prompt_injection(texto_cliente):
@@ -2350,19 +2360,106 @@ async def obtener_contexto_inventario_rag(
         )
 
         # ==============================================================================
-        # 🚀 6. PREFILTRO SQL OPTIMIZADO
-        # ==============================================================================
+# 🚀 6. PREFILTRO SQL OPTIMIZADO (ANTI-STOPWORDS AAA)
+# ==============================================================================
 
-        if palabras:
+if palabras:
 
-            keyword_principal = palabras[0]
+    # ==========================================================================
+    # 🧠 STOPWORDS COMERCIALES
+    # Evita buscar basura como:
+    # hola, tienes, quiero, busco, precio, etc.
+    # ==========================================================================
 
-            if len(keyword_principal) >= 3:
+    STOPWORDS = {
+        "hola",
+        "buenas",
+        "buenos",
+        "dias",
+        "tardes",
+        "noches",
+        "el",
+        "la",
+        "los",
+        "las",
+        "un",
+        "una",
+        "unos",
+        "unas",
+        "de",
+        "del",
+        "al",
+        "y",
+        "o",
+        "que",
+        "para",
+        "con",
+        "sin",
+        "por",
+        "tienes",
+        "tiene",
+        "tendras",
+        "hay",
+        "vendes",
+        "venden",
+        "manejas",
+        "busco",
+        "buscando",
+        "quiero",
+        "necesito",
+        "precio",
+        "cuanto",
+        "cuesta",
+        "disponible",
+        "disponibilidad",
+        "algun",
+        "alguna",
+        "otro",
+        "otra",
+        "parecido",
+        "similar"
+    }
 
-                query = query.ilike(
-                    'nombre',
-                    f"%{keyword_principal}%"
-                )
+    # ==========================================================================
+    # 🧠 FILTRADO DE PALABRAS ÚTILES
+    # ==========================================================================
+
+    keywords_utiles = [
+        p
+        for p in palabras
+        if (
+            p not in STOPWORDS
+            and len(p) >= 3
+        )
+    ]
+
+    logger.info(
+        f"🧠 [RAG INVENTARIO] Keywords filtradas: {keywords_utiles}"
+    )
+
+    # ==========================================================================
+    # 🎯 SELECCIÓN DE KEYWORD PRINCIPAL
+    # ==========================================================================
+
+    keyword_principal = ""
+
+    if keywords_utiles:
+        keyword_principal = keywords_utiles[0]
+
+    # ==========================================================================
+    # 🚀 PREFILTRO SQL
+    # ==========================================================================
+
+    if keyword_principal:
+
+        logger.info(
+            f"🎯 [RAG INVENTARIO] Prefiltro SQL usando: '{keyword_principal}'"
+        )
+
+        query = query.ilike(
+            'nombre',
+            f"%{keyword_principal}%"
+        )
 
         # ==============================================================================
         # 🛡️ 7. LIMITADOR HARDENED
