@@ -1243,8 +1243,7 @@ async def consultar_gemini_json(
     MAX_RETRIES = 4
 
     MODELOS_FAILOVER = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
+        "gemini-2.5-flash"
     ]
 
     MIME_VALIDOS = {
@@ -1489,10 +1488,12 @@ async def consultar_gemini_json(
                 headers_seguros = {
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    # 🟢 FIX: Engañamos al firewall de Google simulando un navegador real
+                    # 🟢 FIX: Engañamos al firewall simulando un navegador real
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     "Origin": "https://crm-chatventas.onrender.com",
-                    "Referer": "https://crm-chatventas.onrender.com/"
+                    "Referer": "https://crm-chatventas.onrender.com/",
+                    # 🟢 FIX: Forzamos la validación regional con tu IP autorizada
+                    "X-Forwarded-For": "200.92.173.215" 
                 }
 
                 response = await asyncio.wait_for(
