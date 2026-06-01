@@ -5755,18 +5755,16 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
-        # 🛡️ FIX AAA: Extraemos el dato usando la propiedad correcta del modelo Pydantic (nueva_fila)
         print(f"DEBUG SYNC: Moviendo cliente {datos.nombre} a fila: '{datos.nueva_fila}'")
         col_segura = sanitizar_nombre_columna(datos.nueva_fila, permitir_reservadas=True)
         
-        # 🛡️ FIX AAA: Actualizamos la columna 'fila' (DB) con el valor sanitizado
+        # 🟢 FIX: Retirado el .execute() al final de la cadena
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
                 .update({'fila': col_segura}) 
                 .eq('vendedor_id', str(_sesion))
                 .eq('telefono', tel_norm)
-                .execute() 
             ),
             timeout=8.0
         )
@@ -5777,8 +5775,7 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
             
         raise HTTPException(status_code=404, detail="Registro no encontrado.")
         
-    except HTTPException: 
-        raise
+    except HTTPException: raise
     except Exception as e: 
         logger.error(f"❌ Error actualizando tarjeta: {e}")
         raise HTTPException(status_code=500, detail="Fallo de actualización.")
@@ -5789,14 +5786,13 @@ async def borrar_prospecto(datos: BorrarRequest, _sesion: str = Depends(verifica
     try:
         print(f"DEBUG PAPELERA: Archivando a '{datos.nombre}'")
         
-        # 🛡️ FIX AAA: Usamos la columna "fila" como destino de la papelera
+        # 🟢 FIX: Retirado el .execute() al final de la cadena
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
                 .update({'fila': 'Papelera'}) 
                 .eq('vendedor_id', str(_sesion))
                 .eq('nombre', datos.nombre.strip())
-                .execute()
             ),
             timeout=8.0
         )
@@ -5818,13 +5814,13 @@ async def borrar_permanente(datos: BorrarRequest, _sesion: str = Depends(verific
     try:
         print(f"DEBUG PAPELERA: 💀 Destrucción total solicitada para '{datos.nombre}'")
         
+        # 🟢 FIX: Retirado el .execute() al final de la cadena
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
                 .delete()
                 .eq('vendedor_id', str(_sesion))
                 .eq('nombre', datos.nombre.strip())
-                .execute()
             ),
             timeout=8.0
         )
