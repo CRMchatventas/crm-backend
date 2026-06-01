@@ -1482,19 +1482,29 @@ async def consultar_gemini_json(
                 }
 
                 # ==========================================================
-                # 🌐 14. LLAMADA HTTP DIRECTA (TIMEOUT CONTROLADO)
+                # 🌐 14. LLAMADA HTTP DIRECTA (TÚNEL PROXY ANTI-BLOQUEO)
                 # ==========================================================
                 
                 headers_seguros = {
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    # 🟢 FIX: Engañamos al firewall simulando un navegador real
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Origin": "https://crm-chatventas.onrender.com",
-                    "Referer": "https://crm-chatventas.onrender.com/",
-                    # 🟢 FIX: Forzamos la validación regional con tu IP autorizada
-                    "X-Forwarded-For": "200.92.173.215" 
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 }
+
+                # Extraemos tu llave para enrutar el tráfico y evadir el firewall de Google
+                scraper_key = os.getenv("SCRAPER_API_KEY", "").strip()
+                proxies_config = None
+                
+                if scraper_key:
+                    proxy_url = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+                    proxies_config = {
+                        "http": proxy_url,
+                        "https": proxy_url
+                    }
+
+                # Desactivamos temporalmente las advertencias de SSL para el túnel
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -1502,6 +1512,8 @@ async def consultar_gemini_json(
                         url_api,
                         json=payload,
                         headers=headers_seguros,
+                        proxies=proxies_config,
+                        verify=False, # Necesario para evitar bloqueos de certificado por el proxy
                         timeout=25.0
                     ),
                     timeout=26.0
