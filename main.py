@@ -2518,8 +2518,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, texto_cliente: str =
     except Exception as e:
         logger.error(f"❌ [RAG ERROR] Falló la construcción del contexto: {str(e)}")
         return "Error técnico recuperando productos disponibles."
-
-
+        
 async def obtener_historial_chat(
     telefono: str,
     vendedor_id: str
