@@ -737,9 +737,11 @@ class EstadoUpdate(BaseModel):
     nombre: str
     telefono: str = ""
     nueva_fila: str # <--- CORREGIDO: Renombrado de nueva_columna a nueva_fila
+    
     @field_validator("telefono", mode="before")
     @classmethod
-    def validar_tel(cls, value: str): return normalizar_telefono(value)
+    def validar_tel(cls, value: str): 
+        return normalizar_telefono(value)
 
 class NuevoArticulo(BaseModel): 
     nombre: str 
@@ -803,6 +805,10 @@ class LeadAction(BaseModel):
     lead_id: str = Field(..., min_length=1, max_length=100)
     accion: str = Field(..., pattern="^(mover_columna|actualizar_notas)$")
     valor: str = Field(..., max_length=100)
+
+class BorrarRequest(BaseModel):
+    nombre: str
+    vendedor_id: str = "" # Opcional, pero recibido por si acaso
 
 # ==========================================================
 # 🛡️ 4. MIDDLEWARES Y SEGURIDAD (AAA HARDENED EDITION)
@@ -5749,30 +5755,90 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
-        # 🛡️ FIX AAA: Sanitizamos el valor, pero el destino ahora es 'fila'
-        col_segura = sanitizar_nombre_columna(datos.nueva_columna, permitir_reservadas=True)
+        # 🛡️ FIX AAA: Extraemos el dato usando la propiedad correcta del modelo Pydantic (nueva_fila)
+        print(f"DEBUG SYNC: Moviendo cliente {datos.nombre} a fila: '{datos.nueva_fila}'")
+        col_segura = sanitizar_nombre_columna(datos.nueva_fila, permitir_reservadas=True)
         
         # 🛡️ FIX AAA: Actualizamos la columna 'fila' (DB) con el valor sanitizado
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
-                .update({'fila': col_segura}) # <--- CORREGIDO AQUÍ
+                .update({'fila': col_segura}) 
                 .eq('vendedor_id', str(_sesion))
                 .eq('telefono', tel_norm)
-                .execute() # Asegúrate de incluir el .execute() aquí también
+                .execute() 
             ),
             timeout=8.0
         )
         
         if resultado.data: 
+            print(f"✅ [NUBE B2B] Anclaje exitoso de {datos.nombre} en '{col_segura}'")
             return {"status": "ok"}
             
         raise HTTPException(status_code=404, detail="Registro no encontrado.")
         
-    except HTTPException: raise
+    except HTTPException: 
+        raise
     except Exception as e: 
         logger.error(f"❌ Error actualizando tarjeta: {e}")
         raise HTTPException(status_code=500, detail="Fallo de actualización.")
+
+@app.post("/api/borrar_prospecto")
+async def borrar_prospecto(datos: BorrarRequest, _sesion: str = Depends(verificar_sesion_b2b)):
+    """ Archiva el prospecto moviéndolo a la Papelera (Soft Delete) """
+    try:
+        print(f"DEBUG PAPELERA: Archivando a '{datos.nombre}'")
+        
+        # 🛡️ FIX AAA: Usamos la columna "fila" como destino de la papelera
+        resultado = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('prospectos')
+                .update({'fila': 'Papelera'}) 
+                .eq('vendedor_id', str(_sesion))
+                .eq('nombre', datos.nombre.strip())
+                .execute()
+            ),
+            timeout=8.0
+        )
+        
+        if resultado.data:
+            print(f"✅ [NUBE] '{datos.nombre}' movido a la papelera.")
+            return {"status": "ok"}
+            
+        raise HTTPException(status_code=404, detail="Prospecto no encontrado para archivar.")
+        
+    except HTTPException: raise
+    except Exception as e:
+        logger.error(f"❌ Error al archivar: {e}")
+        raise HTTPException(status_code=500, detail="Fallo en la base de datos al archivar.")
+
+@app.post("/api/borrar_permanente")
+async def borrar_permanente(datos: BorrarRequest, _sesion: str = Depends(verificar_sesion_b2b)):
+    """ Destruye totalmente el registro de Supabase (Hard Delete) """
+    try:
+        print(f"DEBUG PAPELERA: 💀 Destrucción total solicitada para '{datos.nombre}'")
+        
+        resultado = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('prospectos')
+                .delete()
+                .eq('vendedor_id', str(_sesion))
+                .eq('nombre', datos.nombre.strip())
+                .execute()
+            ),
+            timeout=8.0
+        )
+        
+        if resultado.data:
+            print(f"✅ [NUBE] '{datos.nombre}' ELIMINADO permanentemente.")
+            return {"status": "ok"}
+            
+        raise HTTPException(status_code=404, detail="El prospecto no existe o ya fue eliminado.")
+        
+    except HTTPException: raise
+    except Exception as e:
+        logger.error(f"❌ Error al eliminar permanentemente: {e}")
+        raise HTTPException(status_code=500, detail="Fallo en la base de datos al eliminar.")
 
 @app.post("/api/historial_chat")
 async def historial_chat(datos: ClienteIdentificador, _sesion: str = Depends(verificar_sesion_b2b)):
