@@ -2359,16 +2359,98 @@ async def obtener_contexto_inventario_rag(
             .gt('stock', 0)
         )
 
-        # ==============================================================================
-# 🚀 6. PREFILTRO SQL OPTIMIZADO (ANTI-STOPWORDS AAA)
+# ==============================================================================
+# 🚀 6. PREFILTRO SQL OPTIMIZADO (ANTI-STOPWORDS + TÍTULOS COMPUESTOS AAA)
 # ==============================================================================
 
-if palabras:
+# ==============================================================================
+# 🎮 DETECTOR DE TÍTULOS COMPUESTOS
+# ==============================================================================
+
+frases_prioritarias = [
+    "last of us",
+    "god of war",
+    "red dead redemption",
+    "call of duty",
+    "grand theft auto",
+    "gta san andreas",
+    "gta v",
+    "gta iv",
+    "assassins creed",
+    "assassin's creed",
+    "resident evil",
+    "metal gear",
+    "metal gear solid",
+    "ghost of tsushima",
+    "horizon zero dawn",
+    "horizon forbidden west",
+    "the witcher",
+    "witcher 3",
+    "bloodborne",
+    "dark souls",
+    "elden ring",
+    "demon souls",
+    "the last guardian",
+    "shadow of the colossus",
+    "final fantasy",
+    "gran turismo",
+    "need for speed",
+    "crash bandicoot",
+    "spyro reignited",
+    "mortal kombat",
+    "street fighter",
+    "tekken",
+    "dragon ball",
+    "dragon ball z",
+    "dragon ball xenoverse",
+    "dragon ball fighterz",
+    "lego star wars",
+    "star wars battlefront",
+    "battlefield",
+    "far cry",
+    "watch dogs",
+    "dying light",
+    "dead island",
+    "the evil within"
+]
+
+frase_detectada = None
+
+for frase in frases_prioritarias:
+
+    if frase in texto_limpio:
+
+        frase_detectada = frase
+
+        logger.info(
+            f"🎮 [RAG INVENTARIO] Título compuesto detectado: '{frase_detectada}'"
+        )
+
+        break
+
+# ==============================================================================
+# 🎯 PRIORIDAD 1: TÍTULO COMPLETO
+# ==============================================================================
+
+if frase_detectada:
+
+    logger.info(
+        f"🎯 [RAG INVENTARIO] Prefiltro SQL usando título completo: '{frase_detectada}'"
+    )
+
+    query = query.ilike(
+        'nombre',
+        f"%{frase_detectada}%"
+    )
+
+# ==============================================================================
+# 🎯 PRIORIDAD 2: KEYWORDS FILTRADAS
+# ==============================================================================
+
+elif palabras:
 
     # ==========================================================================
     # 🧠 STOPWORDS COMERCIALES
-    # Evita buscar basura como:
-    # hola, tienes, quiero, busco, precio, etc.
     # ==========================================================================
 
     STOPWORDS = {
@@ -2417,7 +2499,13 @@ if palabras:
         "otro",
         "otra",
         "parecido",
-        "similar"
+        "similar",
+        "alguno",
+        "algunos",
+        "juego",
+        "juegos",
+        "videojuego",
+        "videojuegos"
     }
 
     # ==========================================================================
@@ -2444,21 +2532,22 @@ if palabras:
     keyword_principal = ""
 
     if keywords_utiles:
+
         keyword_principal = keywords_utiles[0]
 
-    # ==========================================================================
-    # 🚀 PREFILTRO SQL
-    # ==========================================================================
-
-    if keyword_principal:
-
         logger.info(
-            f"🎯 [RAG INVENTARIO] Prefiltro SQL usando: '{keyword_principal}'"
+            f"🎯 [RAG INVENTARIO] Prefiltro SQL usando keyword: '{keyword_principal}'"
         )
 
         query = query.ilike(
             'nombre',
             f"%{keyword_principal}%"
+        )
+
+    else:
+
+        logger.warning(
+            "⚠️ [RAG INVENTARIO] No se encontraron keywords útiles. Se usará fallback."
         )
 
         # ==============================================================================
