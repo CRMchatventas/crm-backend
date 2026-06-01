@@ -710,15 +710,33 @@ class ClienteIdentificador(BaseModel):
     @classmethod
     def validar_tel(cls, value: str): return normalizar_telefono(value)
 
-class ColumnaUpdate(BaseModel): nombre: str = ""; telefono: str = ""; columna: str = ""; nueva_columna: str = ""
-class ColumnaAction(BaseModel): nombre: str; vendedor_id: str = ""
-class RenombrarColumnaAction(BaseModel): viejo_nombre: str; nuevo_nombre: str; vendedor_id: str = ""
-class NotasUpdate(BaseModel): nombre: str = ""; telefono: str = ""; notas: str = ""; etiquetas: str = ""; vendedor_id: str = ""
+from pydantic import BaseModel
 
+class ColumnaUpdate(BaseModel):
+    nombre: str = ""
+    telefono: str = ""
+    fila: str = ""           # Antes: columna
+    nueva_fila: str = ""     # Antes: nueva_columna
+
+class ColumnaAction(BaseModel):
+    nombre: str              # Nombre de la fila
+    vendedor_id: str = ""
+
+class RenombrarColumnaAction(BaseModel):
+    viejo_nombre: str
+    nuevo_nombre: str
+    vendedor_id: str = ""
+
+class NotasUpdate(BaseModel):
+    nombre: str = ""
+    telefono: str = ""
+    notas: str = ""
+    etiquetas: str = ""
+    vendedor_id: str = ""
 class EstadoUpdate(BaseModel): 
     nombre: str
     telefono: str = ""
-    nueva_columna: str
+    nueva_fila: str # <--- CORREGIDO: Renombrado de nueva_columna a nueva_fila
     @field_validator("telefono", mode="before")
     @classmethod
     def validar_tel(cls, value: str): return normalizar_telefono(value)
@@ -3048,10 +3066,10 @@ async def actualizar_estado_crm(
                 }
 
         # ==========================================================
-        # 🛡️ 4. PAYLOAD HARDENED
-        # ==========================================================
+# 🛡️ 4. PAYLOAD HARDENED (Dentro de actualizar_estado_crm)
+# ==========================================================
         payload = {
-            "columna": columna,
+            "fila": columna,  # <--- CORREGIDO: "columna" cambiado por "fila"
             "estado_iluminacion": iluminacion,
             "ultimo_producto_interes": juego,
             "ultima_interaccion_ia": (
@@ -4770,49 +4788,73 @@ async def limpiador_background_rutinario():
 
 async def bucle_seguimiento_24h():
     print("⏰ [WATCHDOG] Iniciando bucle de Remarketing 24H...")
+    # Cache local para no quemar la API consultando la misma config 20 veces
+    cache_config = {} 
+
     while True:
         try:
             hace_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
             
-            # 🛡️ FIX AAA: Añadimos remarketing_count para evitar spam infinito al mismo usuario
+            # 🛡️ FIX AAA: Añadimos .execute() y mantenemos .eq('fila', ...)
             res = await async_db_execute(
                 supabase.table('prospectos')
                 .select('*')
-                .eq('columna', 'Envios Masivos')
+                .eq('fila', 'Envios Masivos')
                 .lt('ultima_interaccion_ia', hace_24h)
                 .lt('remarketing_count', 3) 
                 .limit(20)
+                .execute() # ¡Esto es vital!
             )
             
-            for p in (res.data or []):
-                vendedor_id = p.get('vendedor_id', 'V-001')
-                res_conf = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('vendedor_id', str(vendedor_id)).limit(1))
-                if not res_conf.data: continue
-                
-                config = res_conf.data[0]
-                try:
-                    # 🚀 FIX SAAS: Transición de juego a producto general
-                    producto_interes = p.get('ultimo_producto_interes', p.get('ultimo_juego_interes', ''))
-                    contexto_inv = await obtener_contexto_inventario_rag(vendedor_id, producto_interes)
-                    oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), producto_interes if producto_interes else 'producto', contexto_inv)
+            if res.data:
+                for p in res.data:
+                    vendedor_id = str(p.get('vendedor_id', 'V-001'))
                     
-                    if oferta and oferta.get("mensaje_oferta"):
-                        mensaje = oferta.get("mensaje_oferta")
-                        await disparar_whatsapp_dinamico_async(p.get('telefono'), mensaje, config.get('meta_token') or WHATSAPP_TOKEN, config.get('meta_phone_id') or WHATSAPP_PHONE_ID)
-                        await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', producto_interes)
-                        await guardar_mensaje_chat(p.get('telefono'), vendedor_id, 'BOT_REMARKETING', mensaje)
+                    # 🚀 OPTIMIZACIÓN: Solo consultamos la config si no la tenemos en cache
+                    if vendedor_id not in cache_config:
+                        res_conf = await async_db_execute(supabase.table('configuracion_bot').select('*').eq('vendedor_id', vendedor_id).limit(1).execute())
+                        if res_conf.data:
+                            cache_config[vendedor_id] = res_conf.data[0]
+                    
+                    config = cache_config.get(vendedor_id)
+                    if not config: continue
+                    
+                    try:
+                        # 🚀 Lógica de Remarketing
+                        producto_interes = p.get('ultimo_producto_interes', p.get('ultimo_juego_interes', ''))
+                        contexto_inv = await obtener_contexto_inventario_rag(vendedor_id, producto_interes)
+                        oferta = await generar_oferta_inteligente(p.get('nombre', 'Cliente'), producto_interes if producto_interes else 'producto', contexto_inv)
                         
-                        # 🛡️ FIX AAA: Incremento atómico del contador de remarketing
-                        nuevo_count = int(p.get('remarketing_count', 0)) + 1
-                        await async_db_execute(supabase.table('prospectos').update({'remarketing_count': nuevo_count}).eq('id', p.get('id')))
-                        
-                        print(f"🎯 [REMARKETING] Oferta enviada a {p.get('nombre')}")
-                        await asyncio.sleep(5) 
-                except Exception as e:
-                    if "429" in str(e): await asyncio.sleep(60)
+                        if oferta and oferta.get("mensaje_oferta"):
+                            mensaje = oferta.get("mensaje_oferta")
+                            await disparar_whatsapp_dinamico_async(
+                                p.get('telefono'), 
+                                mensaje, 
+                                config.get('meta_token', WHATSAPP_TOKEN), 
+                                config.get('meta_phone_id', WHATSAPP_PHONE_ID)
+                            )
+                            
+                            # Actualizaciones en cadena
+                            await actualizar_estado_crm(p.get('telefono'), vendedor_id, 'Con Descuento', 'oro', producto_interes)
+                            await guardar_mensaje_chat(p.get('telefono'), vendedor_id, 'BOT_REMARKETING', mensaje)
+                            
+                            # 🛡️ FIX AAA: Incremento atómico
+                            nuevo_count = int(p.get('remarketing_count', 0)) + 1
+                            await async_db_execute(supabase.table('prospectos').update({'remarketing_count': nuevo_count}).eq('id', p.get('id')).execute())
+                            
+                            print(f"🎯 [REMARKETING] Oferta enviada a {p.get('nombre')}")
+                            await asyncio.sleep(5) 
+                            
+                    except Exception as e:
+                        # Si Gemini nos bloquea (429), pausamos el bucle interno
+                        if "429" in str(e): 
+                            logger.error("⚠️ [API LIMIT] Pausa de seguridad por límite de IA")
+                            await asyncio.sleep(60)
+                            
         except Exception as e: 
             logger.error(f"⚠️ [WATCHDOG] Error no fatal: {e}")
-            pass
+            
+        # Espera de 10 minutos para el siguiente ciclo
         await asyncio.sleep(600)
 
 async def procesar_respuesta_bot(
@@ -4951,17 +4993,19 @@ async def get_dashboard_stats(vendedor_id: str = Depends(verificar_sesion_b2b)):
     """
     try:
         # Consulta optimizada (Multi-tenant aislada)
+        # 🛡️ FIX: 'columna' -> 'fila'
         res_leads = await async_db_execute(
             supabase.table("prospectos")
-            .select("columna", count='exact')
+            .select("fila", count='exact')
             .eq("vendedor_id", vendedor_id)
         )
         
         # Procesamiento lógico ligero
+        # 🛡️ FIX: 'columna' -> 'fila'
         stats = {
             "total_leads": res_leads.count or 0,
-            "leads_nuevos": sum(1 for x in res_leads.data if x['columna'] == 'Bandeja Nueva'),
-            "pendientes": sum(1 for x in res_leads.data if x['columna'] == 'Por Entregar')
+            "leads_nuevos": sum(1 for x in res_leads.data if x.get('fila') == 'Bandeja Nueva'),
+            "pendientes": sum(1 for x in res_leads.data if x.get('fila') == 'Por Entregar')
         }
         
         return {"status": "success", "data": stats}
@@ -4975,17 +5019,19 @@ async def get_dashboard_stats(vendedor_id: str = Depends(verificar_sesion_b2b)):
 # ==========================================================
 @router.get("/leads")
 async def get_leads(
-    columna: Optional[str] = None, 
+    fila: Optional[str] = None, 
     vendedor_id: str = Depends(verificar_sesion_b2b)
 ):
     """
     Retorna lista de prospectos filtrados por vendedor.
     """
     try:
+        # Iniciamos la consulta base
         query = supabase.table("prospectos").select("*").eq("vendedor_id", vendedor_id)
         
-        if columna:
-            query = query.eq("columna", columna)
+        # 🛡️ FIX AAA: Filtro aplicado sobre la nueva columna 'fila'
+        if fila:
+            query = query.eq("fila", fila)
             
         res = await async_db_execute(query.order("ultima_interaccion_ia", desc=True).limit(50))
         
@@ -5013,17 +5059,19 @@ async def ejecutar_accion_lead(
             .select("telefono")
             .eq("id", payload.lead_id)
             .eq("vendedor_id", vendedor_id)
+            .execute() # Asegúrate de tener el .execute()
         )
         
         if not res_check.data:
             raise HTTPException(status_code=404, detail="Lead no encontrado.")
 
         # Ejecución de acción segura
-        if payload.accion == "mover_columna":
+        # 🛡️ FIX AAA: Renombramos la acción a 'mover_fila' para consistencia
+        if payload.accion == "mover_fila": 
             await actualizar_estado_crm(
                 telefono=res_check.data[0]['telefono'],
                 vendedor_id=vendedor_id,
-                columna=payload.valor,
+                fila=payload.valor, # <--- El parámetro ahora es 'fila'
                 iluminacion="blanco",
                 juego=""
             )
@@ -5490,7 +5538,7 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
 @app.get("/api/cargar_todo")
 async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(verificar_sesion_b2b)):
     try:
-        # 🛡️ FIX AAA: Paginación Defensiva (Evita offsets negativos inyectables)
+        # 🛡️ FIX AAA: Paginación Defensiva
         offset_seguro = max(0, offset)
         limit_seguro = min(limit, 300)
         
@@ -5505,10 +5553,11 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
         
         columnas_custom = [sanitizar_nombre_columna(r['nombre_columna']) for r in (res_cols.data or []) if r['nombre_columna'].upper() not in [c.upper() for c in (columnas_izq + columnas_der)]]
         
+        # 🛡️ FIX AAA: Consulta a 'prospectos' usando 'fila' en lugar de 'columna'
         res_prospectos = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos')
-                .select('id, nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas')
+                .select('id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj, notas, etiquetas')
                 .eq('vendedor_id', str(_sesion))
                 .order('ultima_interaccion_ia', desc=True)
                 .range(offset_seguro, offset_seguro + limit_seguro - 1)
@@ -5517,15 +5566,15 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
         )
         
         ultimos = {}
-        for fila in (res_prospectos.data or []):
-            tel_norm = normalizar_telefono(fila.get('telefono', ''))
-            key_identificador = tel_norm if tel_norm else fila.get('nombre', 'Desconocido')
+        # 🛡️ FIX AAA: Variable renombrada a 'registro' para evitar conflicto con la columna 'fila'
+        for registro in (res_prospectos.data or []):
+            tel_norm = normalizar_telefono(registro.get('telefono', ''))
+            key_identificador = tel_norm if tel_norm else registro.get('nombre', 'Desconocido')
             
-            # 🛡️ FIX AAA: Evitamos sobrescribir sin checkeo (Lógica original mantenida, RAM optimizada)
             if key_identificador not in ultimos:
-                # 🛡️ FIX AAA: Sanitización lazy antes de despachar a Godot/Frontend
-                fila["ultimo_msj"] = html.escape(str(fila.get("ultimo_msj") or ""))
-                ultimos[key_identificador] = fila
+                # 🛡️ FIX AAA: Sanitización lazy
+                registro["ultimo_msj"] = html.escape(str(registro.get("ultimo_msj") or ""))
+                ultimos[key_identificador] = registro
                 
         return {"columnas": columnas_izq + columnas_custom + columnas_der, "prospectos": list(ultimos.values())}
     except Exception as e:
@@ -5534,22 +5583,32 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
 
 @app.get("/api/perfil_cliente")
 async def obtener_perfil_cliente(telefono: str, vendedor_id: str = Depends(verificar_sesion_b2b)):
+    """
+    Recupera el perfil detallado del cliente.
+    """
     try:
         tel_norm = normalizar_telefono(telefono)
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Parámetro telefónico inválido.")
             
+        # 🛡️ FIX AAA: 'columna' renombrada a 'fila' para evitar error de palabra reservada
         res = await asyncio.wait_for(
             async_db_execute(
-                supabase.table("prospectos").select("id, notas, etiquetas, columna, perfil_psicologico")
-                .eq("telefono", tel_norm).eq("vendedor_id", str(vendedor_id)).limit(1)
+                supabase.table("prospectos")
+                .select("id, notas, etiquetas, fila, perfil_psicologico")
+                .eq("telefono", tel_norm)
+                .eq("vendedor_id", str(vendedor_id))
+                .limit(1)
             ),
             timeout=5.0
         )
-        if res.data: return {"status": "ok", "datos": res.data[0]}
+        
+        if res.data: 
+            return {"status": "ok", "datos": res.data[0]}
         
         # 🛡️ FIX AAA: Anti-Enumeración de usuarios (Retorno estándar genérico)
         return {"status": "ok", "datos": {}}
+        
     except HTTPException: raise
     except Exception as e: 
         logger.error(f"❌ Error en perfil_cliente: {e}")
@@ -5645,17 +5704,18 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
     try:
         hoy_inicio = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         
-        # 🛡️ FIX AAA: Evitamos la sobrecarga en RAM consumiendo la DB directamente con un generador (Agregación segura)
+        # Consulta de ventas
         ventas_res = await asyncio.wait_for(
             async_db_execute(supabase.table("ventas").select("monto").eq("vendedor_id", str(vendedor_id)).gte("created_at", hoy_inicio)),
             timeout=10.0
         )
         total_hoy = sum((float(v.get("monto") or 0.0) for v in (ventas_res.data or [])))
 
+        # 🛡️ FIX AAA: Consulta a 'prospectos' usando 'fila' en lugar de 'columna'
         prospectos_res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table("prospectos")
-                .select("id, nombre, telefono, columna, ultima_interaccion_ia, ultimo_msj, notas, etiquetas")
+                .select("id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj, notas, etiquetas")
                 .eq("vendedor_id", str(vendedor_id))
                 .order("ultima_interaccion_ia", desc=True)
                 .limit(50)
@@ -5669,9 +5729,10 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b)):
                 "id": p.get("id"),
                 "nombre": html.escape(p.get("nombre") or "Cliente"),
                 "telefono": normalizar_telefono(p.get("telefono", "")),
-                "columna": sanitizar_nombre_columna(p.get("columna") or "Bandeja Nueva"),
+                # 🛡️ FIX AAA: Mapeo de 'fila' (DB) a 'fila' (JSON)
+                "fila": sanitizar_nombre_columna(p.get("fila") or "Bandeja Nueva"),
                 "ultima_interaccion_ia": p.get("ultima_interaccion_ia") or "",
-                "ultimo_msj": html.escape(p.get("ultimo_msj") or ""), # 🛡️ FIX AAA: Escapado XSS
+                "ultimo_msj": html.escape(p.get("ultimo_msj") or ""), 
                 "notas": p.get("notas") or "",
                 "etiquetas": p.get("etiquetas") or ""
             })
@@ -5688,19 +5749,26 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
-        # 🛡️ FIX AAA: Le decimos a la función que SÍ permita nombres reservados para el Drag & Drop
+        # 🛡️ FIX AAA: Sanitizamos el valor, pero el destino ahora es 'fila'
         col_segura = sanitizar_nombre_columna(datos.nueva_columna, permitir_reservadas=True)
         
+        # 🛡️ FIX AAA: Actualizamos la columna 'fila' (DB) con el valor sanitizado
         resultado = await asyncio.wait_for(
             async_db_execute(
-                supabase.table('prospectos').update({'columna': col_segura})
+                supabase.table('prospectos')
+                .update({'fila': col_segura}) # <--- CORREGIDO AQUÍ
                 .eq('vendedor_id', str(_sesion))
                 .eq('telefono', tel_norm)
+                .execute() # Asegúrate de incluir el .execute() aquí también
             ),
             timeout=8.0
         )
-        if resultado.data: return {"status": "ok"}
+        
+        if resultado.data: 
+            return {"status": "ok"}
+            
         raise HTTPException(status_code=404, detail="Registro no encontrado.")
+        
     except HTTPException: raise
     except Exception as e: 
         logger.error(f"❌ Error actualizando tarjeta: {e}")
@@ -5736,15 +5804,27 @@ async def mover_prospecto(datos: ColumnaUpdate, _sesion: str = Depends(verificar
         if not tel_norm:
             raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
+        # Sanitizamos el valor de la nueva columna (fila)
         col_final = sanitizar_nombre_columna(datos.nueva_columna if datos.nueva_columna else datos.columna)
         
+        # 🛡️ FIX AAA: Update apuntando a la nueva columna 'fila'
         await asyncio.wait_for(
-            async_db_execute(supabase.table('prospectos').update({"columna": col_final}).eq('telefono', tel_norm).eq('vendedor_id', str(_sesion))),
+            async_db_execute(
+                supabase.table('prospectos')
+                .update({"fila": col_final}) # <--- CORREGIDO AQUÍ
+                .eq('telefono', tel_norm)
+                .eq('vendedor_id', str(_sesion))
+                .execute() # Asegurando ejecución en DB
+            ),
             timeout=8.0
         )
+        
         return {"status": "ok", "mensaje": f"Movido a {col_final}"}
+
     except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail="Error transaccional.")
+    except Exception as e: 
+        logger.error(f"❌ Error transaccional en mover_prospecto: {e}")
+        raise HTTPException(status_code=500, detail="Error transaccional.")
 
 @app.post("/api/actualizar_notas")
 async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b)):
@@ -6162,13 +6242,27 @@ async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depend
         viejo_seguro = limpiar_texto(datos.viejo_nombre)
         if nuevo_seguro.lower() == viejo_seguro.lower(): return {"status": "ok"} 
             
-        # 🛡️ FIX AAA: Agregamos timeouts para evitar locks infinitos en DB
+        # 1. Actualizamos la configuración (esto sigue igual)
         await asyncio.wait_for(
-            async_db_execute(supabase.table('configuracion').update({'nombre_columna': nuevo_seguro}).eq('vendedor_id', vid_str).eq('nombre_columna', viejo_seguro)),
+            async_db_execute(
+                supabase.table('configuracion')
+                .update({'nombre_columna': nuevo_seguro})
+                .eq('vendedor_id', vid_str)
+                .eq('nombre_columna', viejo_seguro)
+                .execute()
+            ),
             timeout=10.0
         )
+        
+        # 2. 🛡️ FIX AAA: Actualizamos la tabla prospectos apuntando a 'fila'
         await asyncio.wait_for(
-            async_db_execute(supabase.table('prospectos').update({'columna': nuevo_seguro}).eq('vendedor_id', vid_str).eq('columna', viejo_seguro)),
+            async_db_execute(
+                supabase.table('prospectos')
+                .update({'fila': nuevo_seguro})    # <--- Cambio crítico: ahora es 'fila'
+                .eq('vendedor_id', vid_str)
+                .eq('fila', viejo_seguro)          # <--- Cambio crítico: comparamos sobre 'fila'
+                .execute()                         # <--- Ejecución obligatoria para evitar fallos
+            ),
             timeout=10.0
         )
         return {"status": "ok"}
@@ -6207,15 +6301,32 @@ async def borrar_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_
         col_name = limpiar_texto(datos.nombre)
         
         # 🛡️ FIX AAA CRÍTICO: Escudo contra destrucción de sistema
+        # Mantenemos esta validación porque protege las columnas base
         if col_name.lower() in COLUMNAS_SISTEMA_RESERVADAS:
             raise HTTPException(400, "Acción denegada: Prohibido eliminar columnas reservadas del sistema.")
             
+        # 🛡️ FIX AAA: Migración de prospectos de vuelta a "Bandeja Nueva"
+        # Actualizamos la columna 'fila' para evitar registros huérfanos
         await asyncio.wait_for(
-            async_db_execute(supabase.table('prospectos').update({"columna": "Bandeja Nueva"}).eq('columna', col_name).eq('vendedor_id', str(_sesion))),
+            async_db_execute(
+                supabase.table('prospectos')
+                .update({"fila": "Bandeja Nueva"})
+                .eq('fila', col_name)
+                .eq('vendedor_id', str(_sesion))
+                .execute()
+            ),
             timeout=10.0
         )
+        
+        # Eliminación de configuración
         await asyncio.wait_for(
-            async_db_execute(supabase.table('configuracion').delete().eq('vendedor_id', str(_sesion)).eq('nombre_columna', col_name)),
+            async_db_execute(
+                supabase.table('configuracion')
+                .delete()
+                .eq('vendedor_id', str(_sesion))
+                .eq('nombre_columna', col_name)
+                .execute()
+            ),
             timeout=10.0
         )
         return {"status": "ok"}
@@ -6323,18 +6434,23 @@ async def listar_publicaciones(_sesion: str = Depends(verificar_sesion_b2b)):
 @app.post("/api/mensaje_masivo")
 async def ejecutar_campana_masiva(datos: dict, _sesion: str = Depends(verificar_sesion_b2b)):
     vendedor_id = str(_sesion)
-    columna = datos.get("columna_origen")
     
-    print(f"📢 [API DEBUG] Buscando prospectos en columna: '{columna}' para {vendedor_id}")
+    # 1. Renombramos la variable a 'fila_a_buscar' para que el código sea legible.
+    # El valor viene de 'columna_origen' (el JSON que envías desde Godot).
+    fila_a_buscar = datos.get("columna_origen")
+    
+    print(f"📢 [API DEBUG] Buscando prospectos en fila: '{fila_a_buscar}' para {vendedor_id}")
     
     try:
-        # 1. Obtener prospectos con buscador tolerante (ilike + comodines %)
-        # Esto ignora espacios extra y diferencias de mayúsculas/minúsculas.
+        # 2. 'fila' es el nombre de la columna en Supabase (renombrada).
+        # 3. '{fila_a_buscar}' es el valor que estás buscando.
         res = supabase.table('prospectos') \
             .select('telefono, nombre') \
             .eq('vendedor_id', vendedor_id) \
-            .ilike('columna', f'%{columna}%') \
+            .ilike('fila', f'%{fila_a_buscar}%') \
             .execute()
+            
+        # ... resto de tu lógica
         
         prospectos = res.data
         print(f"🔍 [API DEBUG] Prospectos encontrados: {len(prospectos)}")
@@ -6517,919 +6633,137 @@ def enmascarar_telefono(tel: str) -> str:
 # ==========================================================
 # 🧠 ORQUESTADOR PRINCIPAL
 # ==========================================================
-async def gestionar_mensaje_entrante_bg(
-    valor: dict,
-    msg: dict,
-    phone_id_receptor: str
-):
-
+async def gestionar_mensaje_entrante_bg(valor: dict, msg: dict, phone_id_receptor: str):
     """
-    ==============================================================================
     🧠 ORQUESTADOR MAESTRO MULTIMEDIA VELTRIX ENGINE
-    ==============================================================================
-    ✔ Multi-Tenant Isolation
-    ✔ Anti Replay Attacks
-    ✔ Anti Audio Bomb
-    ✔ Anti Payload Flood
-    ✔ Anti Token Burn
-    ✔ Anti Worker Exhaustion
-    ✔ Anti Decompression Bomb
-    ✔ Anti CRM Flood
-    ✔ Anti Duplicate Meta
-    ✔ Anti Task Leaks
-    ✔ Backpressure Inteligente
-    ✔ Circuit Breakers
-    ✔ Protección Asyncio
-    ==============================================================================
+    ✔ Multi-Tenant, Anti-Replay, Anti-AudioBomb, Circuit Breakers, etc.
     """
-
-    global WEBHOOK_ERRORES_CONSECUTIVOS
-    global WEBHOOK_CIRCUIT_BREAKER_HASTA
-
+    global WEBHOOK_ERRORES_CONSECUTIVOS, WEBHOOK_CIRCUIT_BREAKER_HASTA
     trace_id = str(uuid.uuid4())[:8]
-
     inicio_pipeline = now_ts()
-
     media_dict_audio = None
     media_dict_img = None
-
-    logger.info(
-        f"📥 [TRACE:{trace_id}] "
-        f"INICIANDO ORQUESTACIÓN"
-    )
-
+    logger.info(f"📥 [TRACE:{trace_id}] INICIANDO ORQUESTACIÓN")
     try:
-
-        # ==========================================================
-        # 🛡️ CIRCUIT BREAKER GLOBAL
-        # ==========================================================
+        # 🛡️ CIRCUIT BREAKER
         if now_ts() < WEBHOOK_CIRCUIT_BREAKER_HASTA:
-
-            logger.warning(
-                f"🚨 [TRACE:{trace_id}] "
-                f"Circuit breaker activo."
-            )
-
-            return
-
-        # ==========================================================
-        # 🛡️ VALIDACIÓN ESTRUCTURA
-        # ==========================================================
-        if not isinstance(msg, dict):
-
-            logger.warning(
-                f"⚠️ [TRACE:{trace_id}] "
-                f"Payload inválido."
-            )
-
-            return
-
-        # ==========================================================
-        # 🛡️ EVENTOS SISTEMA
-        # ==========================================================
+            logger.warning(f"🚨 [TRACE:{trace_id}] Circuit breaker activo."); return
+        # 🛡️ ESTRUCTURA Y EVENTOS
+        if not isinstance(msg, dict): return
         if msg.get("from_me") or valor.get("statuses"):
-
-            logger.info(
-                f"♻️ [TRACE:{trace_id}] "
-                f"Evento sistema ignorado."
-            )
-
-            return
-
-        # ==========================================================
-        # 🛡️ VALIDACIÓN WAMID
-        # ==========================================================
+            logger.info(f"♻️ [TRACE:{trace_id}] Evento sistema ignorado."); return
         wamid = str(msg.get("id", "")).strip()
-
-        if not wamid:
-
-            logger.warning(
-                f"⚠️ [TRACE:{trace_id}] "
-                f"WAMID inválido."
-            )
-
-            return
-
-        # ==========================================================
+        if not wamid: return
         # 🛡️ ANTI REPLAY
-        # ==========================================================
         async with wamid_lock:
-
             if procesados_recientemente.get(wamid):
-
-                logger.warning(
-                    f"♻️ [TRACE:{trace_id}] "
-                    f"Replay bloqueado."
-                )
-
-                return
-
-            procesados_recientemente[wamid] = {
-                "trace": trace_id,
-                "ts": now_ts()
-            }
-
-        # ==========================================================
-        # 🛡️ VALIDACIÓN PHONE ID
-        # ==========================================================
-        phone_id_receptor = str(
-            phone_id_receptor
-        ).strip()
-
-        if not phone_id_receptor:
-
-            logger.error(
-                f"🚨 [TRACE:{trace_id}] "
-                f"Phone ID vacío."
-            )
-
-            return
-
-        # ==========================================================
+                logger.warning(f"♻️ [TRACE:{trace_id}] Replay bloqueado."); return
+            procesados_recientemente[wamid] = {"trace": trace_id, "ts": now_ts()}
         # 🏢 RESOLUCIÓN TENANT
-        # ==========================================================
-        res_config = await asyncio.wait_for(
-
-            async_db_execute(
-
-                supabase
-                .table("configuracion_bot")
-                .select("*")
-                .eq("meta_phone_id", phone_id_receptor)
-                .limit(1)
-
-            ),
-
-            timeout=5.0
-        )
-
-        if not res_config.data:
-
-            logger.error(
-                f"🚨 [TRACE:{trace_id}] "
-                f"Tenant inexistente."
-            )
-
-            return
-
+        phone_id_receptor = str(phone_id_receptor).strip()
+        res_config = await asyncio.wait_for(async_db_execute(supabase.table("configuracion_bot").select("*").eq("meta_phone_id", phone_id_receptor).limit(1)), timeout=5.0)
+        if not res_config.data: logger.error(f"🚨 [TRACE:{trace_id}] Tenant inexistente."); return
         config_vendedor = res_config.data[0]
-
-        vendedor_actual = str(
-            config_vendedor.get(
-                "vendedor_id",
-                ""
-            )
-        ).strip()
-
-        token_actual = str(
-            config_vendedor.get(
-                "meta_token",
-                ""
-            )
-        ).strip() or WHATSAPP_TOKEN
-
-        nombre_negocio = str(
-            config_vendedor.get(
-                "nombre_negocio",
-                "Veltrix"
-            )
-        ).strip()
-
-        if not vendedor_actual or not token_actual:
-
-            logger.error(
-                f"🚨 [TRACE:{trace_id}] "
-                f"Config tenant inválida."
-            )
-
-            return
-
-        if not config_vendedor.get("bot_activo", True):
-
-            logger.warning(
-                f"🚫 [TRACE:{trace_id}] "
-                f"Bot desactivado."
-            )
-
-            return
-
-        # ==========================================================
+        vendedor_actual = str(config_vendedor.get("vendedor_id", "")).strip()
+        token_actual = str(config_vendedor.get("meta_token", "")).strip() or WHATSAPP_TOKEN
+        nombre_negocio = str(config_vendedor.get("nombre_negocio", "Veltrix")).strip()
+        if not vendedor_actual or not token_actual: return
+        if not config_vendedor.get("bot_activo", True): return
         # 📞 NORMALIZACIÓN TELÉFONO
-        # ==========================================================
-        telefono_cliente = str(
-            msg.get("from", "")
-        ).strip()
-
-        telefono_cliente = re.sub(
-            r"[^\d]",
-            "",
-            telefono_cliente
-        )
-
-        if telefono_cliente.startswith("521"):
-
-            telefono_cliente = (
-                "52" + telefono_cliente[3:]
-            )
-
-        if len(telefono_cliente) < 10:
-
-            logger.warning(
-                f"⚠️ [TRACE:{trace_id}] "
-                f"Teléfono inválido."
-            )
-
-            return
-
-        tel_mask = enmascarar_telefono(
-            telefono_cliente
-        )
-
-        logger.info(
-            f"📞 [TRACE:{trace_id}] "
-            f"Cliente={tel_mask}"
-        )
-
-        # ==========================================================
-        # 🛡️ LOCK DISTRIBUIDO CLIENTE
-        # ==========================================================
-        lock_cliente = hashlib.sha256(
-            f"{vendedor_actual}:{telefono_cliente}".encode()
-        ).hexdigest()
-
+        telefono_cliente = re.sub(r"[^\d]", "", str(msg.get("from", "")).strip())
+        if telefono_cliente.startswith("521"): telefono_cliente = "52" + telefono_cliente[3:]
+        if len(telefono_cliente) < 10: return
+        logger.info(f"📞 [TRACE:{trace_id}] Cliente={enmascarar_telefono(telefono_cliente)}")
+        # 🛡️ LOCK Y RATE LIMIT
+        lock_cliente = hashlib.sha256(f"{vendedor_actual}:{telefono_cliente}".encode()).hexdigest()
         async with LOCKS_WEBHOOK_CLIENTE[lock_cliente]:
-
-            # ==========================================================
-            # 🛡️ RATE LIMIT
-            # ==========================================================
-            rl_key = (
-                f"{vendedor_actual}:"
-                f"{telefono_cliente}"
-            )
-
+            rl_key = f"{vendedor_actual}:{telefono_cliente}"
             async with rate_limit_lock:
-
-                peticiones = RATE_LIMIT_CLIENTES.get(
-                    rl_key,
-                    0
-                )
-
-                if peticiones >= 8:
-
-                    logger.warning(
-                        f"⚠️ [TRACE:{trace_id}] "
-                        f"Flood detectado."
-                    )
-
-                    return
-
-                RATE_LIMIT_CLIENTES[rl_key] = (
-                    peticiones + 1
-                )
-
-            # ==========================================================
-            # 🧠 DETECCIÓN TIPO
-            # ==========================================================
-            tipo_mensaje = str(
-                msg.get("type", "text")
-            ).lower().strip()
-
+                peticiones = RATE_LIMIT_CLIENTES.get(rl_key, 0)
+                if peticiones >= 8: return
+                RATE_LIMIT_CLIENTES[rl_key] = peticiones + 1
+            tipo_mensaje = str(msg.get("type", "text")).lower().strip()
             texto_entrante = ""
-
-            logger.info(
-                f"📦 [TRACE:{trace_id}] "
-                f"Tipo={tipo_mensaje}"
-            )
-
-            # ==========================================================
-            # 📝 TEXTO
-            # ==========================================================
-            if tipo_mensaje == "text":
-
-                texto_entrante = (
-                    msg.get("text", {})
-                    .get("body", "")
-                    .strip()
-                )
-
-            # ==========================================================
-            # 🖲️ INTERACTIVE
-            # ==========================================================
-            elif tipo_mensaje == "interactive":
-
-                texto_entrante = (
-                    msg.get("interactive", {})
-                    .get("button_reply", {})
-                    .get("title", "")
-                    .strip()
-                )
-
-            # ==========================================================
-            # 🎙️ AUDIO / IMAGEN
-            # ==========================================================
+            if tipo_mensaje == "text": texto_entrante = msg.get("text", {}).get("body", "").strip()
+            elif tipo_mensaje == "interactive": texto_entrante = msg.get("interactive", {}).get("button_reply", {}).get("title", "").strip()
             elif tipo_mensaje in ["audio", "image"]:
-
                 async with media_limit_lock:
-
-                    media_count = RATE_LIMIT_MEDIA.get(
-                        rl_key,
-                        0
-                    )
-
-                    if media_count >= 5:
-
-                        logger.warning(
-                            f"⚠️ [TRACE:{trace_id}] "
-                            f"Flood multimedia."
-                        )
-
-                        return
-
-                    RATE_LIMIT_MEDIA[rl_key] = (
-                        media_count + 1
-                    )
-
-                # ==========================================================
-                # 🎙️ AUDIO
-                # ==========================================================
+                    media_count = RATE_LIMIT_MEDIA.get(rl_key, 0)
+                    if media_count >= 5: return
+                    RATE_LIMIT_MEDIA[rl_key] = media_count + 1
                 if tipo_mensaje == "audio":
-
-                    texto_entrante = (
-                        "🎙️ [NOTA DE VOZ RECIBIDA]"
-                    )
-
-                    audio_id = str(
-                        msg.get("audio", {})
-                        .get("id", "")
-                    ).strip()
-
-                    if not audio_id:
-                        return
-
-                    media_dict_audio = await asyncio.wait_for(
-
-                        descargar_media_whatsapp_async(
-                            audio_id,
-                            token_actual
-                        ),
-
-                        timeout=30.0
-                    )
-
-                    if not media_dict_audio:
-                        return
-
-                    audio_bytes = media_dict_audio.get(
-                        "data",
-                        b""
-                    )
-
-                    if not audio_bytes:
-                        return
-
-                    if len(audio_bytes) > 15_000_000:
-
-                        logger.warning(
-                            f"🚨 [TRACE:{trace_id}] "
-                            f"Audio >15MB."
-                        )
-
-                        return
-
-                    # ==========================================================
-                    # 🛡️ HASH ANTI AUDIO BOMB
-                    # ==========================================================
-                    audio_hash = hashlib.sha256(
-                        audio_bytes[:50000]
-                    ).hexdigest()
-
-                    if audio_hash in AUDIO_HASHES_PROCESADOS:
-
-                        logger.warning(
-                            f"♻️ [TRACE:{trace_id}] "
-                            f"Audio repetido."
-                        )
-
-                        return
-
+                    texto_entrante = "🎙️ [NOTA DE VOZ RECIBIDA]"
+                    audio_id = str(msg.get("audio", {}).get("id", "")).strip()
+                    if not audio_id: return
+                    media_dict_audio = await asyncio.wait_for(descargar_media_whatsapp_async(audio_id, token_actual), timeout=30.0)
+                    if not media_dict_audio or not media_dict_audio.get("data"): return
+                    if len(media_dict_audio["data"]) > 15_000_000: return
+                    audio_hash = hashlib.sha256(media_dict_audio["data"][:50000]).hexdigest()
+                    if audio_hash in AUDIO_HASHES_PROCESADOS: return
                     AUDIO_HASHES_PROCESADOS[audio_hash] = True
-
-                # ==========================================================
-                # 🖼️ IMAGEN
-                # ==========================================================
                 elif tipo_mensaje == "image":
-
-                    texto_entrante = (
-                        "📷 [IMAGEN RECIBIDA]"
-                    )
-
-                    image_id = str(
-                        msg.get("image", {})
-                        .get("id", "")
-                    ).strip()
-
-                    if not image_id:
-                        return
-
-                    media_dict_img = await asyncio.wait_for(
-
-                        descargar_media_whatsapp_async(
-                            image_id,
-                            token_actual
-                        ),
-
-                        timeout=30.0
-                    )
-
-                    if not media_dict_img:
-                        return
-
-                    data_bytes = media_dict_img.get(
-                        "data",
-                        b""
-                    )
-
-                    if not data_bytes:
-                        return
-
-                    if len(data_bytes) > 10_000_000:
-
-                        logger.warning(
-                            f"🚨 [TRACE:{trace_id}] "
-                            f"Imagen >10MB."
-                        )
-
-                        return
-
-                    mime = str(
-                        media_dict_img.get(
-                            "mime_type",
-                            ""
-                        )
-                    ).lower().strip()
-
-                    mime_validos = [
-                        "image/jpeg",
-                        "image/png",
-                        "image/webp"
-                    ]
-
-                    if mime not in mime_validos:
-
-                        logger.warning(
-                            f"🚨 [TRACE:{trace_id}] "
-                            f"MIME inválido."
-                        )
-
-                        return
-
-                    # ==========================================================
-                    # 🛡️ ANTI IMAGE BOMB
-                    # ==========================================================
-                    image_hash = hashlib.sha256(
-                        data_bytes[:50000]
-                    ).hexdigest()
-
-                    if image_hash in IMAGE_HASHES_PROCESADOS:
-
-                        logger.warning(
-                            f"♻️ [TRACE:{trace_id}] "
-                            f"Imagen repetida."
-                        )
-
-                        return
-
+                    texto_entrante = "📷 [IMAGEN RECIBIDA]"
+                    image_id = str(msg.get("image", {}).get("id", "")).strip()
+                    if not image_id: return
+                    media_dict_img = await asyncio.wait_for(descargar_media_whatsapp_async(image_id, token_actual), timeout=30.0)
+                    if not media_dict_img or not media_dict_img.get("data"): return
+                    data_bytes = media_dict_img["data"]
+                    if len(data_bytes) > 10_000_000 or media_dict_img.get("mime_type", "").lower() not in ["image/jpeg", "image/png", "image/webp"]: return
+                    image_hash = hashlib.sha256(data_bytes[:50000]).hexdigest()
+                    if image_hash in IMAGE_HASHES_PROCESADOS: return
                     IMAGE_HASHES_PROCESADOS[image_hash] = True
-
-                    try:
-
+                    try: 
                         Image.MAX_IMAGE_PIXELS = 20_000_000
-
-                        img_val = Image.open(
-                            io.BytesIO(data_bytes)
-                        )
-
-                        img_val.verify()
-
-                    except Exception as img_e:
-
-                        logger.warning(
-                            f"🚨 [TRACE:{trace_id}] "
-                            f"Imagen maliciosa: {img_e}"
-                        )
-
-                        return
-
-            # ==========================================================
-            # 🛡️ TIPO NO SOPORTADO
-            # ==========================================================
-            else:
-
-                logger.info(
-                    f"ℹ️ [TRACE:{trace_id}] "
-                    f"Tipo descartado."
-                )
-
-                return
-
-            # ==========================================================
-            # 🛡️ SANITIZACIÓN TEXTO
-            # ==========================================================
-            texto_entrante = limpiar_texto(
-                texto_entrante
-            )
-
-            texto_entrante = bleach.clean(
-                texto_entrante,
-                tags=[],
-                strip=True
-            )
-
-            texto_entrante = texto_entrante[:4000]
-
-            # ==========================================================
-            # 🛡️ PROMPT INJECTION
-            # ==========================================================
-            if detectar_prompt_injection(
-                texto_entrante
-            ):
-
-                logger.warning(
-                    f"🚨 [TRACE:{trace_id}] "
-                    f"Prompt Injection detectado."
-                )
-
-                return
-
-            # ==========================================================
+                        img_val = Image.open(io.BytesIO(data_bytes)); img_val.verify()
+                    except: return
+            else: return
+            texto_entrante = bleach.clean(limpiar_texto(texto_entrante), tags=[], strip=True)[:4000]
+            if detectar_prompt_injection(texto_entrante): return
             # 💾 CARGA CRM
-            # ==========================================================
-            nombre_cliente = (
-                valor.get("contacts", [{}])[0]
-                .get("profile", {})
-                .get("name", "Cliente")
-            )
-
-            nombre_cliente = limpiar_texto(
-                nombre_cliente
-            )[:80]
-
-            res_p = await async_db_execute(
-
-                supabase
-                .table("prospectos")
-                .select(
-                    "columna, notas, perfil_psicologico"
-                )
-                .eq("telefono", telefono_cliente)
-                .eq("vendedor_id", vendedor_actual)
-            )
-
-            columna_actual = (
-                res_p.data[0].get(
-                    "columna",
-                    "Bandeja Nueva"
-                )
-                if res_p.data
-                else "Bandeja Nueva"
-            )
-
-            # ==========================================================
-            # 🛡️ UPSERT CRM
-            # ==========================================================
+            nombre_cliente = limpiar_texto(valor.get("contacts", [{}])[0].get("profile", {}).get("name", "Cliente"))[:80]
+            # 🛡️ FIX AAA: Consulta y Upsert usando 'fila'
+            res_p = await async_db_execute(supabase.table("prospectos").select("fila, notas, perfil_psicologico").eq("telefono", telefono_cliente).eq("vendedor_id", vendedor_actual))
+            columna_actual = res_p.data[0].get("fila", "Bandeja Nueva") if res_p.data else "Bandeja Nueva"
             if not res_p.data:
-
                 try:
-
-                    await asyncio.wait_for(
-
-                        async_db_execute(
-
-                            supabase
-                            .table("prospectos")
-                            .upsert(
-                                {
-                                    "nombre": nombre_cliente,
-                                    "telefono": telefono_cliente,
-                                    "columna": columna_actual,
-                                    "vendedor_id": vendedor_actual,
-                                    "ultima_interaccion_ia":
-                                    datetime.now(
-                                        timezone.utc
-                                    ).isoformat()
-                                },
-
-                                on_conflict=(
-                                    "telefono,vendedor_id"
-                                )
-                            )
-                        ),
-
-                        timeout=5.0
-                    )
-
-                except Exception as db_e:
-
-                    logger.warning(
-                        f"⚠️ [TRACE:{trace_id}] "
-                        f"Upsert controlado: {db_e}"
-                    )
-
-            # ==========================================================
-            # 💬 GUARDADO CHAT
-            # ==========================================================
-            try:
-
-                await asyncio.wait_for(
-
-                    guardar_mensaje_chat(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "USER",
-                        texto_entrante
-                    ),
-
-                    timeout=5.0
-                )
-
-            except Exception as chat_e:
-
-                logger.error(
-                    f"⚠️ [TRACE:{trace_id}] "
-                    f"Error chat: {chat_e}"
-                )
-
-            # ==========================================================
+                    await asyncio.wait_for(supabase.table("prospectos").upsert({"nombre": nombre_cliente, "telefono": telefono_cliente, "fila": columna_actual, "vendedor_id": vendedor_actual, "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()}, on_conflict="telefono,vendedor_id").execute(), timeout=5.0)
+                except Exception as db_e: logger.warning(f"⚠️ Upsert controlado: {db_e}")
+            try: await asyncio.wait_for(guardar_mensaje_chat(telefono_cliente, vendedor_actual, "USER", texto_entrante), timeout=5.0)
+            except Exception as chat_e: logger.error(f"⚠️ Error chat: {chat_e}")
             # 🤖 PIPELINE IA
-            # ==========================================================
-            if (
-                tipo_mensaje in [
-                    "text",
-                    "interactive",
-                    "audio"
-                ]
-                and columna_actual != "En Conversacion"
-            ):
-
+            if tipo_mensaje in ["text", "interactive", "audio"] and columna_actual != "En Conversacion":
                 async with SEMAFORO_IA:
-
-                    logger.info(
-                        f"🤖 [TRACE:{trace_id}] "
-                        f"Pipeline IA iniciado."
-                    )
-
-                    contexto_rag = await obtener_contexto_inventario_rag(
-                        vendedor_actual,
-                        texto_entrante
-                    )
-
-                    historial = await obtener_historial_chat(
-                        telefono_cliente,
-                        vendedor_actual
-                    )
-
-                    data_cruda = await analizar_intencion_venta_ia(
-                        texto_entrante,
-                        contexto_rag,
-                        historial,
-                        config_vendedor,
-                        (
-                            res_p.data[0].get(
-                                "perfil_psicologico"
-                            )
-                            if res_p.data
-                            else None
-                        ),
-                        media_dict_audio
-                    )
-
-                    data_validada = validar_respuesta_ia(
-                        data_cruda
-                    )
-
-                    await guardar_resultado_ia_en_crm(
-                        telefono_cliente,
-                        vendedor_actual,
-                        data_validada
-                    )
-
-                    await disparar_whatsapp_dinamico_async(
-                        telefono_cliente,
-                        data_validada["respuesta"],
-                        token_actual,
-                        phone_id_receptor
-                    )
-
-                    await guardar_mensaje_chat(
-                        telefono_cliente,
-                        vendedor_actual,
-                        "BOT",
-                        data_validada["respuesta"]
-                    )
-
-            # ==========================================================
+                    contexto_rag = await obtener_contexto_inventario_rag(vendedor_actual, texto_entrante)
+                    historial = await obtener_historial_chat(telefono_cliente, vendedor_actual)
+                    data_cruda = await analizar_intencion_venta_ia(texto_entrante, contexto_rag, historial, config_vendedor, res_p.data[0].get("perfil_psicologico") if res_p.data else None, media_dict_audio)
+                    data_validada = validar_respuesta_ia(data_cruda)
+                    await guardar_resultado_ia_en_crm(telefono_cliente, vendedor_actual, data_validada)
+                    await disparar_whatsapp_dinamico_async(telefono_cliente, data_validada["respuesta"], token_actual, phone_id_receptor)
+                    await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", data_validada["respuesta"])
             # 🛡️ AUDITORÍA PAGOS
-            # ==========================================================
             elif tipo_mensaje == "image" and media_dict_img:
-
                 async with SEMAFORO_MEDIA:
-
-                    logger.info(
-                        f"🛡️ [TRACE:{trace_id}] "
-                        f"Doberman Vision iniciado."
-                    )
-
-                    historial_para_auditor = (
-                        await obtener_historial_chat(
-                            telefono_cliente,
-                            vendedor_actual
-                        )
-                    )
-
-                    auditoria = await asyncio.wait_for(
-
-                        auditar_comprobante_ia(
-                            media_dict_img["data"],
-                            media_dict_img["mime_type"],
-                            nombre_negocio,
-                            historial_para_auditor
-                        ),
-
-                        timeout=45.0
-                    )
-
-                    es_pago = bool(
-                        auditoria.get(
-                            "es_pago",
-                            False
-                        )
-                    )
-
-                    try:
-
-                        monto = float(
-                            auditoria.get(
-                                "monto_detectado",
-                                0.0
-                            )
-                        )
-
-                    except:
-                        monto = 0.0
-
-                    # ==========================================================
-                    # ✅ PAGO VÁLIDO
-                    # ==========================================================
+                    auditoria = await asyncio.wait_for(auditar_comprobante_ia(media_dict_img["data"], media_dict_img["mime_type"], nombre_negocio, await obtener_historial_chat(telefono_cliente, vendedor_actual)), timeout=45.0)
+                    es_pago = bool(auditoria.get("es_pago", False))
+                    monto = float(auditoria.get("monto_detectado", 0.0))
                     if es_pago:
-
-                        logger.info(
-                            f"💰 [TRACE:{trace_id}] "
-                            f"Pago validado ${monto:.2f}"
-                        )
-
-                        await actualizar_estado_crm(
-                            telefono_cliente,
-                            vendedor_actual,
-                            "Por Entregar",
-                            "verde_exito",
-                            ""
-                        )
-
-                        msg_exito = (
-                            f"✅ ¡Pago validado "
-                            f"por ${monto:.2f} MXN!\n"
-                            f"Hemos recibido tu comprobante."
-                        )
-
-                        await disparar_whatsapp_dinamico_async(
-                            telefono_cliente,
-                            msg_exito,
-                            token_actual,
-                            phone_id_receptor
-                        )
-
-                        await guardar_mensaje_chat(
-                            telefono_cliente,
-                            vendedor_actual,
-                            "BOT",
-                            msg_exito
-                        )
-
-                    # ==========================================================
-                    # 🚨 FRAUDE / ERROR
-                    # ==========================================================
+                        await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Por Entregar", "verde_exito", "")
+                        msg_exito = f"✅ ¡Pago validado por ${monto:.2f} MXN!\nHemos recibido tu comprobante."
+                        await disparar_whatsapp_dinamico_async(telefono_cliente, msg_exito, token_actual, phone_id_receptor)
+                        await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_exito)
                     else:
-
-                        analisis_fallo = limpiar_texto(
-                            auditoria.get(
-                                "analisis",
-                                "No validado."
-                            )
-                        )
-
-                        msg_fallo = (
-                            f"🤖 Mi sistema no pudo "
-                            f"validar la imagen.\n"
-                            f"Detalle: {analisis_fallo}\n"
-                            f"Por favor envía una foto clara."
-                        )
-
-                        logger.warning(
-                            f"🚨 [TRACE:{trace_id}] "
-                            f"Fraude/Error: {analisis_fallo}"
-                        )
-
-                        await actualizar_estado_crm(
-                            telefono_cliente,
-                            vendedor_actual,
-                            "Requiere Asistencia",
-                            "verde_alerta",
-                            ""
-                        )
-
-                        await disparar_whatsapp_dinamico_async(
-                            telefono_cliente,
-                            msg_fallo,
-                            token_actual,
-                            phone_id_receptor
-                        )
-
-                        await guardar_mensaje_chat(
-                            telefono_cliente,
-                            vendedor_actual,
-                            "BOT",
-                            msg_fallo
-                        )
-
-        # ==========================================================
-        # 📊 TELEMETRÍA FINAL
-        # ==========================================================
-        tiempo_total = (
-            now_ts() - inicio_pipeline
-        )
-
-        logger.info(
-            f"🏁 [TRACE:{trace_id}] "
-            f"Pipeline completado "
-            f"en {tiempo_total:.3f}s"
-        )
-
+                        analisis_fallo = limpiar_texto(auditoria.get("analisis", "No validado."))
+                        msg_fallo = f"🤖 Mi sistema no pudo validar la imagen.\nDetalle: {analisis_fallo}\nPor favor envía una foto clara."
+                        await actualizar_estado_crm(telefono_cliente, vendedor_actual, "Requiere Asistencia", "verde_alerta", "")
+                        await disparar_whatsapp_dinamico_async(telefono_cliente, msg_fallo, token_actual, phone_id_receptor)
+                        await guardar_mensaje_chat(telefono_cliente, vendedor_actual, "BOT", msg_fallo)
+        logger.info(f"🏁 [TRACE:{trace_id}] Pipeline completado en {now_ts() - inicio_pipeline:.3f}s")
         WEBHOOK_ERRORES_CONSECUTIVOS = 0
-
-    # ==========================================================
-    # ⏱️ TIMEOUT GLOBAL
-    # ==========================================================
-    except asyncio.TimeoutError:
-
-        WEBHOOK_ERRORES_CONSECUTIVOS += 1
-
-        logger.error(
-            f"⏱️ [TRACE:{trace_id}] "
-            f"Timeout global."
-        )
-
-    # ==========================================================
-    # 🚨 ERROR GLOBAL
-    # ==========================================================
-    except Exception as e:
-
-        WEBHOOK_ERRORES_CONSECUTIVOS += 1
-
-        logger.exception(
-            f"❌ [TRACE:{trace_id}] "
-            f"CRÍTICO: {str(e)}"
-        )
-
-    # ==========================================================
-    # 🚨 CIRCUIT BREAKER
-    # ==========================================================
+    except asyncio.TimeoutError: WEBHOOK_ERRORES_CONSECUTIVOS += 1; logger.error(f"⏱️ [TRACE:{trace_id}] Timeout global.")
+    except Exception as e: WEBHOOK_ERRORES_CONSECUTIVOS += 1; logger.exception(f"❌ [TRACE:{trace_id}] CRÍTICO: {str(e)}")
     finally:
-
-        if WEBHOOK_ERRORES_CONSECUTIVOS >= 15:
-
-            WEBHOOK_CIRCUIT_BREAKER_HASTA = (
-                now_ts() + 60
-            )
-
-            logger.critical(
-                "🚨 [WEBHOOK CIRCUIT BREAKER] "
-                "Activado por exceso de errores."
-            )
-
-            WEBHOOK_ERRORES_CONSECUTIVOS = 0
-
-        # ==========================================================
-        # 🧹 CLEANUP MEMORIA
-        # ==========================================================
-        media_dict_audio = None
-        media_dict_img = None
-
-        gc.collect()
-
-        logger.info(
-            f"🧹 [TRACE:{trace_id}] "
-            f"GC ejecutado correctamente."
-        )
+        if WEBHOOK_ERRORES_CONSECUTIVOS >= 15: WEBHOOK_CIRCUIT_BREAKER_HASTA = now_ts() + 60; logger.critical("🚨 [WEBHOOK CIRCUIT BREAKER] Activado."); WEBHOOK_ERRORES_CONSECUTIVOS = 0
+        media_dict_audio = None; media_dict_img = None; gc.collect()
 
 
 # ==========================================================
