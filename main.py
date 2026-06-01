@@ -1490,7 +1490,7 @@ async def consultar_gemini_json(
                 logger.warning(
                     f"\n\n"
                     f"================ PROMPT GEMINI =================\n"
-                    f"{prompt_serializado[:5000]}\n"
+                    f"{prompt_serializado}\n"
                     f"================================================\n\n"
                 )
 
