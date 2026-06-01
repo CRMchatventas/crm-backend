@@ -45,7 +45,8 @@ load_dotenv()
 router = APIRouter(prefix="/api/v1/dashboard")
 # 🧪 MODO LABORATORIO: True = Permite pruebas locales / False = Bloquea todo (Producción)
 MODO_LABORATORIO = True
-
+# --- CONFIGURACIÓN DE SEGURIDAD GLOBAL ---
+DUMMY_HASH = "$2b$12$DummyHashDummyHashDummyHashDummyHashDummyHashDummyHashDu"
 # ==========================================================
 # 🛡️ 1. REGLAS DE SEGURIDAD Y LÍMITES ENTERPRISE
 # ==========================================================
