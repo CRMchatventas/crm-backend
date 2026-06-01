@@ -1477,7 +1477,9 @@ async def consultar_gemini_json(
                         "temperature": temperature,
                         "topP": 0.90,
                         "topK": 32,
-                        "maxOutputTokens": MAX_OUTPUT_TOKENS
+                        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                        # 🟢 FIX: Obligamos a Gemini 2.5 a responder SOLO con JSON puro (sin texto extra ni formato Markdown)
+                        "responseMimeType": "application/json" 
                     }
                 }
 
