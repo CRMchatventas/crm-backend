@@ -1198,7 +1198,7 @@ async def verificar_rate_limit(vendedor_id: str, telefono: str) -> bool:
 async def consultar_gemini_json(
     prompt: str,
     media_dict: dict = None,
-    temperature: float = 0.2,
+    temperature: float = 0.7,
     retries: int = 2,
     vendedor_id: str = "V-001"
 ) -> dict:
