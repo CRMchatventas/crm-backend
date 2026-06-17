@@ -1,26 +1,23 @@
+ ==============================================================================
+# 🚀 MÓDULO: main.py (ENTRYPOINT - VELTRIX ENGINE MULTI-TENANT 20.4.AAA)
 # ==============================================================================
-# 🚀 MÓDULO: main.py (ENTRYPOINT - VELTRIX ENGINE MULTI-TENANT 20.3.AAA)
+# FIX 20.2 → 20.3: ver historial previo (router include, procesar_respuesta_bot,
+# columna_actual real, nombre_cliente desde payload, gestionar_historial_db eliminado).
+#
+# FIX 20.3 → 20.4 (CRÍTICO):
+# Meta solo espera ~5s por el 200 OK del webhook; si tarda más lo marca
+# fallido y reintenta, y tras 5 fallos seguidos desactiva el webhook.
+# El pipeline de IA (Gemini + CRM + WhatsApp) tarda 10-13s+, así que NUNCA
+# puede correr antes de responder. Ahora el webhook responde casi de
+# inmediato y todo el trabajo lento se agenda con BackgroundTasks para
+# correr DESPUÉS de responder. Es agnóstico de giro: no toca nada
+# específico de videojuegos, alarmas o terrenos.
 # ==============================================================================
-# FIX 20.2 → 20.3:
-# 1. app.include_router(db_router) — sin esto, TODOS los endpoints de Godot
-#    (/api/cargar_todo, /api/actualizar_estado, /api/login, etc.) daban 404.
-# 2. El webhook ahora delega a procesar_respuesta_bot() en vez de reimplementar
-#    su propio pipeline incompleto. Esto restaura: actualizar_estado_crm
-#    (las tarjetas ya se mueven de columna), enviar_alerta_whatsapp_admin
-#    (el vendedor se entera de ventas/handoffs), detectar_prompt_injection,
-#    y búsqueda de portada para enviar imagen junto con la respuesta.
-# 3. Se agrega lectura de columna_actual real desde 'prospectos' antes de
-#    procesar — antes se ignoraba por completo, lo que podía resetear
-#    incorrectamente el flujo de remarketing en cada mensaje.
-# 4. Se extrae nombre_cliente del payload de Meta (contacts[0].profile.name)
-#    para los resúmenes de handoff y alertas al vendedor.
-# 5. gestionar_historial_db() eliminado: duplicaba lo que ya hacen
-#    guardar_mensaje_chat() y procesar_respuesta_bot() internamente.
-# ==============================================================================
+
 
 import os
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 # 🔌 1. Seguridad y Configuración Centralizada
@@ -99,6 +96,53 @@ configurar_middlewares_seguridad(app)
 app.include_router(db_router)
 
 
+# ==========================================================
+# 🆕 PROCESAMIENTO EN SEGUNDO PLANO (FIX CRÍTICO #4)
+# Meta solo espera ~5s para considerar el webhook recibido; si tarda más,
+# lo marca como fallido y reintenta (y tras 5 fallos seguidos, desactiva
+# el webhook). El pipeline de IA tarda 10-13s+, así que NUNCA puede correr
+# antes de responder. Esta función corre DESPUÉS de que ya respondimos.
+# Es agnóstica de giro: no contiene nada específico de videojuegos.
+# ==========================================================
+async def _procesar_mensaje_en_segundo_plano(
+    telefono_cliente: str, vendedor_id: str, texto_cliente: str,
+    media_id: str, token_meta: str, config_bot: dict,
+    nombre_cliente: str, wamid: str
+):
+    try:
+        media_dict = None
+        if media_id:
+            logger.info(f"📥 [BG] Descargando multimedia (ID: {media_id})...")
+            media_dict = await descargar_media_whatsapp_async(media_id, token_meta)
+
+        try:
+            res_col = await async_db_execute(
+                supabase.table('prospectos').select('fila')
+                .eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_id).limit(1)
+            )
+            columna_actual = (
+                res_col.data[0].get('fila', 'Bandeja Nueva')
+                if res_col.data else "Bandeja Nueva"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [BG] No se pudo leer columna actual, usando default: {e}")
+            columna_actual = "Bandeja Nueva"
+
+        await guardar_mensaje_chat(telefono_cliente, vendedor_id, "CLIENTE", texto_cliente, wamid)
+
+        await procesar_respuesta_bot(
+            cliente=nombre_cliente,
+            telefono=telefono_cliente,
+            texto_entrante=texto_cliente,
+            columna_actual=columna_actual,
+            config=config_bot,
+            media_dict=media_dict,
+            id_mensaje_meta=wamid
+        )
+    except Exception as e:
+        logger.exception(f"❌ [BG] Error no controlado procesando mensaje en segundo plano: {e}")
+
+
 @app.get("/")
 async def root():
     return {"status": "Veltrix Engine Online", "motor_db": "Conectado", "version": config.SCHEMA_VERSION}
@@ -133,7 +177,7 @@ async def verificar_webhook_meta(request: Request):
 # FIX CRÍTICO #2: ahora delega el pipeline completo a procesar_respuesta_bot()
 # ==========================================================
 @app.post("/webhook")
-async def recibir_mensajes_whatsapp(request: Request):
+async def recibir_mensajes_whatsapp(request: Request, background_tasks: BackgroundTasks):
     try:
         await validar_firma_meta(request)
     except Exception as e:
@@ -213,46 +257,21 @@ async def recibir_mensajes_whatsapp(request: Request):
                     if not texto_cliente and not media_id:
                         continue
 
-                    # 📥 DESCARGA MULTIMEDIA (sin cambios)
-                    media_dict = None
-                    if media_id:
-                        logger.info(f"📥 Descargando multimedia (ID: {media_id})...")
-                        media_dict = await descargar_media_whatsapp_async(media_id, token_meta)
-
-                    # 🆕 Columna actual real del prospecto en el Kanban.
-                    # Antes este dato se ignoraba; sin él, procesar_respuesta_bot
-                    # no sabría si el cliente ya estaba en "Con Descuento" o
-                    # "Requiere Asistencia", y podría tratarlo como nuevo siempre.
-                    try:
-                        res_col = await async_db_execute(
-                            supabase.table('prospectos').select('fila')
-                            .eq('telefono', telefono_cliente).eq('vendedor_id', vendedor_id).limit(1)
-                        )
-                        columna_actual = (
-                            res_col.data[0].get('fila', 'Bandeja Nueva')
-                            if res_col.data else "Bandeja Nueva"
-                        )
-                    except Exception as e:
-                        logger.warning(f"⚠️ [WEBHOOK] No se pudo leer columna actual, usando default: {e}")
-                        columna_actual = "Bandeja Nueva"
-
-                    # 🗄️ Guarda el mensaje entrante del cliente (dedup atómico por WAMID en BD)
-                    await guardar_mensaje_chat(telefono_cliente, vendedor_id, "CLIENTE", texto_cliente, wamid)
-
-                    # 🤖 FIX CRÍTICO: pipeline completo de negocio.
-                    # Antes este bloque solo llamaba a Gemini y respondía.
-                    # Ahora incluye: anti prompt-injection, actualización real
-                    # del CRM (mueve la tarjeta de columna), alerta al teléfono
-                    # personal del vendedor cuando hay venta o se necesita
-                    # atención humana, y búsqueda de portada del producto.
-                    await procesar_respuesta_bot(
-                        cliente=nombre_cliente,
-                        telefono=telefono_cliente,
-                        texto_entrante=texto_cliente,
-                        columna_actual=columna_actual,
-                        config=config_bot,
-                        media_dict=media_dict,
-                        id_mensaje_meta=wamid
+                    # 🆕 FIX CRÍTICO: se agenda en segundo plano en vez de
+                    # esperarlo aquí. Meta ya recibe su 200 OK abajo casi
+                    # de inmediato; la descarga de medios, lectura de CRM,
+                    # IA, actualización de Kanban y alerta al vendedor
+                    # corren después, sin que Meta tenga que esperarlas.
+                    background_tasks.add_task(
+                        _procesar_mensaje_en_segundo_plano,
+                        telefono_cliente=telefono_cliente,
+                        vendedor_id=vendedor_id,
+                        texto_cliente=texto_cliente,
+                        media_id=media_id,
+                        token_meta=token_meta,
+                        config_bot=config_bot,
+                        nombre_cliente=nombre_cliente,
+                        wamid=wamid
                     )
 
         return {"status": "ok"}
@@ -266,3 +285,4 @@ if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 8000))
     logger.info(f"🚀 Iniciando servidor Uvicorn en el puerto {puerto}")
     uvicorn.run("main:app", host="0.0.0.0", port=puerto, reload=config.MODO_LABORATORIO)
+
