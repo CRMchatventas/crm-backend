@@ -9,8 +9,13 @@ import bleach
 from config_and_schemas import (
     logger, supabase, get_lock,
     cache_respuestas_ia, CHAT_MESSAGE_HASHES,
-    now_ts, limpiar_texto, normalizar_telefono
+    now_ts, limpiar_texto
 )
+# 🔧 FIX: normalizar_telefono ya no existe en config_and_schemas.py (fue
+# renombrada internamente a _local_validar_tel, que lanza ValueError en vez
+# de devolver ""). Este archivo espera el contrato "devuelve '' si falla",
+# así que se importa la versión robusta y compatible de ai_security_utils.
+from ai_security_utils import normalizar_telefono
 from db_core_wrapper import async_db_execute
 
 async def obtener_historial_chat(telefono: str, vendedor_id: str, limite: int = 12) -> str:
