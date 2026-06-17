@@ -62,6 +62,11 @@ TITULOS_COMPUESTOS = {
 
 # ==============================================================================
 # 🧠 RAG INVENTARIO: RECUPERACIÓN SEMÁNTICA ACELERADA
+# 🔧 FIX MULTI-GIRO: 'consola' nunca existió en la tabla real — se cambia
+# por 'categoria' (confirmado en el esquema de Supabase), que es genérico
+# y sirve para cualquier giro: "PS5"/"Xbox" en videojuegos, "Residencial"/
+# "Comercial" en terrenos, lo que aplique en cada caso. atributos_extra
+# (jsonb) queda disponible para datos más específicos por giro a futuro.
 # ==============================================================================
 async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> str:
     """
@@ -77,13 +82,13 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     # 2. Anti Query Explosion: Filtro de stopwords y palabras < 2 chars
     palabras = [p for p in texto_limpio.split() if p not in STOPWORDS and len(p) >= 2][:5]
     palabras_clave = " ".join(palabras)
-    
+
     if not palabras_clave:
         return "El cliente no especificó un producto claro."
 
     # ⚡ Cache Key
     cache_key = hashlib.sha256(f"RAGINV:{vendedor_id}:{palabras_clave}".encode()).hexdigest()
-    
+
     cache_item = cache_respuestas_ia.get(cache_key)
     if cache_item and (now_ts() - cache_item.get("ts", 0) <= 300):
         return cache_item["data"]
@@ -91,10 +96,10 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     try:
         # 🚀 Prefiltro SQL con ancla basada en palabra más larga
         termino_fuerte = max(palabras, key=len) if palabras else ""
-        
+
         query = (
             supabase.table('inventario')
-            .select('nombre, consola, precio, stock, estado_general')
+            .select('nombre, categoria, precio, stock, estado_general')
             .eq('vendedor_id', vendedor_id)
             .ilike('nombre', f"%{termino_fuerte}%")
             .gt('stock', 0)
@@ -105,7 +110,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
         # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
         if not inventario:
-            fallback_query = supabase.table('inventario').select('nombre, consola, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+            fallback_query = supabase.table('inventario').select('nombre, categoria, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
             res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
             inventario = res_inv.data or []
 
@@ -114,8 +119,8 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
         for item in inventario:
             nombre = str(item.get("nombre", "")).strip()
             if not nombre: continue
-            key = f"{nombre} | {item.get('consola', 'N/A')}"
-            
+            key = f"{nombre} | {item.get('categoria', 'N/A')}"
+
             # Si ya existe, nos quedamos con el que tenga mayor stock
             if key in diccionario_opciones:
                 if item.get('stock', 0) > diccionario_opciones[key].get('stock', 0):
@@ -131,7 +136,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
         for item in items_a_mostrar:
             precio = float(item.get('precio') or 0.0)
             lineas_contexto.append(
-                f"[{item.get('consola', 'N/A')}] {item.get('nombre', 'Juego')} - "
+                f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
                 f"${precio:.2f} MXN | Stock: {item.get('stock', 0)} | "
                 f"Estado: {item.get('estado_general', 'N/A')}"
             )
@@ -146,6 +151,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     except Exception as e:
         logger.exception(f"❌ [RAG ERROR] Error crítico en la tubería semántica: {e}")
         return "No se pudo acceder al inventario."
+
 
 
 # ==============================================================================
