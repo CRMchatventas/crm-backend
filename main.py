@@ -50,7 +50,7 @@ logger = config.logger
 # ==========================================================
 CONFIGURACION_SHOWROOMS = {
     "1100616133134501": {
-        "vendedor_id": "V-FANTASY-001",
+        "vendedor_id": "V-001",  # 🔧 FIX: coincide con el tenant real (confirmado por /api/login)
         "giro_comercial": "Videojuegos y Consolas Seminuevas",
         "nombre_negocio": "Fantasygames",
         "tono_ia": "Gamer, experto en ventas, muy persuasivo pero honesto. Experto en leer comprobantes de pago.",
