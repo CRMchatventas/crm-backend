@@ -132,7 +132,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             
             decision = await asyncio.wait_for(
                 analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict),
-                timeout=12.0
+                timeout=25.0
             )
             decision = validar_respuesta_ia(decision)
             
