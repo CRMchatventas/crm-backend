@@ -835,6 +835,89 @@ async def actualizar_stock(item: VentaItem, request: Request, _sesion: str = Dep
         raise HTTPException(status_code=500, detail="Fallo crítico al procesar la venta.")
 
 # ==========================================================
+# 📦 13B. INVENTARIO: CARGA, EDICIÓN Y BORRADO (VISOR)
+# ==========================================================
+
+class EditarItemVisorRequest(BaseModel):
+    id: Any
+    nombre: Optional[str] = ""
+    consola: Optional[str] = ""
+    precio: float = 0.0
+    stock: int = 0
+
+class BorrarItemRequest(BaseModel):
+    id: Any
+    nombre: Optional[str] = ""
+    consola: Optional[str] = ""
+
+@router.get("/api/cargar_inventario")
+async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"📦 [TRACE:{trace_id}] Cargando inventario para {vendedor_id}")
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table("inventario")
+                .select("id, codigo_barras, nombre, consola, precio, stock, estado_general, costo, rareza, categoria")
+                .eq("vendedor_id", str(vendedor_id))
+                .order("nombre")
+                .limit(500)
+            ),
+            timeout=12.0
+        )
+        return {"status": "ok", "inventario": res.data or []}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en cargar_inventario: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al recuperar inventario.")
+
+@router.post("/api/editar_item_visor")
+async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"✏️ [TRACE:{trace_id}] Editando ítem id={item.id} para {vendedor_id}")
+    try:
+        if not item.id:
+            raise HTTPException(status_code=400, detail="ID requerido.")
+
+        campos: dict = {"precio": item.precio, "stock": max(0, item.stock)}
+        if item.nombre and item.nombre.strip():
+            campos["nombre"] = bleach.clean(item.nombre.strip(), tags=[], strip=True)
+        if item.consola and item.consola.strip():
+            campos["consola"] = bleach.clean(item.consola.strip(), tags=[], strip=True)
+
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table("inventario").update(campos)
+                .eq("id", item.id).eq("vendedor_id", str(vendedor_id)),
+                allow_retry=False
+            ),
+            timeout=10.0
+        )
+        return {"status": "ok", "updated": len(res.data) if res.data else 0}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en editar_item_visor: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al editar ítem.")
+
+@router.post("/api/borrar_item")
+async def borrar_item(item: BorrarItemRequest, vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🗑️ [TRACE:{trace_id}] Borrando ítem id={item.id} para {vendedor_id}")
+    try:
+        if not item.id:
+            raise HTTPException(status_code=400, detail="ID requerido.")
+
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table("inventario").delete()
+                .eq("id", item.id).eq("vendedor_id", str(vendedor_id)),
+                allow_retry=False
+            ),
+            timeout=10.0
+        )
+        return {"status": "ok", "deleted": len(res.data) if res.data else 0}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en borrar_item: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al eliminar ítem.")
+
+# ==========================================================
 # 📢 14. ENVÍOS MASIVOS (MARKETING AUTOMATION - BATCHING AAA)
 # ==========================================================
 def procesar_en_lotes(lista, n):
