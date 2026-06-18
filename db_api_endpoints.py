@@ -20,7 +20,7 @@ from config_and_schemas import (
     logger, get_lock, mensajes_procesados_meta, procesados_recientemente,
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate, 
     BorrarRequest, ColumnaUpdate, NotasUpdate, NuevoArticulo, VentaItem, 
-    MobileMessageRequest, sanitizar_nombre_columna
+    MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction
 )
 
 from ai_security_utils import verificar_sesion_b2b
@@ -30,6 +30,13 @@ from db_crm_logic import actualizar_estado_crm
 
 # CONSTANTE DE CRM GLOBAL
 FILA_PAPELERA = "Papelera"
+
+# 🔧 FIX ESTRUCTURA: bloques fijos compartidos. Antes vivían como listas
+# locales duplicadas dentro de cargar_todo; ahora son la única fuente de
+# verdad, usada también por /api/reordenar_columnas para validar que estos
+# bloques nunca lleguen alterados desde el cliente.
+COLUMNAS_FIJAS_IZQ = ["Bandeja Nueva", "Envios Masivos", "Con Descuento", "Requiere Asistencia"]
+COLUMNAS_FIJAS_DER = ["Por Entregar", "Vendidos", FILA_PAPELERA]
 
 # ==========================================================
 # 🛡️ HELPERS AAA, SCHEMAS Y CACHÉ
@@ -352,11 +359,15 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
     logger.info(f"🎮 [TRACE:{trace_id}] Sincronizando Tablero Kanban (Modo Ligero).")
     try:
         offset_seguro, limit_seguro = max(0, offset), min(limit, 300)
-        columnas_izq = ["Bandeja Nueva", "Envios Masivos", "Con Descuento", "Requiere Asistencia"]
-        columnas_der = ["Por Entregar", "Vendidos", FILA_PAPELERA]
+        columnas_izq = COLUMNAS_FIJAS_IZQ
+        columnas_der = COLUMNAS_FIJAS_DER
         
+        # 🔧 FIX ORDEN: se agrega 'orden' al select y se ordena por él, para
+        # que un reordenamiento guardado vía /api/reordenar_columnas se
+        # refleje aquí al recargar (antes no existía ningún ORDER BY, el
+        # orden visible dependía por accidente del id de inserción).
         res_cols = await asyncio.wait_for(
-            async_db_execute(supabase.table('configuracion').select('nombre_columna').eq('vendedor_id', str(_sesion))),
+            async_db_execute(supabase.table('configuracion').select('nombre_columna, orden').eq('vendedor_id', str(_sesion)).order('orden')),
             timeout=10.0
         )
         
@@ -413,14 +424,82 @@ async def obtener_perfil_cliente(telefono: str, vendedor_id: str = Depends(verif
 async def obtener_columnas(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.info(f"🎮 [TRACE:{trace_id}] Obteniendo Layout de Columnas")
     try:
+        # 🔧 FIX ORDEN: igual que en cargar_todo, se ordena por 'orden'.
         res = await asyncio.wait_for(
-            async_db_execute(supabase.table("configuracion").select("nombre_columna").eq("vendedor_id", str(vendedor_id))),
+            async_db_execute(supabase.table("configuracion").select("nombre_columna, orden").eq("vendedor_id", str(vendedor_id)).order('orden')),
             timeout=5.0
         )
         return {"status": "ok", "columnas": [sanitizar_nombre_columna(item["nombre_columna"]) for item in (res.data or [])]}
     except Exception as e: 
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo recuperando columnas: {e}")
         raise HTTPException(status_code=500, detail="Error al solicitar columnas configuradas.")
+
+@router.post("/api/reordenar_columnas")
+async def reordenar_columnas(datos: ReordenarColumnasAction, vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    Guarda el nuevo orden de las columnas dinámicas (incluye "+").
+    Blindaje no negociable: los bloques fijos de izquierda y derecha deben
+    llegar EXACTOS en su posición obligatoria, o se rechaza con 400 sin
+    guardar nada. Esta ruta nunca toca la tabla 'prospectos' — solo
+    'configuracion.orden' — así que no existe forma de que mueva tarjetas.
+    """
+    logger.info(f"🎮 [TRACE:{trace_id}] Guardando nuevo orden de columnas para {vendedor_id}")
+    try:
+        columnas = datos.columnas
+        n_izq, n_der = len(COLUMNAS_FIJAS_IZQ), len(COLUMNAS_FIJAS_DER)
+
+        if len(columnas) < n_izq + n_der:
+            raise HTTPException(status_code=400, detail="Estructura de columnas inválida: faltan columnas obligatorias.")
+
+        bloque_izq = [c.upper() for c in columnas[:n_izq]]
+        if bloque_izq != [c.upper() for c in COLUMNAS_FIJAS_IZQ]:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] Intento de alterar bloque fijo izquierdo rechazado. Tenant={vendedor_id}")
+            raise HTTPException(status_code=400, detail="Las columnas fijas de la izquierda no están en su posición obligatoria.")
+
+        bloque_der = [c.upper() for c in columnas[-n_der:]]
+        if bloque_der != [c.upper() for c in COLUMNAS_FIJAS_DER]:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] Intento de alterar bloque fijo derecho rechazado. Tenant={vendedor_id}")
+            raise HTTPException(status_code=400, detail="Las columnas fijas de la derecha no están en su posición obligatoria.")
+
+        zona_dinamica = columnas[n_izq:-n_der]  # incluye "+" siempre, más cualquier columna real creada por el usuario
+
+        # Persistimos el orden completo: fijas (siempre igual) + dinámicas (lo que de verdad cambió).
+        # FIX FASE 1 (mismo patrón del resto del archivo): allow_retry=False por ser mutación.
+        for idx, nombre_col in enumerate(COLUMNAS_FIJAS_IZQ):
+            await asyncio.wait_for(
+                async_db_execute(
+                    supabase.table("configuracion").update({"orden": idx})
+                    .eq("vendedor_id", str(vendedor_id)).ilike("nombre_columna", nombre_col),
+                    allow_retry=False
+                ),
+                timeout=8.0
+            )
+        for idx, nombre_col in enumerate(zona_dinamica):
+            nombre_seguro = sanitizar_nombre_columna(nombre_col, permitir_reservadas=True)
+            await asyncio.wait_for(
+                async_db_execute(
+                    supabase.table("configuracion").update({"orden": n_izq + idx})
+                    .eq("vendedor_id", str(vendedor_id)).eq("nombre_columna", nombre_seguro),
+                    allow_retry=False
+                ),
+                timeout=8.0
+            )
+        for idx, nombre_col in enumerate(COLUMNAS_FIJAS_DER):
+            await asyncio.wait_for(
+                async_db_execute(
+                    supabase.table("configuracion").update({"orden": n_izq + len(zona_dinamica) + idx})
+                    .eq("vendedor_id", str(vendedor_id)).ilike("nombre_columna", nombre_col),
+                    allow_retry=False
+                ),
+                timeout=8.0
+            )
+
+        logger.info(f"✅ [TRACE:{trace_id}] Orden de columnas guardado para {vendedor_id}")
+        return {"status": "ok"}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Error guardando orden de columnas: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar el nuevo orden de columnas.")
 
 # ==========================================================
 # 📱 11. ENDPOINTS MÓVILES (APP ASESORES Y GODOT)
