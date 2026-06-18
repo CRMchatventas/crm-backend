@@ -11,11 +11,13 @@ from config_and_schemas import (
     cache_respuestas_ia, CHAT_MESSAGE_HASHES,
     now_ts, limpiar_texto
 )
-# 🔧 FIX: normalizar_telefono ya no existe en config_and_schemas.py (fue
-# renombrada internamente a _local_validar_tel, que lanza ValueError en vez
-# de devolver ""). Este archivo espera el contrato "devuelve '' si falla",
-# así que se importa la versión robusta y compatible de ai_security_utils.
-from ai_security_utils import normalizar_telefono
+# 🔧 HISTORIAL: este archivo importaba normalizar_telefono de
+# ai_security_utils (config_and_schemas.normalizar_telefono ya no existe,
+# fue renombrada a _local_validar_tel, que lanza ValueError en vez de
+# devolver ""). Ya no se usa: el teléfono que llega a las funciones de
+# este archivo viene SIEMPRE pre-normalizado desde procesar_respuesta_bot,
+# y volver a normalizarlo aquí producía un resultado distinto para
+# números mexicanos (ver FIX UNIFICACIÓN MX abajo).
 from db_core_wrapper import async_db_execute
 
 async def obtener_historial_chat(telefono: str, vendedor_id: str, limite: int = 12) -> str:
@@ -24,7 +26,14 @@ async def obtener_historial_chat(telefono: str, vendedor_id: str, limite: int = 
     Patrón: Double-checked locking para evitar Stampede.
     """
     limite = max(1, min(limite, 25))
-    tel_norm = normalizar_telefono(telefono)
+    # 🔧 FIX UNIFICACIÓN MX: 'telefono' ya llega normalizado desde
+    # procesar_respuesta_bot (que llama a normalizar_telefono UNA vez).
+    # Volver a pasarlo por esa función aquí producía un resultado DISTINTO
+    # para números mexicanos (perdía el "1" extra que WhatsApp sí usa de
+    # forma oficial y consistente para México — confirmado por Meta), y
+    # eso hacía que el mismo cliente quedara guardado con dos teléfonos
+    # distintos entre 'prospectos' y 'mensajes_chat'.
+    tel_norm = str(telefono).strip()
     
     # 🚀 FIX AUDITORÍA: Promovemos a error estructurado un input inválido en el pipeline.
     if not tel_norm:
@@ -92,7 +101,9 @@ async def obtener_historial_chat(telefono: str, vendedor_id: str, limite: int = 
 async def guardar_mensaje_chat(telefono: str, vendedor_id: str, autor: str, mensaje: str, wamid: str = "") -> bool:
     """Persistencia segura con deduplicación atómica."""
     try:
-        tel_norm = normalizar_telefono(telefono)
+        # 🔧 FIX UNIFICACIÓN MX: mismo motivo que en obtener_historial_chat —
+        # no se vuelve a renormalizar un teléfono que ya llegó normalizado.
+        tel_norm = str(telefono).strip()
         vendedor_id = str(vendedor_id).strip()
         wamid_sanitizado = str(wamid).strip()[:250]
         
