@@ -137,9 +137,19 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             contexto = resultados[0] if not isinstance(resultados[0], Exception) else ""
             historial = resultados[1] if not isinstance(resultados[1], Exception) else []
             
+            # 🔧 FIX BUG ARGUMENTOS: faltaba 'telefono' — sin él, todo se recorría
+            # un lugar (telefono recibía el dict de perfil, perfil_cliente_previo
+            # recibía media_dict, y el media_dict real nunca llegaba — siempre None).
+            # Esto rompía la memoria persistente del cliente Y el análisis de
+            # imágenes/audios al mismo tiempo.
+            #
+            # 🔧 FIX TIMEOUT: 25.0s afuera competía contra el reintento interno de
+            # consultar_gemini_json (2 intentos, hasta 26s cada uno ≈ 52s en el peor
+            # caso) — el de afuera casi siempre ganaba la carrera y mataba el
+            # mecanismo de reintentos antes de que corriera ni un solo intento.
             decision = await asyncio.wait_for(
-                analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, perfil_cliente_previo, media_dict),
-                timeout=25.0
+                analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, telefono, perfil_cliente_previo, media_dict),
+                timeout=60.0
             )
             decision = validar_respuesta_ia(decision)
             
@@ -198,7 +208,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             logger.info(f"✅ [TRACE:{trace_id}] Pipeline IA completado en {now_ts() - inicio_pipeline:.2f}s")
 
     except asyncio.TimeoutError:
-        logger.error(f"⏱️ [TRACE:{trace_id}] Timeout global del Orquestador IA (Superó 12s).")
+        logger.error(f"⏱️ [TRACE:{trace_id}] Timeout global del Orquestador IA (Superó 60s).")
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] CRÍTICO: Error en el pipeline IA: {e}")
 
