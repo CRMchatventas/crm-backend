@@ -857,7 +857,7 @@ async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), tr
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table("inventario")
-                .select("id, codigo_barras, nombre, consola, precio, stock, estado_general, costo, rareza, categoria")
+                .select("id, codigo_barras, nombre, categoria, precio, stock, estado_general, costo, rareza")
                 .eq("vendedor_id", str(vendedor_id))
                 .order("nombre")
                 .limit(500)
@@ -880,7 +880,8 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
         if item.nombre and item.nombre.strip():
             campos["nombre"] = bleach.clean(item.nombre.strip(), tags=[], strip=True)
         if item.consola and item.consola.strip():
-            campos["consola"] = bleach.clean(item.consola.strip(), tags=[], strip=True)
+            # En Supabase la columna se llama "categoria", no "consola"
+            campos["categoria"] = bleach.clean(item.consola.strip(), tags=[], strip=True)
 
         res = await asyncio.wait_for(
             async_db_execute(
