@@ -1230,12 +1230,15 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 }}"""
  
                 # ── Ejecución IA ──────────────────────────────────────────
+                # 🔧 FIX: ya NO embebemos el media_dict dentro de prompt_estructurado.
+                # Ese bloque era redundante y riesgoso: consultar_gemini_json() YA
+                # recibe media_dict por su propio parámetro y lo adjunta correctamente
+                # como 'inlineData' (lo único que Gemini interpreta como imagen real).
+                # Meter el base64 aquí además solo lo convertía en texto plano dentro
+                # del prompt (Gemini nunca lo veía como imagen), inflaba el conteo de
+                # caracteres, y en imágenes grandes corría el riesgo de empujar las
+                # instrucciones del sistema fuera de MAX_PROMPT_CHARS al truncar.
                 prompt_estructurado = [{"role": "user", "parts": [prompt_maestro]}]
-                if media_dict:
-                    prompt_estructurado.append({
-                        "mime_type": media_dict.get("mime_type", "image/jpeg"),
-                        "data":      media_dict["data"],
-                    })
  
                 data = await consultar_gemini_json(
                     prompt_estructurado,
