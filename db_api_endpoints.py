@@ -351,7 +351,7 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
 
         res_prospectos = await asyncio.wait_for(
             async_db_execute(
-                supabase.table('prospectos').select('id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj')
+                supabase.table('prospectos').select('id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj, estado_iluminacion')
                 .eq('vendedor_id', str(_sesion)).order('ultima_interaccion_ia', desc=True).range(offset_seguro, offset_seguro + limit_seguro - 1)
             ),
             timeout=12.0
