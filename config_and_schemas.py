@@ -232,7 +232,17 @@ def _local_validar_tel(telefono: Any) -> str:
     if telefono in (None, ""): return ""
     limpio = re.sub(r"[^\d]", "", str(telefono))
     if not limpio: return ""
-    if limpio.startswith("521"): limpio = "52" + limpio[3:]
+    # 🔧 FIX CRÍTICO: esta línea le quitaba el "1" a los números mexicanos
+    # (5214xxxxxxxxx -> 524xxxxxxxxx), asumiendo que era redundante. Es justo
+    # lo contrario: Meta SÍ usa ese "1" para celulares mexicanos, y como este
+    # validador corre en Pydantic ANTES de que el código del endpoint vea el
+    # valor, rompía /api/actualizar_estado (y cualquier otra ruta que use
+    # MobileMessageRequest, ClienteIdentificador o NuevaCita) en silencio —
+    # el endpoint nunca llegaba a ver el teléfono correcto.
+    # Ahora hacemos lo opuesto: si falta el "1", lo agregamos, para que
+    # cualquier formato de entrada quede siempre en el formato correcto.
+    if limpio.startswith("52") and not limpio.startswith("521") and len(limpio) == 12:
+        limpio = "521" + limpio[2:]
     if len(limpio) < 10 or len(limpio) > 15: raise ValueError("Teléfono inválido.")
     if len(set(limpio)) == 1: raise ValueError("Teléfono inválido.")
     return limpio
