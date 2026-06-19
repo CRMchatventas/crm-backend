@@ -687,14 +687,18 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
 
 @router.post("/api/borrar_prospecto")
 async def borrar_prospecto(datos: BorrarRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
-    logger.info(f"🎮 [TRACE:{trace_id}] Soft Delete ({FILA_PAPELERA}) para ID: '{datos.nombre}'")
+    logger.info(f"🎮 [TRACE:{trace_id}] Soft Delete ({FILA_PAPELERA}) para: '{datos.nombre}'")
     try:
-        prospecto_id = datos.nombre.strip()
+        nombre_prospecto = datos.nombre.strip()
+        if not nombre_prospecto: raise HTTPException(status_code=400, detail="Nombre requerido.")
+        # 🔧 FIX: Godot manda el NOMBRE del cliente en este campo, no un ID
+        # numérico — comparar contra la columna 'id' (bigint) siempre fallaba
+        # con un error de tipo en Postgres. Filtramos por 'nombre' en su lugar.
         # FIX FASE 1: allow_retry=False por mutación (UPDATE)
         resultado = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('prospectos').update({'fila': FILA_PAPELERA}) 
-                .eq('vendedor_id', str(_sesion)).eq('id', prospecto_id),
+                .eq('vendedor_id', str(_sesion)).eq('nombre', nombre_prospecto),
                 allow_retry=False
             ),
             timeout=8.0
@@ -719,11 +723,14 @@ async def borrar_permanente(datos: BorrarRequest, _sesion: str = Depends(verific
             logger.warning(f"🚨 [TRACE:{trace_id}] Intento de Hard Delete bloqueado. Requiere privilegios de Administrador.")
             raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
 
-        prospecto_id = datos.nombre.strip()
+        nombre_prospecto = datos.nombre.strip()
+        if not nombre_prospecto: raise HTTPException(status_code=400, detail="Nombre requerido.")
+        # 🔧 FIX: mismo problema que borrar_prospecto — Godot manda el nombre,
+        # no un ID numérico. Filtramos por 'nombre' en vez de 'id'.
         # FIX FASE 1: allow_retry=False por destrucción crítica de datos (DELETE)
         resultado = await asyncio.wait_for(
             async_db_execute(
-                supabase.table('prospectos').delete().eq('vendedor_id', str(_sesion)).eq('id', prospecto_id),
+                supabase.table('prospectos').delete().eq('vendedor_id', str(_sesion)).eq('nombre', nombre_prospecto),
                 allow_retry=False
             ),
             timeout=8.0
