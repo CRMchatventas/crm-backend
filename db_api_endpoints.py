@@ -60,6 +60,18 @@ def normalizar_telefono(tel: Any) -> str:
     limpio = re.sub(r"\D", "", str(tel))
     return limpio if len(limpio) >= 10 else ""
 
+def _telefono_canonico_dedup(tel: Any) -> str:
+    """Solo para agrupar/deduplicar prospectos duplicados por formato de
+    teléfono. Colapsa variantes mexicanas con/sin el '1' extra que WhatsApp
+    inserta tras el código de país 52 (ej. 524491142598 y 5214491142598
+    deben tratarse como el mismo cliente). No usar para escribir en BD."""
+    limpio = re.sub(r"\D", "", str(tel or ""))
+    if len(limpio) < 10:
+        return ""
+    if limpio.startswith("52") and not limpio.startswith("521") and len(limpio) == 12:
+        limpio = "521" + limpio[2:]
+    return limpio
+
 def enmascarar_telefono(tel: str) -> str:
     if not tel or len(tel) < 6: return "unknown"
     return f"{tel[:4]}******{tel[-2:]}"
@@ -397,8 +409,14 @@ async def cargar_todo(limit: int = 200, offset: int = 0, _sesion: str = Depends(
         
         ultimos = {}
         for registro in (res_prospectos.data or []):
-            tel_norm = normalizar_telefono(registro.get('telefono', ''))
-            key_identificador = tel_norm if tel_norm else str(registro.get('id', ''))
+            # 🔧 FIX DUPLICADOS: usamos la clave canónica (colapsa variantes
+            # mexicanas con/sin el "1") en vez de normalizar_telefono crudo,
+            # para que un mismo cliente con dos formatos de teléfono en BD
+            # nunca aparezca como dos prospectos peleándose por la misma
+            # tarjeta en Godot. Como la consulta ya viene ordenada por
+            # actividad más reciente primero, la primera fila que gane esta
+            # clave es siempre la más reciente/activa.
+            key_identificador = _telefono_canonico_dedup(registro.get('telefono', '')) or str(registro.get('id', ''))
             
             if key_identificador not in ultimos:
                 registro["ultimo_msj"] = bleach.clean(str(registro.get("ultimo_msj") or ""), tags=[], strip=True)
