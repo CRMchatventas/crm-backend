@@ -653,6 +653,19 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
         if not tel_norm: raise HTTPException(status_code=400, detail="Identificador obligatorio.")
             
         col_segura = sanitizar_nombre_columna(datos.nueva_fila, permitir_reservadas=True)
+
+        # 🔍 DIAGNÓSTICO TEMPORAL: confirmamos si el filtro SÍ encuentra la fila
+        # antes de intentar el UPDATE, para aislar si el problema es de
+        # coincidencia (telefono/vendedor_id) o de escritura (ej. una política
+        # RLS de Supabase bloqueando el UPDATE en silencio).
+        diag = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('prospectos').select('id, telefono, vendedor_id, fila')
+                .eq('vendedor_id', str(_sesion)).eq('telefono', tel_norm)
+            ),
+            timeout=8.0
+        )
+        logger.info(f"🔍 [DIAG ACTUALIZAR_ESTADO] SELECT previo encontró: {diag.data}")
         
         # FIX FASE 1: allow_retry=False por mutación (UPDATE)
         resultado = await asyncio.wait_for(
@@ -663,6 +676,7 @@ async def actualizar_estado(datos: EstadoUpdate, _sesion: str = Depends(verifica
             ),
             timeout=8.0
         )
+        logger.info(f"🔍 [DIAG ACTUALIZAR_ESTADO] UPDATE devolvió: {resultado.data}")
         
         if resultado.data: return {"status": "ok"}
         raise HTTPException(status_code=404, detail="Registro no encontrado.")
