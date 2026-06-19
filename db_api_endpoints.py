@@ -187,7 +187,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 nueva_columna, iluminacion = "Por Entregar", "verde_exito"
                 
             resultados_gather = await asyncio.gather(
-                actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado),
+                actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado, nombre=cliente),
                 guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final),
                 return_exceptions=True
             )
