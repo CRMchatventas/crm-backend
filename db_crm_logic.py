@@ -47,7 +47,8 @@ async def actualizar_estado_crm(
     columna: str,
     iluminacion: str,
     juego: str,
-    perfil_ia: dict = None
+    perfil_ia: dict = None,
+    nombre: str = None
 ) -> bool:
     """
     ==============================================================================
@@ -56,6 +57,8 @@ async def actualizar_estado_crm(
     - Protección concurrente mediante Locks centralizados y autolimpiables.
     - Evita Race Conditions garantizando exclusión mutua por conversación.
     - Sanitización de entradas e inyección JSONB controlada.
+    - FIX UPSERT: si no existe fila previa (cliente nuevo, o fila borrada
+      manualmente), se crea en vez de perderse silenciosamente.
     ==============================================================================
     """
     inicio_telemetria = config.now_ts()
@@ -152,11 +155,36 @@ async def actualizar_estado_crm(
             # 🛡️ 6. UPDATE CONTROLADO (Sin reintentos)
             # ==========================================================
             # FIX FASE 5: allow_retry=False para evitar colisiones si Supabase lanza timeout de Red
-            await async_db_execute(
+            resultado = await async_db_execute(
                 supabase.table("prospectos").update(payload).eq("telefono", telefono).eq("vendedor_id", vendedor_id),
                 timeout_seg=10.0,
                 allow_retry=False
             )
+
+            # ==========================================================
+            # 🆕 6B. FIX UPSERT: si el UPDATE no tocó ninguna fila (cliente
+            # nuevo de verdad, o alguien borró la fila manualmente desde
+            # Supabase), el cliente se perdía para siempre del tablero
+            # aunque el bot le sigue respondiendo por WhatsApp. Si no hubo
+            # match, insertamos la fila en vez de fallar en silencio.
+            # ==========================================================
+            if not getattr(resultado, "data", None):
+                payload_insert = dict(payload)
+                payload_insert["telefono"] = telefono
+                payload_insert["vendedor_id"] = vendedor_id
+                payload_insert["nombre"] = config.limpiar_texto(
+                    bleach.clean(str(nombre or "Cliente Nuevo"), tags=[], strip=True)
+                )[:120]
+
+                await async_db_execute(
+                    supabase.table("prospectos").insert(payload_insert),
+                    timeout_seg=10.0,
+                    allow_retry=False
+                )
+                logger.info(
+                    f"🆕 [CRM INSERT] No existía fila previa para Tel={telefono[:6]}*** — "
+                    f"prospecto nuevo creado en '{columna}'."
+                )
 
         # ==========================================================
         # 📊 7. TELEMETRÍA
