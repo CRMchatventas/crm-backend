@@ -857,14 +857,23 @@ async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), tr
         res = await asyncio.wait_for(
             async_db_execute(
                 supabase.table("inventario")
-                .select("id, codigo_barras, nombre, categoria, precio, stock, estado_general, costo, rareza")
+                .select("*")
                 .eq("vendedor_id", str(vendedor_id))
                 .order("nombre")
                 .limit(500)
             ),
             timeout=12.0
         )
-        return {"status": "ok", "inventario": res.data or []}
+        items = res.data or []
+        # Si algún ítem trae datos extra anidados (ej. de importación CSV), los
+        # exponemos también en el nivel superior sin pisar columnas reales.
+        for it in items:
+            extra = it.get("atributos_extra")
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if k not in it or it.get(k) in (None, ""):
+                        it[k] = v
+        return {"status": "ok", "inventario": items}
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en cargar_inventario: {e}")
         raise HTTPException(status_code=500, detail="Error interno al recuperar inventario.")
