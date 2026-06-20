@@ -61,7 +61,15 @@ MAX_COLA_GLOBAL = 100
 MAX_BACKGROUND_TASKS_RAM = 500
 MAX_REQUESTS_POR_MINUTO_TENANT = 100 
 MAX_REQUESTS_POR_MINUTO_PHONE = 30   
-MAX_TOKENS_POR_MINUTO_TENANT = 15000 
+# 🔧 FIX: 15,000 alcanzaba para apenas ~15-20 mensajes de UN cliente (y este
+# contador es por TENANT completo, no por cliente individual) — varios
+# clientes reales escribiéndole al mismo negocio a la vez lo agotarían rápido,
+# justo la noche antes de un lanzamiento real con "mensajes ilimitados" como
+# requisito explícito. Se sube a 100,000 para dar margen real de uso
+# simultáneo, sin perder la función de frenar un abuso genuino (loops,
+# ataques, etc). Ver también el fix de ventana real de 60s en
+# ai_gemini_core.py — ambos cambios van juntos.
+MAX_TOKENS_POR_MINUTO_TENANT = 100000 
 
 http_client = None
 
