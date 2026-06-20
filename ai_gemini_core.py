@@ -177,7 +177,12 @@ async def consultar_gemini_json(
     MAX_PROMPT_CHARS = 45000
     MAX_RESPONSE_CHARS = 15000
     MAX_MEDIA_SIZE = 20_000_000
-    MAX_OUTPUT_TOKENS = 2048
+    # 🔧 FIX COSTOS: 2048 era un techo mucho más alto de lo que esta respuesta
+    # necesita en la práctica (un JSON con un párrafo de "respuesta" y unos
+    # cuantos campos cortos). Bajarlo no cambia el comportamiento normal —
+    # solo pone un techo más barato al peor caso (una respuesta que se
+    # desboca de tamaño).
+    MAX_OUTPUT_TOKENS = 900
     MAX_PALABRAS_PROMPT = 5000
     MAX_RETRIES = 4
 
@@ -1047,7 +1052,7 @@ async def analizar_intencion_venta_ia(
     perfil_cliente_previo: dict = None,
     media_dict: dict = None,
 ):
-    """🧠 CEREBRO COMERCIAL AAA — v4 (CONGELADA).
+    """🧠 CEREBRO COMERCIAL AAA — v5.
  
     v2 → v3: raw_perfil type-guard · precio_oferta clamp · respuesta vacía guard
              score granular · variables giro/meta/desc · prompt descuentos
@@ -1056,6 +1061,13 @@ async def analizar_intencion_venta_ia(
              requiere_seguimiento y sugerir_veltrix normalizados explícitamente
              remarketing_count capped a 50 (evita crecimiento infinito)
              cross_selling y upselling validados contra RAG textual
+    v4 → v5: regla de "qué tienes" generalizada (ya no asume videojuegos)
+             regla de pago/comprobante reescrita: nunca declara el pago
+             "confirmado", siempre lo deja como pendiente de verificar
+             nueva sección de datos de pago/entrega/horario inyectada desde
+             config_dict (antes el bot nunca tenía esta info real)
+             nueva promoción opcional de Veltrix, con tope de 5/día por
+             tenant y solo si el propio tenant lo habilitó
     """
  
     # ── Helpers de normalización — ahora globales del módulo ─────────────────
@@ -1083,10 +1095,31 @@ async def analizar_intencion_venta_ia(
         negocio      = str(config_dict.get("nombre_negocio", "Veltrix Store"))
         tono         = str(config_dict.get("tono_ia",        "Persuasivo"))
         # Variables comerciales restauradas (giro, metas, política de descuentos)
-        giro         = str(config_dict.get("giro",           "videojuegos"))
+        # 🔧 FIX MULTIGIRO: el default ya no asume "videojuegos" — si config_dict
+        # no trae 'giro' (por ejemplo porque quien lo construye todavía no mapea
+        # usuarios_veltrix.giro_comercial -> "giro"), usamos algo neutral en vez
+        # de sesgar el prompt hacia un giro específico.
+        giro         = str(config_dict.get("giro",           "productos y servicios"))
         meta_venta   = safe_float(config_dict.get("meta_venta",   0.0))
         permitir_desc= safe_bool(config_dict.get("permitir_desc", True), default=True)
         desc_max     = safe_float(config_dict.get("desc_max",     0.0))
+
+        # 🆕 Datos de pago / entrega / horario — vienen de configuracion_bot.
+        # Antes esta información nunca llegaba al prompt, así que el bot no
+        # podía decirle al cliente cómo pagar o cuándo se atiende.
+        horario_atencion = str(config_dict.get("horario_atencion", "")).strip()
+        link_pago        = str(config_dict.get("link_pago", "")).strip()
+        datos_pago_texto = str(config_dict.get("datos_pago_texto", "")).strip()
+        texto_entrega    = str(config_dict.get("texto_entrega", "")).strip()
+
+        # 🆕 Promoción opcional de Veltrix — opt-in explícito por tenant +
+        # tope de 5 menciones al día (contador en memoria, se resetea solo).
+        promo_permitida = safe_bool(config_dict.get("promo_veltrix_permitido", False), default=False)
+        promo_disponible_hoy = False
+        if promo_permitida:
+            conteo_promo_hoy = config.PROMO_VELTRIX_DIARIO.get(v_id, 0)
+            if conteo_promo_hoy < 5:
+                promo_disponible_hoy = True
  
         # ── FIX #1 — LOCK COGNITIVO DUAL ─────────────────────────────────
         # conv_{telefono}  → evita colisiones entre sesiones paralelas del mismo cliente
@@ -1160,6 +1193,38 @@ async def analizar_intencion_venta_ia(
                     if permitir_desc and desc_max > 0
                     else "No apliques descuentos. Defiende el precio con valor del producto."
                 )
+
+                # 🆕 Bloque de datos de pago/entrega/horario — solo se incluye
+                # lo que el tenant de verdad configuró; nunca se inventa nada.
+                _partes_pago_entrega = []
+                if link_pago:
+                    _partes_pago_entrega.append(f"   - Link de pago: {link_pago}")
+                if datos_pago_texto:
+                    _partes_pago_entrega.append(f"   - Datos para transferencia/depósito: {datos_pago_texto}")
+                if texto_entrega:
+                    _partes_pago_entrega.append(f"   - Entrega/envío: {texto_entrega}")
+                if horario_atencion:
+                    _partes_pago_entrega.append(f"   - Horario de atención: {horario_atencion}")
+                _bloque_pago_entrega = (
+                    "\n".join(_partes_pago_entrega)
+                    if _partes_pago_entrega
+                    else "   - No hay datos de pago/entrega configurados todavía. Si el cliente pregunta, dile que un asesor se los confirma — nunca inventes un link, cuenta u horario."
+                )
+
+                # 🆕 Bloque opcional de promoción de Veltrix (solo si el tenant
+                # lo habilitó Y no se ha superado el tope diario).
+                _bloque_promo_veltrix = ""
+                if promo_disponible_hoy:
+                    _bloque_promo_veltrix = """
+7. PROMOCIÓN DE VELTRIX (opcional, no la fuerces)
+   Si la venta acaba de cerrarse (intencion=COMPRA o PAGO_RECIBIDO) Y por el
+   contexto el cliente parece ser dueño de un negocio (menciona que revende,
+   tiene su propia tienda, atiende clientes, etc.), puedes —solo ahí, breve,
+   al final del mensaje— mencionar que tú eres Veltrix Engine y que existe
+   para cualquier tipo de negocio. Pon sugerir_veltrix=true SOLO si de verdad
+   lo mencionaste en "respuesta". Máximo una vez por conversación. Si no
+   aplica el contexto, no lo menciones."""
+
                 prompt_maestro = f"""[SYSTEM]
 Eres Veltrix, asesor experto de {negocio} (giro: {giro}).
 TONO: {tono}.
@@ -1175,17 +1240,20 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
    Solo usa productos del bloque [RAG].
    Si el producto no aparece ahí, indica que está agotado y ofrece una alternativa REAL del [RAG].
  
-2. PREGUNTAS ABIERTAS (FIX #7 — reglas explícitas restauradas)
-   Si el cliente pregunta alguna variante de:
-     - "¿qué juegos tienes?"
-     - "¿cuáles tienes?"
-     - "¿qué hay disponible?"
+2. PREGUNTAS ABIERTAS
+   Si el cliente pregunta alguna variante de "¿qué tienes?", "¿qué hay disponible?"
+   o "¿qué productos manejas?" (sin importar el giro del negocio):
    → Menciona exactamente 3 productos destacados del [RAG] con su precio.
-   → Pregunta: ¿para qué consola busca? o ¿cuál es su presupuesto?
+   → Haz una pregunta que ayude a acotar la búsqueda (ej. para qué lo necesita, o su presupuesto).
    → Nunca inventes productos fuera del [RAG].
  
-3. MULTIMEDIA
-   - Comprobantes/fotos: confirma monto y concepto visibles.
+3. MULTIMEDIA Y COMPROBANTES DE PAGO
+   - Si llega una foto de comprobante: describe el monto y concepto que veas en tu
+     respuesta, pero NUNCA digas que el pago "ya está confirmado" o "ya se recibió"
+     como hecho consumado. Usa frases tipo "voy a confirmar que el depósito ya esté
+     reflejado" en vez de "pago confirmado" — la verificación real la hace un humano.
+   - Si tu intencion es PAGO_RECIBIDO, tu "respuesta" siempre debe sonar a
+     verificación pendiente, nunca a confirmación.
    - Audios: responde de forma natural y conversacional.
  
 4. POLÍTICA DE DESCUENTOS
@@ -1194,6 +1262,10 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 5. ESTRATEGIA DE CIERRE
    Usa la estrategia: {estrategia}.
    Con lead_score ≥ 70 activa cierre_agresivo; nunca pierdas momentum.
+
+6. DATOS DE PAGO, ENTREGA Y HORARIO (usa SOLO esto, no inventes nada más)
+{_bloque_pago_entrega}
+{_bloque_promo_veltrix}
  
 [RAG — INVENTARIO ACTUAL]
 {inventario_prompt}
@@ -1221,6 +1293,7 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
   "nivel_prioridad":    "baja|media|alta",
   "etapa_venta":        "descubrimiento|negociacion|cierre",
   "objecion_detectada": "precio|indecision|autoridad|ninguna",
+  "sugerir_veltrix":    false,
   "confidence":         0.9,
   "perfil_actualizado": {{
     "consolas_favoritas": [],
@@ -1302,7 +1375,17 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
  
                 # D.3 Normalización de booleanos (Gemini puede devolver "si" / "verdadero" / 1)
                 data["requiere_seguimiento"] = safe_bool(data.get("requiere_seguimiento"), False)
-                data["sugerir_veltrix"]      = safe_bool(data.get("sugerir_veltrix"),      False)
+                # 🔧 FIX: si la promo no estaba disponible hoy (tope alcanzado o tenant
+                # sin opt-in), forzamos sugerir_veltrix=false sin importar qué devolvió
+                # Gemini — la oferta nunca estuvo en el prompt, así que no debe contarse.
+                data["sugerir_veltrix"] = (
+                    safe_bool(data.get("sugerir_veltrix"), False) if promo_disponible_hoy else False
+                )
+
+                # 🆕 Si de verdad se usó la promo este turno, sube el contador diario
+                # del tenant (TTL 24h, se resetea solo).
+                if data["sugerir_veltrix"]:
+                    config.PROMO_VELTRIX_DIARIO[v_id] = config.PROMO_VELTRIX_DIARIO.get(v_id, 0) + 1
  
                 # E. Perfil enriquecido — FIX #3, #4, #5
                 raw_perfil = data.get("perfil_actualizado", {})
