@@ -110,7 +110,15 @@ def sanitizar_nombre_columna(columna: str, permitir_reservadas: bool = False) ->
     if not columna: 
         return "Bandeja Nueva"
     
-    limpio = re.sub(r"[^\w\s\-]", "", str(columna)).strip()
+    # 🔧 FIX: se agrega "+" a los caracteres permitidos. Antes el regex lo
+    # eliminaba por completo (no es \w, \s ni "-"), dejando una cadena vacía
+    # que esta misma función convertía en "Bandeja Nueva" — así que cualquier
+    # tarjeta soltada en la columna "+" se guardaba ahí en silencio (200 OK,
+    # sin error visible) y solo se notaba hasta el siguiente sondeo, cuando
+    # la tarjeta "regresaba" a Bandeja Nueva sin explicación. "+" es la única
+    # columna dinámica sin nombre todavía, y debe poder recibir tarjetas
+    # igual que cualquier otra mientras no se renombre.
+    limpio = re.sub(r"[^\w\s\-+]", "", str(columna)).strip()
     
     if not permitir_reservadas:
         reservadas = {"requiere asistencia", "por entregar", "bandeja nueva", "envios masivos", "null", "undefined", "delete"}
