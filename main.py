@@ -1,5 +1,5 @@
 # ==============================================================================
-# 🚀 MÓDULO: main.py (ENTRYPOINT - VELTRIX ENGINE MULTI-TENANT 20.4.AAA)
+# 🚀 MÓDULO: main.py (ENTRYPOINT - VELTRIX ENGINE MULTI-TENANT 20.5.AAA)
 # ==============================================================================
 # FIX 20.2 → 20.3: ver historial previo (router include, procesar_respuesta_bot,
 # columna_actual real, nombre_cliente desde payload, gestionar_historial_db eliminado).
@@ -12,6 +12,18 @@
 # inmediato y todo el trabajo lento se agenda con BackgroundTasks para
 # correr DESPUÉS de responder. Es agnóstico de giro: no toca nada
 # específico de videojuegos, alarmas o terrenos.
+#
+# FIX 20.4 → 20.5 (CRÍTICO — MULTIGIRO REAL):
+# CONFIGURACION_SHOWROOMS era un diccionario de Python hardcodeado (estaba
+# literalmente comentado como "Pendiente a migrar a Supabase"). Dar de alta
+# un tenant nuevo requería editar código y redesplegar — y aunque se diera de
+# alta, sus llaves (giro_comercial, objetivo_ventas_diario,
+# permitir_descuentos_ia, max_descuento_ia) no coincidían con lo que
+# analizar_intencion_venta_ia espera (giro, meta_venta, permitir_desc,
+# desc_max), así que ni el tenant ya configurado recibía sus datos reales.
+# Ahora se consulta configuracion_bot por meta_phone_id en tiempo real
+# (con caché de 2 min). Dar de alta un negocio nuevo es una fila en
+# Supabase, no una edición de código.
 # ==============================================================================
 
 
@@ -33,48 +45,16 @@ from ai_whatsapp_media import descargar_media_whatsapp_async
 from db_core_wrapper import async_db_execute, supabase
 from db_chat import guardar_mensaje_chat
 
-# 🔌 3. FIX CRÍTICO: lógica de negocio completa (CRM + IA + alertas)
-#    y el router con TODOS los endpoints que usa Godot.
-from db_api_endpoints import procesar_respuesta_bot, router as db_router
+# 🔌 3. FIX CRÍTICO: lógica de negocio completa (CRM + IA + alertas),
+#    la configuración dinámica de tenants, y el router con TODOS los
+#    endpoints que usa Godot.
+from db_api_endpoints import (
+    procesar_respuesta_bot,
+    obtener_config_bot_por_phone_id,
+    router as db_router
+)
 
 logger = config.logger
-
-# ==========================================================
-# ⚙️ CONFIGURACIÓN DE TUS SHOWROOMS (Pendiente a migrar a Supabase)
-# Agrega aquí una entrada por cada número de Meta que conectes.
-# Hoy: solo Fantasygames. Cuando tengas los números de alarmas y
-# terrenos, copia el bloque y cambia phone_number_id + datos.
-# ==========================================================
-CONFIGURACION_SHOWROOMS = {
-    "1100616133134501": {
-        "vendedor_id": "V-001",  # 🔧 FIX: coincide con el tenant real (confirmado por /api/login)
-        "giro_comercial": "Videojuegos y Consolas Seminuevas",
-        "nombre_negocio": "Fantasygames",
-        "tono_ia": "Gamer, experto en ventas, muy persuasivo pero honesto. Experto en leer comprobantes de pago.",
-        "objetivo_ventas_diario": 3000,
-        "objetivo_veltrix_diario": 5,
-        "permitir_descuentos_ia": True,
-        "max_descuento_ia": 15,
-        "whatsapp_token": os.getenv("WHATSAPP_TOKEN", "").strip(),
-        # procesar_respuesta_bot lee meta_token / meta_phone_id de config:
-        "meta_token": os.getenv("WHATSAPP_TOKEN", "").strip(),
-        "meta_phone_id": "1100616133134501",
-    },
-    # 🟡 Plantilla para cuando tengas el número de Meta de Alarmas:
-    # "TU_PHONE_NUMBER_ID_ALARMAS": {
-    #     "vendedor_id": "V-ALARMAS-001",
-    #     "giro_comercial": "Sistemas de Seguridad",
-    #     "nombre_negocio": "TuNegocioAlarmas",
-    #     "tono_ia": "Profesional, enfocado en seguridad y confianza.",
-    #     "objetivo_ventas_diario": 3000,
-    #     "objetivo_veltrix_diario": 5,
-    #     "permitir_descuentos_ia": True,
-    #     "max_descuento_ia": 10,
-    #     "whatsapp_token": os.getenv("WHATSAPP_TOKEN_ALARMAS", "").strip(),
-    #     "meta_token": os.getenv("WHATSAPP_TOKEN_ALARMAS", "").strip(),
-    #     "meta_phone_id": "TU_PHONE_NUMBER_ID_ALARMAS",
-    # },
-}
 
 # ==========================================================
 # 🚀 INICIALIZACIÓN DE FASTAPI
@@ -174,7 +154,8 @@ async def verificar_webhook_meta(request: Request):
 
 # ==========================================================
 # 🟢 WEBHOOK DE META - RECEPCIÓN Y PROCESAMIENTO
-# FIX CRÍTICO #2: ahora delega el pipeline completo a procesar_respuesta_bot()
+# FIX 20.5: el routing de tenant ya no usa un diccionario hardcodeado —
+# consulta configuracion_bot por meta_phone_id en tiempo real.
 # ==========================================================
 @app.post("/webhook")
 async def recibir_mensajes_whatsapp(request: Request, background_tasks: BackgroundTasks):
@@ -197,13 +178,15 @@ async def recibir_mensajes_whatsapp(request: Request, background_tasks: Backgrou
                 if not numero_destino_id:
                     continue
 
-                config_bot = CONFIGURACION_SHOWROOMS.get(numero_destino_id)
+                # 🔧 FIX 20.5: ya no se busca en un diccionario hardcodeado — se
+                # consulta configuracion_bot por meta_phone_id (con caché de 2 min).
+                config_bot = await obtener_config_bot_por_phone_id(numero_destino_id)
                 if not config_bot:
                     logger.error(f"❌ [WEBHOOK ROUTING FATAL] Recibido mensaje para tenant NO configurado: {numero_destino_id}")
                     continue
 
                 vendedor_id = config_bot["vendedor_id"]
-                token_meta = config_bot.get("whatsapp_token") or config_bot.get("meta_token")
+                token_meta = config_bot.get("meta_token")
 
                 if not token_meta:
                     logger.error(f"❌ [WEBHOOK CONFIG ERROR] Tenant {vendedor_id} no tiene un token de WhatsApp configurado.")
