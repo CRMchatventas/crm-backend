@@ -1054,6 +1054,7 @@ async def analizar_intencion_venta_ia(
     telefono: str,
     perfil_cliente_previo: dict = None,
     media_dict: dict = None,
+    analisis_comprobante: dict = None,
 ):
     """🧠 CEREBRO COMERCIAL AAA — v5.
  
@@ -1215,6 +1216,28 @@ async def analizar_intencion_venta_ia(
                     else "   - No hay datos de pago/entrega configurados todavía. Si el cliente pregunta, dile que un asesor se los confirma — nunca inventes un link, cuenta u horario."
                 )
 
+                # 🆕 Bloque del veredicto del auditor antifraude (Doberman), si corrió.
+                # Es la ÚNICA fuente de verdad sobre la imagen — por diseño, cuando este
+                # bloque existe, la imagen cruda ya no se vuelve a adjuntar a esta misma
+                # llamada (se decide en procesar_respuesta_bot), para evitar que el
+                # vendedor reinterprete la imagen por su cuenta y contradiga al auditor.
+                _bloque_comprobante = ""
+                if analisis_comprobante is not None:
+                    _es_pago_real = bool(analisis_comprobante.get("es_pago", False))
+                    _monto_detectado = safe_float(analisis_comprobante.get("monto_detectado", 0.0))
+                    _notas_auditor = str(analisis_comprobante.get("analisis", "")).strip() or "Sin notas adicionales."
+                    _bloque_comprobante = f"""
+
+8. ANÁLISIS AUTOMÁTICO DEL COMPROBANTE ADJUNTO (fuente única de verdad, no reinterpretes la imagen)
+   ¿Parece un pago real?: {"SÍ" if _es_pago_real else "NO"}
+   Monto detectado: ${_monto_detectado:.2f} MXN
+   Notas del auditor: {_notas_auditor}
+   Si es SÍ: agradece y dile al cliente que vas a confirmar que el depósito esté
+   reflejado — nunca digas "confirmado", "recibido" o "aceptado" como hecho consumado.
+   Si es NO: dile con tacto que el comprobante no pudo validarse automáticamente y que
+   un asesor humano lo va a revisar a mano — no acuses al cliente de nada, solo indica
+   que se necesita revisión manual."""
+
                 # 🆕 Bloque opcional de promoción de Veltrix (solo si el tenant
                 # lo habilitó Y no se ha superado el tope diario).
                 _bloque_promo_veltrix = ""
@@ -1271,6 +1294,7 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 6. DATOS DE PAGO, ENTREGA Y HORARIO (usa SOLO esto, no inventes nada más)
 {_bloque_pago_entrega}
 {_bloque_promo_veltrix}
+{_bloque_comprobante}
  
 [RAG — INVENTARIO ACTUAL]
 {inventario_prompt}
