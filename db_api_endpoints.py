@@ -4,7 +4,7 @@
 # Godot 4.6 Ready • Orquestador IA, Auth B2B, CRM Base, Móvil e Inventario
 # ==============================================================================
 
-import asyncio, re, time, uuid, bleach, hashlib, jwt
+import asyncio, re, time, uuid, bleach, hashlib, jwt, os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Any
 from cachetools import TTLCache
@@ -87,6 +87,60 @@ async def migrar_password_usuario(user_id: str, nuevo_hash: str):
     await async_db_execute(supabase.table('usuarios_veltrix').update({"password": nuevo_hash}).eq('id', user_id), allow_retry=False)
 
 router = APIRouter()
+
+# ==========================================================
+# 🏢 CONFIGURACIÓN DINÁMICA DE TENANTS (reemplaza el diccionario hardcodeado
+# CONFIGURACION_SHOWROOMS que vivía en main.py — ese venía marcado como
+# "pendiente a migrar a Supabase" desde hace tiempo. Mientras siguiera ahí,
+# dar de alta un giro nuevo (alarmas, terrenos, etc.) requería editar código
+# y volver a desplegar; y aunque se hubiera dado de alta, los nombres de
+# campo no coincidían con los que espera analizar_intencion_venta_ia
+# (giro_comercial vs giro, objetivo_ventas_diario vs meta_venta,
+# permitir_descuentos_ia vs permitir_desc, max_descuento_ia vs desc_max) —
+# es decir, ni siquiera el tenant ya configurado recibía sus datos reales.
+# ==========================================================
+CONFIG_BOT_CACHE = TTLCache(maxsize=1000, ttl=120)  # 2 min: evita pegarle a Supabase en cada mensaje entrante
+
+async def obtener_config_bot_por_phone_id(phone_number_id: str) -> Optional[dict]:
+    """Busca la fila de configuracion_bot por meta_phone_id (columna única) y la
+    traduce a las llaves exactas que espera analizar_intencion_venta_ia. Agregar
+    un tenant nuevo ahora es una fila en Supabase, no una edición de código."""
+    cacheado = CONFIG_BOT_CACHE.get(phone_number_id)
+    if cacheado is not None:
+        return cacheado
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion_bot').select('*').eq('meta_phone_id', phone_number_id).limit(1)),
+            timeout=5.0
+        )
+        if not res.data:
+            return None
+        fila = res.data[0]
+        config_dict = {
+            "vendedor_id": fila.get("vendedor_id") or "",
+            "nombre_negocio": fila.get("nombre_negocio") or "Veltrix Store",
+            "giro": fila.get("giro") or "productos y servicios",
+            "tono_ia": fila.get("tono_ia") or "Persuasivo, profesional y honesto",
+            "meta_venta": fila.get("meta_venta_diaria") or 0,
+            "permitir_desc": fila.get("permitir_descuento") if fila.get("permitir_descuento") is not None else True,
+            "desc_max": fila.get("descuento_max_pct") or 0,
+            "horario_atencion": fila.get("horario_atencion") or "",
+            "link_pago": fila.get("link_pago") or "",
+            "datos_pago_texto": fila.get("datos_pago_texto") or "",
+            "texto_entrega": fila.get("texto_entrega") or "",
+            "promo_veltrix_permitido": fila.get("promo_veltrix_permitido") if fila.get("promo_veltrix_permitido") is not None else False,
+            "promo_veltrix_max_diario": fila.get("promo_veltrix_max_diario") or 5,
+            # meta_token: si el tenant ya tiene su propio token en BD, se usa ese (necesario para
+            # que cada negocio use SU PROPIO número de WhatsApp); si no, cae al env var global
+            # (válido mientras solo exista un tenant real, como ahora).
+            "meta_token": fila.get("meta_token") or os.getenv("WHATSAPP_TOKEN", "").strip(),
+            "meta_phone_id": fila.get("meta_phone_id") or phone_number_id,
+        }
+        CONFIG_BOT_CACHE[phone_number_id] = config_dict
+        return config_dict
+    except Exception as e:
+        logger.exception(f"❌ [CONFIG TENANT] Fallo consultando configuracion_bot para phone_id={phone_number_id}: {e}")
+        return None
 
 # ==========================================================
 # 🤖 0. ORQUESTADOR MAESTRO IA (FLATTENED & HARDENED)
