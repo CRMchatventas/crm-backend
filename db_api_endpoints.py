@@ -149,6 +149,7 @@ async def obtener_config_bot_por_phone_id(phone_number_id: str) -> Optional[dict
 async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None, id_mensaje_meta: str = None):
     from ai_gemini_core import analizar_intencion_venta_ia, validar_respuesta_ia, generar_resumen_handoff_ia
     from ai_security_utils import detectar_prompt_injection
+    from ai_auditor_scraper import auditar_comprobante_ia
     from db_rag_scraper import obtener_contexto_inventario_rag
     from ai_whatsapp_media import disparar_whatsapp_dinamico_async, disparar_whatsapp_imagen_async, enviar_alerta_whatsapp_admin
 
@@ -196,6 +197,33 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             contexto = resultados[0] if not isinstance(resultados[0], Exception) else ""
             historial = resultados[1] if not isinstance(resultados[1], Exception) else []
 
+            # 🆕 AUDITORÍA DE COMPROBANTES (Doberman): ya existía construida, nunca estaba
+            # conectada. Si llega una imagen, se analiza primero aquí con reglas estrictas
+            # de antifraude (fecha, monto, señales de edición). Si el análisis sale bien,
+            # se le pasa al cerebro de ventas como texto (fuente única de verdad) y se deja
+            # de adjuntar la imagen cruda a esa llamada, para que no haya dos IAs opinando
+            # cosas distintas sobre la misma imagen. Si la auditoría falla o tarda más de
+            # 30s, se sigue exactamente el comportamiento anterior: la imagen cruda va
+            # directo al cerebro de ventas, sin bloquear ni colgar el pipeline.
+            analisis_comprobante = None
+            media_dict_venta = media_dict
+            if media_dict and str(media_dict.get("mime_type", "")).startswith("image/"):
+                try:
+                    analisis_comprobante = await asyncio.wait_for(
+                        auditar_comprobante_ia(
+                            b64_img_data=media_dict.get("data", b""),
+                            mime_type=media_dict.get("mime_type", "image/jpeg"),
+                            nombre_negocio=config.get("nombre_negocio", "Veltrix Store"),
+                            historial_chat=historial,
+                        ),
+                        timeout=30.0
+                    )
+                    media_dict_venta = None
+                except Exception as e:
+                    logger.warning(f"⚠️ [TRACE:{trace_id}] Auditoría de comprobante falló, se sigue sin ella: {e}")
+                    analisis_comprobante = None
+                    media_dict_venta = media_dict
+
             # 🔧 FIX BUG ARGUMENTOS: faltaba 'telefono' — sin él, todo se recorría un lugar (telefono recibía el
             # dict de perfil, perfil_cliente_previo recibía media_dict, y el media_dict real nunca llegaba —
             # siempre None). Esto rompía la memoria persistente del cliente Y el análisis de imágenes/audios.
@@ -203,7 +231,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             # intentos, hasta 26s cada uno ≈ 52s en el peor caso) — el de afuera casi siempre ganaba la carrera
             # y mataba el mecanismo de reintentos antes de que corriera ni un solo intento.
             decision = await asyncio.wait_for(
-                analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, telefono, perfil_cliente_previo, media_dict),
+                analizar_intencion_venta_ia(texto_entrante, contexto, historial, config, telefono, perfil_cliente_previo, media_dict_venta, analisis_comprobante),
                 timeout=60.0
             )
             decision = validar_respuesta_ia(decision)
