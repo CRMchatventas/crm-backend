@@ -370,6 +370,13 @@ class NotasUpdate(BaseSchema):
     etiquetas: str = ""
     vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
 
+class BotConfigUpdate(BaseSchema):
+    vendedor_id: str = ""
+    link_pago: str = ""
+    texto_entrega: str = ""
+    admin_phone: str = ""
+    bot_activo: bool = True
+
 class EstadoUpdate(BaseSchema): 
     nombre: str = Field(min_length=1)
     telefono: str = ""
@@ -482,7 +489,7 @@ __all__ = [
     "WEBHOOK_REPLAY_CACHE", "global_cache_lock", "PROMO_VELTRIX_DIARIO",
     "InventarioItem", "InventarioItemUpdate", "VentaItem", "LoginUpdate",
     "MobileMessageRequest", "ClienteIdentificador", "ColumnaUpdate",
-    "ColumnaAction", "RenombrarColumnaAction", "NotasUpdate", "EstadoUpdate",
+    "ColumnaAction", "RenombrarColumnaAction", "NotasUpdate", "EstadoUpdate", "BotConfigUpdate",
     "ReordenarColumnasAction", "LeadAction", "BorrarRequest", "NuevoArticulo",
     "PreciosDetalle", "PrecioResponse", "NuevaCita", "EstadoCita",
     "NuevaPublicacion", "CampanaMasiva", "PeticionCopy"
