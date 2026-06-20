@@ -160,8 +160,18 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 "emocion_actual": decision.get("emocion_cliente"), "temperatura": decision.get("temperatura_lead"),
                 "ultimo_interes": producto_detectado, "ultima_intencion": intencion_ia
             }
-            nueva_columna, iluminacion = columna_actual, "blanco"
-            if intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO"]:
+            # 🔧 FIX ILUMINACIÓN: el default era "blanco" (= ya leído), y se aplicaba
+            # a CUALQUIER intención que no fuera exactamente una de las 4 de abajo
+            # (cotización, regateo, saludo, pedido especial, mayoreo, pago recibido...).
+            # Eso apagaba visualmente un mensaje que nadie había visto todavía — "ya
+            # leído" es una decisión que le corresponde exclusivamente a Godot (vía
+            # cache_leidos, cuando un humano abre el chat), nunca al backend. El
+            # default correcto para cualquier mensaje nuevo sin clasificación especial
+            # es "oro" (pendiente de revisar). También se agrega PAGO_RECIBIDO al grupo
+            # que alerta a un humano: un comprobante de pago debe pasar por verificación
+            # humana, no quedar marcado como trámite resuelto en automático.
+            nueva_columna, iluminacion = columna_actual, "oro"
+            if intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO", "PAGO_RECIBIDO"]:
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
                 resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
                 await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
