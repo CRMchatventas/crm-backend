@@ -1115,10 +1115,11 @@ async def analizar_intencion_venta_ia(
         # 🆕 Promoción opcional de Veltrix — opt-in explícito por tenant +
         # tope de 5 menciones al día (contador en memoria, se resetea solo).
         promo_permitida = safe_bool(config_dict.get("promo_veltrix_permitido", False), default=False)
+        promo_tope_diario = safe_int(config_dict.get("promo_veltrix_max_diario", 5), default=5, minimo=0, maximo=100)
         promo_disponible_hoy = False
         if promo_permitida:
             conteo_promo_hoy = config.PROMO_VELTRIX_DIARIO.get(v_id, 0)
-            if conteo_promo_hoy < 5:
+            if conteo_promo_hoy < promo_tope_diario:
                 promo_disponible_hoy = True
  
         # ── FIX #1 — LOCK COGNITIVO DUAL ─────────────────────────────────
