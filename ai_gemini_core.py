@@ -441,25 +441,23 @@ async def consultar_gemini_json(
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 }
 
-                # Extraemos tu llave para enrutar el tráfico y evadir el firewall de Google
-                scraper_key = os.getenv("SCRAPER_API_KEY", "").strip()
-                proxies_config = None
-                
-                if scraper_key:
-                    proxy_url = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
-                    proxies_config = {
-                        "http": proxy_url,
-                        "https": proxy_url
-                    }
-
+                # 🔧 FIX: esta llamada a Gemini ya NUNCA pasa por el proxy de ScraperAPI,
+                # sin importar si SCRAPER_API_KEY existe en el entorno o no. El proxy
+                # causaba "Read timed out" recurrentes en conversaciones largas
+                # (confirmado con pruebas reales). Gemini es la API oficial de Google —
+                # no necesita evasión de firewall, a diferencia de scrapear sitios
+                # externos como RAWG o PriceCharting. Si SCRAPER_API_KEY se vuelve a
+                # configurar en Render para que esas otras partes sigan funcionando,
+                # esta función la ignora a propósito.
+                # También se quita verify=False: esa bandera era necesaria para evitar
+                # bloqueos de certificado causados por el proxy — sin proxy, no aplica,
+                # y dejarla puesta solo baja la seguridad de la conexión sin necesidad.
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         requests.post,
                         url_api,
                         json=payload,
                         headers=headers_seguros,
-                        proxies=proxies_config,
-                        verify=False, # Necesario para evitar bloqueos de certificado por el proxy
                         timeout=25.0
                     ),
                     timeout=26.0
@@ -1234,6 +1232,7 @@ async def analizar_intencion_venta_ia(
                 prompt_maestro = f"""[SYSTEM]
 Eres Veltrix, asesor experto de {negocio} (giro: {giro}).
 TONO: {tono}.
+FORMATO WHATSAPP: para negritas usa UN solo asterisco (*así*), nunca doble (**así** no se ve en WhatsApp, el cliente vería los asteriscos literales).
 ESTRATEGIA ACTIVA: {estrategia}
 META DE VENTA: ${meta_venta:,.0f}
 FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
@@ -1323,6 +1322,12 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
                     prompt_estructurado,
                     vendedor_id=v_id,
                     media_dict=media_dict,
+                    # 🔧 FIX: de vez en cuando Gemini regresa un JSON con un error de
+                    # sintaxis genuino (coma faltante, string sin cerrar) — no es timeout,
+                    # responde rápido, solo sale mal armado. No hay forma de eliminarlo al
+                    # 100%, pero subir de 2 a 3 intentos reduce bastante la probabilidad de
+                    # que las veces que pasa terminen en el failsafe genérico.
+                    retries=3,
                 )
  
                 # Guard: si Gemini devuelve None, lista, string o cualquier no-dict
