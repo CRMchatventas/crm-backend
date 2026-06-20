@@ -20,7 +20,8 @@ from config_and_schemas import (
     logger, get_lock, mensajes_procesados_meta, procesados_recientemente,
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate,
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
-    MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction
+    MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
+    ColumnaAction, RenombrarColumnaAction
 )
 from ai_security_utils import verificar_sesion_b2b
 from db_core_wrapper import async_db_execute, supabase
@@ -521,6 +522,57 @@ async def reordenar_columnas(datos: ReordenarColumnasAction, vendedor_id: str = 
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Error guardando orden de columnas: {e}")
         raise HTTPException(status_code=500, detail="Error al guardar el nuevo orden de columnas.")
+
+# ==========================================================
+# 🏗️ 10B. CREACIÓN Y RENOMBRADO DE COLUMNAS DINÁMICAS
+# Godot ya llamaba a estas dos rutas (al renombrar el "+" inicial, y al
+# renombrar cualquier otra columna dinámica) pero nunca existieron en el
+# backend — por eso /api/crear_columna tiraba error. Sin /api/crear_columna,
+# además, una columna nueva nunca llegaba a existir como fila real en
+# 'configuracion': /api/reordenar_columnas solo hace UPDATE, así que sobre
+# una columna que nunca se insertó, ese UPDATE no encuentra nada y no hace
+# nada — la columna se ve bien en la sesión actual pero no sobrevive a un
+# refresco, porque nunca se guardó de verdad.
+# ==========================================================
+@router.post("/api/crear_columna")
+async def crear_columna(datos: ColumnaAction, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🎮 [TRACE:{trace_id}] Creando columna dinámica '{datos.nombre}' para {_sesion}")
+    try:
+        nombre_seguro = sanitizar_nombre_columna(datos.nombre, permitir_reservadas=True)
+        existente = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion').select('id').eq('vendedor_id', str(_sesion)).eq('nombre_columna', nombre_seguro).limit(1)),
+            timeout=5.0
+        )
+        if existente.data:
+            return {"status": "ok", "msg": "La columna ya existía."}
+        # FIX FASE 1: allow_retry=False por mutación (INSERT)
+        await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion').insert({"nombre_columna": nombre_seguro, "vendedor_id": str(_sesion), "orden": 999}), allow_retry=False),
+            timeout=8.0
+        )
+        return {"status": "ok"}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo creando columna: {e}")
+        raise HTTPException(status_code=500, detail="Error al crear la columna.")
+
+@router.post("/api/renombrar_columna")
+async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🎮 [TRACE:{trace_id}] Renombrando columna '{datos.viejo_nombre}' -> '{datos.nuevo_nombre}' para {_sesion}")
+    try:
+        viejo_seguro = sanitizar_nombre_columna(datos.viejo_nombre, permitir_reservadas=True)
+        nuevo_seguro = sanitizar_nombre_columna(datos.nuevo_nombre, permitir_reservadas=True)
+        # FIX FASE 1: allow_retry=False por mutación (UPDATE)
+        resultado = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion').update({"nombre_columna": nuevo_seguro}).eq('vendedor_id', str(_sesion)).eq('nombre_columna', viejo_seguro), allow_retry=False),
+            timeout=8.0
+        )
+        if resultado.data: return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Columna original no encontrada.")
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo renombrando columna: {e}")
+        raise HTTPException(status_code=500, detail="Error al renombrar la columna.")
 
 # ==========================================================
 # 📱 11. ENDPOINTS MÓVILES (APP ASESORES Y GODOT)
