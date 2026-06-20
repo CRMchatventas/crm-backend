@@ -144,6 +144,10 @@ RATE_LIMIT_MOBILE_OUTBOUND: TTLCache = TTLCache(maxsize=10000, ttl=60)
 RATE_LIMIT_CLIENTES: TTLCache = TTLCache(maxsize=10000, ttl=10)
 WEBHOOK_REPLAY_CACHE: TTLCache = TTLCache(maxsize=50000, ttl=900)
 
+# 🆕 Contador diario de menciones de Veltrix dentro de chats de clientes finales.
+# Se resetea solo (TTL 24h). Solo se usa si el tenant tiene promo_veltrix_permitido=true.
+PROMO_VELTRIX_DIARIO: TTLCache = TTLCache(maxsize=10000, ttl=86400)
+
 rate_limit_global: deque[float] = deque(maxlen=max(100, MAX_REQUESTS_GLOBAL_MINUTO))
 print("[*] Estructuras en memoria RAM inicializadas y blindadas.")
 
@@ -467,7 +471,7 @@ __all__ = [
     "locks_por_conversacion", "tracking_locks_uso", "background_tasks_activas",
     "background_tasks_lock", "limpiar_locks_inactivos", "locks_registry_lock", "task_gc_locks",
     "registrar_uso_lock", "registrar_background_task", "get_lock",
-    "WEBHOOK_REPLAY_CACHE", "global_cache_lock",
+    "WEBHOOK_REPLAY_CACHE", "global_cache_lock", "PROMO_VELTRIX_DIARIO",
     "InventarioItem", "InventarioItemUpdate", "VentaItem", "LoginUpdate",
     "MobileMessageRequest", "ClienteIdentificador", "ColumnaUpdate",
     "ColumnaAction", "RenombrarColumnaAction", "NotasUpdate", "EstadoUpdate",
