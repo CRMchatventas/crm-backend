@@ -177,12 +177,17 @@ async def consultar_gemini_json(
     MAX_PROMPT_CHARS = 45000
     MAX_RESPONSE_CHARS = 15000
     MAX_MEDIA_SIZE = 20_000_000
-    # 🔧 FIX COSTOS: 2048 era un techo mucho más alto de lo que esta respuesta
-    # necesita en la práctica (un JSON con un párrafo de "respuesta" y unos
-    # cuantos campos cortos). Bajarlo no cambia el comportamiento normal —
-    # solo pone un techo más barato al peor caso (una respuesta que se
-    # desboca de tamaño).
-    MAX_OUTPUT_TOKENS = 900
+    # 🔧 FIX REGRESIÓN: bajar esto a 900 (intento anterior de ahorrar costo) causaba
+    # que Gemini cortara el JSON a la mitad de un string ("Unterminated string") en
+    # cuanto la respuesta era mínimamente larga — es decir, en la mayoría de los
+    # mensajes reales. Eso disparaba el failsafe en CADA mensaje (respuesta genérica
+    # de "micro-corte", intención forzada a HUMANO, alerta innecesaria al vendedor),
+    # y de hecho costaba MÁS, no menos: cada intento fallido se reintenta 2 veces,
+    # multiplicando las llamadas a Gemini por mensaje. 2048 es el valor ya probado
+    # que nunca causó este problema — el ahorro real de costo no debe venir de
+    # apretar este techo.
+    MAX_OUTPUT_TOKENS = 2048
+
     MAX_PALABRAS_PROMPT = 5000
     MAX_RETRIES = 4
 
