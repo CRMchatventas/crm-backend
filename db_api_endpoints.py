@@ -21,7 +21,7 @@ from config_and_schemas import (
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate,
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
-    ColumnaAction, RenombrarColumnaAction
+    ColumnaAction, RenombrarColumnaAction, BotConfigUpdate
 )
 from ai_security_utils import verificar_sesion_b2b
 from db_core_wrapper import async_db_execute, supabase
@@ -770,6 +770,59 @@ async def borrar_permanente(datos: BorrarRequest, _sesion: str = Depends(verific
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en hard delete: {e}")
         raise HTTPException(status_code=500, detail="Fallo en la base de datos al eliminar.")
+
+# ==========================================================
+# 🤖 14B. CONFIGURACIÓN DEL ASISTENTE (BOT_CONFIG)
+# Rutas que el panel "Configurador del Asistente B2B" de Godot ya llamaba
+# (/api/bot_config GET y POST) pero que nunca existieron en el backend —
+# cualquier intento de cargar o guardar siempre devolvía 404.
+# ==========================================================
+@router.get("/api/bot_config")
+async def obtener_bot_config(vendedor_id: str = "", _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    # 🛡️ El 'vendedor_id' de la URL es solo informativo para logs — la fuente
+    # de verdad de identidad SIEMPRE es _sesion (el JWT validado), nunca lo
+    # que mande el cliente en el query string.
+    logger.info(f"🎮 [TRACE:{trace_id}] Cargando configuración del asistente para {_sesion}")
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion_bot').select('link_pago, texto_entrega, admin_phone, bot_activo').eq('vendedor_id', str(_sesion)).limit(1)),
+            timeout=8.0
+        )
+        datos = res.data[0] if res.data else {}
+        return {"status": "ok", "datos": datos}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo cargando bot_config: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar la configuración del asistente.")
+
+@router.post("/api/bot_config")
+async def actualizar_bot_config(datos: BotConfigUpdate, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🎮 [TRACE:{trace_id}] Guardando configuración del asistente para {_sesion}")
+    try:
+        payload = {
+            "link_pago": bleach.clean(datos.link_pago.strip(), tags=[], strip=True)[:500],
+            "texto_entrega": bleach.clean(datos.texto_entrega.strip(), tags=[], strip=True)[:5000],
+            "admin_phone": re.sub(r"\D", "", datos.admin_phone)[:20],
+            "bot_activo": datos.bot_activo,
+        }
+        # FIX FASE 1: allow_retry=False por mutación (UPDATE)
+        resultado = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion_bot').update(payload).eq('vendedor_id', str(_sesion)), allow_retry=False),
+            timeout=8.0
+        )
+        if not resultado.data:
+            # No existía fila previa para este tenant (caso poco común, pero
+            # posible si configuracion_bot nunca se sembró) — la creamos.
+            payload_insert = dict(payload)
+            payload_insert["vendedor_id"] = str(_sesion)
+            await asyncio.wait_for(
+                async_db_execute(supabase.table('configuracion_bot').insert(payload_insert), allow_retry=False),
+                timeout=8.0
+            )
+        return {"status": "ok", "success": True}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo guardando bot_config: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar la configuración del asistente.")
 
 @router.post("/api/actualizar_notes")
 async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
