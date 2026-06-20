@@ -13,6 +13,7 @@ import requests
 import bleach
 import orjson
 import urllib3
+from cachetools import TTLCache
 
 # ==========================================================
 # 🔌 IMPORTACIONES NATIVAS VELTRIX ENTERPRISE
@@ -26,6 +27,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Variable local para el circuit breaker específico de este módulo
 gemini_bloqueado_hasta = 0.0
+
+# 🔧 FIX RATE LIMIT: ventana real de 60s para el contador de tokens por tenant,
+# aislada del caché compartido (que otros módulos podrían leer como entero plano).
+_ventana_tokens_inicio: TTLCache = TTLCache(maxsize=1000, ttl=120)
 
 # 🛡️ Helper de caché local
 def generar_hash_cache(prompt: str, tenant: str, temp: float) -> str:
@@ -343,8 +348,25 @@ async def consultar_gemini_json(
     # ==========================================================
     # 🛡️ 9. RATE LIMIT TOKENS
     # ==========================================================
-
+    # 🔧 FIX HALLAZGO CRÍTICO: esta variable se llama "POR_MINUTO" pero el caché
+    # subyacente (tokens_consumidos_tenant) tenía un TTL de 5 minutos, y cada
+    # escritura reiniciaba ese TTL — en una conversación activa y sostenida
+    # (justo "mensajes ilimitados"), el contador nunca se reseteaba solo: cada
+    # mensaje sumaba Y volvía a extender el reloj de 5 minutos. Una vez que se
+    # acumulaba lo suficiente, se quedaba atorado en modo "demasiadas
+    # solicitudes" el resto de la conversación. Ahora se usa una ventana real
+    # de 60s aparte (_ventana_tokens_inicio, propia de este módulo, sin tocar
+    # el tipo de dato que guarda config.tokens_consumidos_tenant por si algo
+    # más lo lee como entero) — si ya pasó un minuto desde que empezó la
+    # ventana, se reinicia el contador antes de sumar.
     async with config.rate_limit_global_lock:
+        ahora_ventana = config.now_ts()
+        inicio_previo = _ventana_tokens_inicio.get(vendedor_id, 0)
+
+        if (ahora_ventana - inicio_previo) >= 60:
+            config.tokens_consumidos_tenant[vendedor_id] = 0
+            _ventana_tokens_inicio[vendedor_id] = ahora_ventana
+
         tokens_actuales = config.tokens_consumidos_tenant.get(vendedor_id, 0)
         nuevo_total = tokens_actuales + tokens_estimados
 
@@ -1303,6 +1325,9 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 {historial}
  
 [FORMATO JSON OBLIGATORIO — sin texto fuera del JSON]
+IMPORTANTE: dentro de "respuesta", nunca uses comillas dobles ("). Si quieres resaltar el
+nombre de un producto, hazlo sin comillas o con *un solo asterisco* — las comillas dobles
+dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.
 {{
   "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO",
   "respuesta":          "Texto natural hacia el cliente",
