@@ -1256,9 +1256,12 @@ async def analizar_intencion_venta_ia(
    Notas del auditor: {_notas_auditor}
    Si es SÍ: agradece y dile al cliente que vas a confirmar que el depósito esté
    reflejado — nunca digas "confirmado", "recibido" o "aceptado" como hecho consumado.
-   Si es NO: dile con tacto que el comprobante no pudo validarse automáticamente y que
-   un asesor humano lo va a revisar a mano — no acuses al cliente de nada, solo indica
-   que se necesita revisión manual."""
+   Si es NO: explícale al cliente, con tacto pero de forma clara y específica, qué fue
+   lo que no coincidió — usa las "Notas del auditor" de arriba (por ejemplo, si el
+   monto o el concepto no corresponden al producto que pidió, dilo tal cual, sin
+   rodeos). No hace falta ser vago ni ocultarlo; solo evita un tono acusatorio —
+   describe lo que se detectó y pide que revise o mande el comprobante correcto."""
+
 
                 # 🆕 Bloque opcional de promoción de Veltrix (solo si el tenant
                 # lo habilitó Y no se ha superado el tope diario).
