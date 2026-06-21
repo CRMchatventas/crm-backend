@@ -254,6 +254,16 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             # cosas distintas sobre la misma imagen. Si la auditoría falla o tarda más de
             # 30s, se sigue exactamente el comportamiento anterior: la imagen cruda va
             # directo al cerebro de ventas, sin bloquear ni colgar el pipeline.
+            #
+            # 🛡️ FIX (hallazgo real): antes se descartaba la imagen cruda SIEMPRE que se
+            # auditaba, sin importar el resultado. Si un cliente mandaba la portada de un
+            # juego preguntando "¿tienes este?", el Doberman correctamente decía "esto no
+            # es un comprobante" — pero la imagen YA se había descartado, así que el
+            # cerebro de ventas nunca llegaba a VER la portada para identificar el juego.
+            # Ahora solo se descarta la imagen cuando de verdad parece un intento de pago
+            # (parece_comprobante=True), válido o no — si el propio Doberman dice que ni
+            # siquiera se parece a un comprobante, se libera la imagen al cerebro de
+            # ventas para que pueda usarla con su propósito real.
             analisis_comprobante = None
             media_dict_venta = media_dict
             if media_dict and str(media_dict.get("mime_type", "")).startswith("image/"):
@@ -267,7 +277,14 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                         ),
                         timeout=30.0
                     )
-                    media_dict_venta = None
+                    if bool(analisis_comprobante.get("parece_comprobante", True)):
+                        media_dict_venta = None
+                    else:
+                        # No parece intento de pago (ej. portada de un producto) — se
+                        # libera la imagen para que el cerebro de ventas la use, y el
+                        # análisis del Doberman se descarta (no aporta nada aquí).
+                        media_dict_venta = media_dict
+                        analisis_comprobante = None
                 except Exception as e:
                     logger.warning(f"⚠️ [TRACE:{trace_id}] Auditoría de comprobante falló, se sigue sin ella: {e}")
                     analisis_comprobante = None
@@ -1036,6 +1053,69 @@ class BorrarItemRequest(BaseModel):
     id: Any
     nombre: Optional[str] = ""
     consola: Optional[str] = ""
+
+@router.post("/api/guardar_inventario")
+async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    🆕 Esta ruta nunca existió en el backend, a pesar de que PanelVideojuegos.gd
+    y PanelGenerico.gd ya le pegan al guardar o actualizar un artículo — cualquier
+    intento desde esos paneles regresaba 404. El schema NuevoArticulo ya estaba
+    importado en este archivo pero jamás se usaba en ninguna ruta, lo que sugiere
+    que esta conexión se quedó pendiente.
+
+    Decisión de diseño: se actualiza un registro EXISTENTE solo si 'id_catalogo'
+    coincide con uno ya guardado para este vendedor — nunca por nombre (dos
+    condiciones/consolas distintas del mismo título son artículos físicos
+    distintos, no la misma fila). Si no hay coincidencia (o no se mandó
+    id_catalogo, como en PanelGenerico), se inserta como artículo nuevo.
+    """
+    logger.info(f"📦 [TRACE:{trace_id}] Guardando inventario '{datos.nombre}' para {_sesion}")
+    try:
+        costo_final = datos.costo if datos.costo > 0 else datos.precio_compra
+        campos = {
+            "nombre": bleach.clean(datos.nombre.strip(), tags=[], strip=True)[:200],
+            "categoria": bleach.clean(datos.categoria.strip(), tags=[], strip=True)[:100] if datos.categoria.strip() else "General",
+            "genero": bleach.clean(datos.genero.strip(), tags=[], strip=True)[:100] if datos.genero.strip() else None,
+            "estado_general": bleach.clean(datos.estado_general.strip(), tags=[], strip=True)[:100] if datos.estado_general.strip() else None,
+            "precio": datos.precio,
+            "costo": costo_final,
+            "stock": datos.stock,
+            "precio_minimo_bot": datos.precio_minimo_bot,
+            "codigo_barras": bleach.clean(datos.codigo_barras.strip(), tags=[], strip=True)[:100] if datos.codigo_barras.strip() else None,
+            "url_portada": datos.url_portada.strip()[:500] if datos.url_portada.strip() else None,
+            "descripcion_detallada": bleach.clean(datos.descripcion_detallada.strip(), tags=[], strip=True)[:2000],
+            "atributos_extra": datos.atributos_extra or {},
+        }
+        if datos.id_catalogo and datos.id_catalogo.strip():
+            campos["id_catalogo"] = datos.id_catalogo.strip()[:100]
+
+        existente = None
+        if datos.id_catalogo and datos.id_catalogo.strip():
+            res_check = await asyncio.wait_for(
+                async_db_execute(supabase.table('inventario').select('id').eq('vendedor_id', str(_sesion)).eq('id_catalogo', datos.id_catalogo.strip()).limit(1)),
+                timeout=5.0
+            )
+            existente = res_check.data[0] if res_check.data else None
+
+        if existente:
+            # FIX FASE 1: allow_retry=False por mutación (UPDATE)
+            resultado = await asyncio.wait_for(
+                async_db_execute(supabase.table('inventario').update(campos).eq('id', existente['id']).eq('vendedor_id', str(_sesion)), allow_retry=False),
+                timeout=10.0
+            )
+            return {"status": "ok", "accion": "actualizado", "id": existente['id']}
+        else:
+            campos["vendedor_id"] = str(_sesion)
+            resultado = await asyncio.wait_for(
+                async_db_execute(supabase.table('inventario').insert(campos), allow_retry=False),
+                timeout=10.0
+            )
+            nuevo_id = resultado.data[0]['id'] if resultado.data else None
+            return {"status": "ok", "accion": "creado", "id": nuevo_id}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en guardar_inventario: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al guardar el artículo.")
 
 @router.get("/api/cargar_inventario")
 async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
