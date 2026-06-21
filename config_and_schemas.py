@@ -145,6 +145,17 @@ tokens_consumidos_tenant: TTLCache = TTLCache(maxsize=10000, ttl=CACHE_TTL_SECON
 procesados_recientemente: TTLCache = TTLCache(maxsize=50000, ttl=600)
 mensajes_procesados_meta: TTLCache = TTLCache(maxsize=50000, ttl=3600)
 
+# 🆕 RESERVA TEMPORAL DE ÚLTIMA UNIDAD: el inventario real NUNCA se descuenta
+# solo — eso lo hace un humano a mano en el Visor. Esto es solo un "hold" de
+# 1 hora (llave "vendedor_id:id_item") que existe únicamente para evitar que
+# el bot le prometa la ÚLTIMA unidad de un producto a dos clientes distintos
+# mientras el primero completa su pago. Lo lee tanto db_api_endpoints.py (para
+# crear el hold) como db_rag_scraper.py (para que el contexto de inventario
+# que ve el modelo trate ese producto como agotado mientras dure el hold). Si
+# pasa la hora sin que un humano lo haya descontado de verdad, expira solo y
+# el inventario real vuelve a mandar.
+RESERVAS_TEMPORALES_ULTIMA_UNIDAD: TTLCache = TTLCache(maxsize=5000, ttl=3600)
+
 rate_limit_tenant: TTLCache = TTLCache(maxsize=50000, ttl=120)
 rate_limit_phone: TTLCache = TTLCache(maxsize=100000, ttl=120)
 LOGIN_RATE_LIMIT: TTLCache = TTLCache(maxsize=10000, ttl=300)
@@ -480,6 +491,7 @@ __all__ = [
     "cache_respuestas_ia", "CHAT_MESSAGE_HASHES", "cache_precios_ram", "supabase",
     "PAYLOAD_FLOOD_CACHE", "IMAGE_HASHES_PROCESADOS", "tokens_consumidos_tenant", 
     "procesados_recientemente", "mensajes_procesados_meta", "rate_limit_tenant", 
+    "RESERVAS_TEMPORALES_ULTIMA_UNIDAD",
     "rate_limit_phone", "LOGIN_RATE_LIMIT", "RATE_LIMIT_MOBILE_OUTBOUND", 
     "RATE_LIMIT_CLIENTES", "rate_limit_global", "rate_limit_global_lock",
     "metricas_radar", "metricas_lock", "CACHE_DIVISA", "CB_PRICECHARTING", "HTTP_TIMEOUTS",
