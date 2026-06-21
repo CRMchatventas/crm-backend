@@ -384,10 +384,23 @@ def _respuesta_precio_vacia(status: str, nombre: str, tipo_cambio: float, rareza
         "usd": {"loose": 0.0, "cib": 0.0, "new": 0.0},
         "tipo_cambio": tipo_cambio,
         "rareza": rareza,
+        "rareza_sugerida": "",
         "url_pc": url_pc,
         "confidence_score": confidence,
         "atributos_extra": {}
     }
+
+# 🆕 RAREZA AUTOMÁTICA POR PRECIO REAL: para que el vendedor se entere si
+# tiene algo de valor que no sabía que tenía, en vez de tener que adivinar la
+# rareza ANTES de buscar el precio. Se usa el precio CIB (o Nuevo si no hay
+# CIB) recién encontrado en PriceCharting — nunca lo que el vendedor haya
+# puesto en el dropdown antes de la búsqueda, ya que ese valor previo pudo
+# haber sido un supuesto equivocado (justo el caso que esto quiere evitar).
+def determinar_rareza_por_precio(precio_mxn: float) -> str:
+    if precio_mxn >= 2500: return "Élite"
+    if precio_mxn >= 1000: return "Joya"
+    if precio_mxn >= 400: return "Demandado"
+    return "Común"
 
 async def consultar_precio_pricecharting(nombre: str, consola: str = "", vendedor_id: str = "anonimo", dias_inventario: int = 0, rareza: str = "comun") -> dict:
     try:
@@ -507,6 +520,13 @@ async def consultar_precio_pricecharting(nombre: str, consola: str = "", vendedo
         mxn_cib_real = round(p_cib * tipo_cambio, 2)
         mxn_new_real = round(p_new * tipo_cambio, 2)
 
+        # 🆕 La rareza que de verdad se usa para calcular el precio sugerido de
+        # venta es la determinada por el precio real (CIB de preferencia, si
+        # no hay CIB entonces Nuevo, si no hay ninguno Suelto) — no la del
+        # dropdown que el vendedor pudo haber dejado en "Común" por defecto.
+        precio_referencia_rareza = mxn_cib_real if mxn_cib_real > 0 else (mxn_new_real if mxn_new_real > 0 else mxn_loose_real)
+        rareza_sugerida = determinar_rareza_por_precio(precio_referencia_rareza)
+
         respuesta_final = {
             "status": "ok",
             "api_version": "v3",
@@ -514,13 +534,14 @@ async def consultar_precio_pricecharting(nombre: str, consola: str = "", vendedo
             "mxn": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": mxn_new_real},
             "mxn_mercado": {"loose": mxn_loose_real, "cib": mxn_cib_real, "new": mxn_new_real},
             "mxn_venta": {
-                "loose": calcular_precio_venta_inteligente_aaa(mxn_loose_real, 0, dias_inventario, rareza),
-                "cib": calcular_precio_venta_inteligente_aaa(mxn_cib_real, 0, dias_inventario, rareza),
-                "new": calcular_precio_venta_inteligente_aaa(mxn_new_real, 0, dias_inventario, rareza)
+                "loose": calcular_precio_venta_inteligente_aaa(mxn_loose_real, 0, dias_inventario, rareza_sugerida.lower()),
+                "cib": calcular_precio_venta_inteligente_aaa(mxn_cib_real, 0, dias_inventario, rareza_sugerida.lower()),
+                "new": calcular_precio_venta_inteligente_aaa(mxn_new_real, 0, dias_inventario, rareza_sugerida.lower())
             },
             "usd": {"loose": p_loose, "cib": p_cib, "new": p_new},
             "tipo_cambio": tipo_cambio,
             "rareza": rareza,
+            "rareza_sugerida": rareza_sugerida,
             "url_pc": url_final_godot,
             "confidence_score": confianza_actual,
             "atributos_extra": {}
