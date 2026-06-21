@@ -1,6 +1,11 @@
 # ==========================================================
 # 🚀 MÓDULO: ai_auditor_scraper.py
 # ==========================================================
+# 🔧 FIX (sesión actual): regla #2 de fecha ahora considera si es el primer
+# contacto del cliente — un comprobante de "ayer" es imposible si el cliente
+# apenas está hablando contigo por primera vez hoy. Hallazgo real, confirmado
+# contra el monolito original: la regla "HOY o AYER" sola no distinguía esto.
+# ==========================================================
 
 import io
 import time
@@ -134,7 +139,11 @@ FECHA ACTUAL:
 
 REGLAS OBLIGATORIAS:
 1. SOLO aceptar comprobantes bancarios o SPEI reales.
-2. La fecha debe ser HOY o AYER.
+2. La fecha debe ser HOY o AYER. EXCEPCIÓN OBLIGATORIA: si el HISTORIAL CHAT está
+   vacío o muestra que este es el primer mensaje de este cliente (sin ninguna
+   conversación previa), la fecha del comprobante debe ser de HOY exactamente —
+   sería imposible que ya hubiera hecho un pago un día antes de escribirte por
+   primera vez. Rechaza cualquier comprobante de "ayer" en ese caso.
 3. Debe existir monto visible.
 4. Debe existir evidencia bancaria coherente.
 5. Si detectas edición, baja calidad o datos sospechosos → rechazar.
