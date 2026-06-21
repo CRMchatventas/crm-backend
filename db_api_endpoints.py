@@ -1084,3 +1084,22 @@ async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, background_tasks:
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en encolamiento de ejecución masiva: {e}")
         raise HTTPException(status_code=500, detail="Fallo campaña masiva.")
+
+# ==========================================================
+# 💰 15. PRECIO DE MERCADO (PRICECHARTING) — recuperado del monolito
+# ==========================================================
+# Godot lo llama desde PanelVideojuegos.gd (_pedir_precios_sugeridos) al
+# buscar un juego o cambiar su estado físico. Antes esta ruta no existía en
+# absoluto en el backend modular — ver auditoría de ai_auditor_scraper.py
+# para la lógica completa de búsqueda y parseo.
+@router.get("/api/consultar_precio")
+async def consultar_precio(nombre: str, consola: str = "", vendedor_id: str = "", dias_inventario: int = 0, rareza: str = "comun", _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    from ai_auditor_scraper import consultar_precio_pricecharting
+    logger.info(f"🎮 [TRACE:{trace_id}] Consulta de precio de mercado: '{nombre}' ({consola}) para {_sesion}")
+    try:
+        # 🛡️ Igual que en /api/bot_config: el 'vendedor_id' del query string es
+        # solo informativo para logs — la identidad real siempre es _sesion.
+        return await consultar_precio_pricecharting(nombre, consola, str(_sesion), dias_inventario, rareza)
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en consultar_precio: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al consultar el precio de mercado.")
