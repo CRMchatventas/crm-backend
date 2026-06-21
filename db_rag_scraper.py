@@ -2,6 +2,19 @@
 # 🚀 MÓDULO: db_rag_scraper.py (AAA ENTERPRISE - GOLD STANDARD FINAL 10/10)
 # ==============================================================================
 # Godot 4.6 Ready • RAG de Inventario, Scraper RAWG y Gestión de Storage
+#
+# 🔥 PATCH (sesión actual) — RESERVA TEMPORAL DE ÚLTIMA UNIDAD:
+# El bot nunca descuenta inventario real solo (eso lo hace un humano a mano en
+# el Visor). Lo único automático es un "hold" de 1 hora cuando detecta intención
+# de compra sobre un producto con stock == 1 (ver db_api_endpoints.py). Mientras
+# ese hold esté activo, este RAG debe presentar ese producto como agotado para
+# CUALQUIER conversación, no solo la que lo activó — si no, el bot podría
+# seguir ofreciéndolo a un segundo cliente mientras el primero completa el pago.
+# ✅ FIX: el caché de 5 minutos ahora guarda la LISTA cruda de productos, no el
+#    texto ya formateado. El filtro de holds se aplica SIEMPRE al final, sobre
+#    datos cacheados o frescos por igual — así un hold creado después de que
+#    algo quedó en caché sí se refleja de inmediato, en vez de esperar a que
+#    el caché expire solo.
 # ==============================================================================
 
 import os
@@ -19,7 +32,8 @@ from config_and_schemas import (
     logger,
     cache_respuestas_ia,
     now_ts,
-    limpiar_texto
+    limpiar_texto,
+    RESERVAS_TEMPORALES_ULTIMA_UNIDAD
 )
 # 🚀 FIX: Supabase debe importarse desde el core_wrapper, NO de config_and_schemas
 from db_core_wrapper import async_db_execute, supabase
@@ -60,6 +74,26 @@ TITULOS_COMPUESTOS = {
     "gta": "grand theft auto", "nfs": "need for speed"
 }
 
+# ==========================================================
+# ⏳ FILTRO DE RESERVAS TEMPORALES (ver patch arriba)
+# ==========================================================
+def _filtrar_items_reservados(vendedor_id: str, items: list) -> list:
+    """
+    Excluye cualquier artículo con un hold de última-unidad activo (llave
+    "vendedor_id:id_item" en RESERVAS_TEMPORALES_ULTIMA_UNIDAD). El stock real
+    en Supabase sigue diciendo 1; para efectos de lo que el bot puede ofrecer,
+    debe verse agotado hasta que el hold expire (1h) o un humano lo descuente
+    de verdad en el Visor.
+    """
+    resultado = []
+    for item in items:
+        item_id = item.get('id')
+        llave = f"{vendedor_id}:{item_id}"
+        if item_id is not None and llave in RESERVAS_TEMPORALES_ULTIMA_UNIDAD:
+            continue
+        resultado.append(item)
+    return resultado
+
 # ==============================================================================
 # 🧠 RAG INVENTARIO: RECUPERACIÓN SEMÁNTICA ACELERADA
 # 🔧 FIX MULTI-GIRO: 'consola' nunca existió en la tabla real — se cambia
@@ -89,51 +123,71 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     # ⚡ Cache Key
     cache_key = hashlib.sha256(f"RAGINV:{vendedor_id}:{palabras_clave}".encode()).hexdigest()
 
+    items_a_mostrar = None
     cache_item = cache_respuestas_ia.get(cache_key)
     if cache_item and (now_ts() - cache_item.get("ts", 0) <= 300):
-        return cache_item["data"]
+        # 🛡️ FIX RESERVA: se guarda la LISTA cruda, no el texto final — el
+        # filtro de holds (más abajo) se aplica siempre, incluso en cache hit.
+        items_a_mostrar = cache_item["data"]
 
-    try:
-        # 🚀 Prefiltro SQL con ancla basada en palabra más larga
-        termino_fuerte = max(palabras, key=len) if palabras else ""
+    if items_a_mostrar is None:
+        try:
+            # 🚀 Prefiltro SQL con ancla basada en palabra más larga
+            termino_fuerte = max(palabras, key=len) if palabras else ""
 
-        query = (
-            supabase.table('inventario')
-            .select('nombre, categoria, precio, stock, estado_general')
-            .eq('vendedor_id', vendedor_id)
-            .ilike('nombre', f"%{termino_fuerte}%")
-            .gt('stock', 0)
-            .limit(100)
-        )
-        res_inv = await asyncio.wait_for(async_db_execute(query, timeout_seg=8.0), timeout=10.0)
-        inventario = res_inv.data or []
-
-        # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
-        if not inventario:
-            fallback_query = supabase.table('inventario').select('nombre, categoria, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
-            res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
+            query = (
+                supabase.table('inventario')
+                .select('id, nombre, categoria, precio, stock, estado_general')
+                .eq('vendedor_id', vendedor_id)
+                .ilike('nombre', f"%{termino_fuerte}%")
+                .gt('stock', 0)
+                .limit(100)
+            )
+            res_inv = await asyncio.wait_for(async_db_execute(query, timeout_seg=8.0), timeout=10.0)
             inventario = res_inv.data or []
 
-        # 🛡️ Manejo inteligente de llaves (Resuelve duplicados manteniendo el de mayor stock)
-        diccionario_opciones = {}
-        for item in inventario:
-            nombre = str(item.get("nombre", "")).strip()
-            if not nombre: continue
-            key = f"{nombre} | {item.get('categoria', 'N/A')}"
+            # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
+            if not inventario:
+                fallback_query = supabase.table('inventario').select('id, nombre, categoria, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+                res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
+                inventario = res_inv.data or []
 
-            # Si ya existe, nos quedamos con el que tenga mayor stock
-            if key in diccionario_opciones:
-                if item.get('stock', 0) > diccionario_opciones[key].get('stock', 0):
+            # 🛡️ Manejo inteligente de llaves (Resuelve duplicados manteniendo el de mayor stock)
+            diccionario_opciones = {}
+            for item in inventario:
+                nombre = str(item.get("nombre", "")).strip()
+                if not nombre: continue
+                key = f"{nombre} | {item.get('categoria', 'N/A')}"
+
+                # Si ya existe, nos quedamos con el que tenga mayor stock
+                if key in diccionario_opciones:
+                    if item.get('stock', 0) > diccionario_opciones[key].get('stock', 0):
+                        diccionario_opciones[key] = item
+                else:
                     diccionario_opciones[key] = item
-            else:
-                diccionario_opciones[key] = item
 
-        matches = process.extract(palabras_clave, diccionario_opciones.keys(), scorer=fuzz.WRatio, limit=8)
+            matches = process.extract(palabras_clave, diccionario_opciones.keys(), scorer=fuzz.WRatio, limit=8)
+            items_a_mostrar = [diccionario_opciones[m[0]] for m in matches if m[1] > 55] or inventario[:5]
 
-        lineas_contexto = ["--- INVENTARIO DISPONIBLE ---"]
-        items_a_mostrar = [diccionario_opciones[m[0]] for m in matches if m[1] > 55] or inventario[:5]
+            cache_respuestas_ia[cache_key] = {"data": items_a_mostrar, "ts": now_ts()}
 
-        for item in items_a_mostrar:
+        except asyncio.TimeoutError:
+            logger.error(f"❌ [RAG TIMEOUT] Tiempo de espera agotado consultando el inventario para el tenant: {vendedor_id}")
+            return "El almacén de inventario está experimentando retrasos. Intenta de nuevo."
+        except Exception as e:
+            logger.exception(f"❌ [RAG ERROR] Error crítico en la tubería semántica: {e}")
+            return "No se pudo acceder al inventario."
+
+    # ⏳ FIX RESERVA DE ÚLTIMA UNIDAD: se aplica SIEMPRE al final, sobre datos
+    # cacheados o frescos por igual — un artículo con un hold activo se quita
+    # del contexto, exactamente como si no quedara stock.
+    items_disponibles = _filtrar_items_reservados(vendedor_id, items_a_mostrar)
+
+    lineas_contexto = ["--- INVENTARIO DISPONIBLE ---"]
+    if not items_disponibles:
+        lineas_contexto.append("(Sin productos disponibles que coincidan con la búsqueda — todo lo encontrado está agotado o reservado temporalmente)")
+    else:
+        for item in items_disponibles:
             precio = float(item.get('precio') or 0.0)
             lineas_contexto.append(
                 f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
@@ -141,16 +195,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
                 f"Estado: {item.get('estado_general', 'N/A')}"
             )
 
-        contexto_final = "\n".join(lineas_contexto)[:1800]
-        cache_respuestas_ia[cache_key] = {"data": contexto_final, "ts": now_ts()}
-        return contexto_final
-
-    except asyncio.TimeoutError:
-        logger.error(f"❌ [RAG TIMEOUT] Tiempo de espera agotado consultando el inventario para el tenant: {vendedor_id}")
-        return "El almacén de inventario está experimentando retrasos. Intenta de nuevo."
-    except Exception as e:
-        logger.exception(f"❌ [RAG ERROR] Error crítico en la tubería semántica: {e}")
-        return "No se pudo acceder al inventario."
+    return "\n".join(lineas_contexto)[:1800]
 
 
 
