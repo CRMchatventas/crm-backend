@@ -374,6 +374,10 @@ class RenombrarColumnaAction(BaseSchema):
     nuevo_nombre: str = Field(min_length=1)
     vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
 
+class BorrarColumnaAction(BaseSchema):
+    nombre_columna: str = Field(min_length=1)
+    vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
+
 class NotasUpdate(BaseSchema):
     nombre: str = ""
     telefono: str = ""
@@ -501,7 +505,7 @@ __all__ = [
     "WEBHOOK_REPLAY_CACHE", "global_cache_lock", "PROMO_VELTRIX_DIARIO",
     "InventarioItem", "InventarioItemUpdate", "VentaItem", "LoginUpdate",
     "MobileMessageRequest", "ClienteIdentificador", "ColumnaUpdate",
-    "ColumnaAction", "RenombrarColumnaAction", "NotasUpdate", "EstadoUpdate", "BotConfigUpdate",
+    "ColumnaAction", "RenombrarColumnaAction", "BorrarColumnaAction", "NotasUpdate", "EstadoUpdate", "BotConfigUpdate",
     "ReordenarColumnasAction", "LeadAction", "BorrarRequest", "NuevoArticulo",
     "PreciosDetalle", "PrecioResponse", "NuevaCita", "EstadoCita",
     "NuevaPublicacion", "CampanaMasiva", "PeticionCopy"
