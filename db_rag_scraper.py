@@ -137,7 +137,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             query = (
                 supabase.table('inventario')
-                .select('id, nombre, categoria, precio, stock, estado_general')
+                .select('id, nombre, categoria, genero, precio, stock, estado_general')
                 .eq('vendedor_id', vendedor_id)
                 .ilike('nombre', f"%{termino_fuerte}%")
                 .gt('stock', 0)
@@ -146,9 +146,34 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
             res_inv = await asyncio.wait_for(async_db_execute(query, timeout_seg=8.0), timeout=10.0)
             inventario = res_inv.data or []
 
+            # 🆕 BÚSQUEDA POR GÉNERO: si el cliente pregunta por categoría en vez
+            # de un título ("qué tienes de terror", "busco algo de fútbol"), el
+            # filtro de arriba (por nombre) normalmente no encuentra nada, porque
+            # la palabra de género casi nunca aparece en el TÍTULO del juego. Se
+            # complementa con una búsqueda directa sobre la columna 'genero' y se
+            # combinan los resultados — así "terror" encuentra juegos de terror
+            # aunque ninguno se llame literalmente "Terror".
+            if termino_fuerte:
+                try:
+                    query_genero = (
+                        supabase.table('inventario')
+                        .select('id, nombre, categoria, genero, precio, stock, estado_general')
+                        .eq('vendedor_id', vendedor_id)
+                        .ilike('genero', f"%{termino_fuerte}%")
+                        .gt('stock', 0)
+                        .limit(50)
+                    )
+                    res_genero = await asyncio.wait_for(async_db_execute(query_genero, timeout_seg=8.0), timeout=10.0)
+                    ids_ya_presentes = {it.get('id') for it in inventario}
+                    for it in (res_genero.data or []):
+                        if it.get('id') not in ids_ya_presentes:
+                            inventario.append(it)
+                except Exception as e:
+                    logger.warning(f"⚠️ [RAG GÉNERO] Búsqueda complementaria por género falló, se ignora: {e}")
+
             # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
             if not inventario:
-                fallback_query = supabase.table('inventario').select('id, nombre, categoria, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
                 res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
                 inventario = res_inv.data or []
 
@@ -157,7 +182,14 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
             for item in inventario:
                 nombre = str(item.get("nombre", "")).strip()
                 if not nombre: continue
-                key = f"{nombre} | {item.get('categoria', 'N/A')}"
+                # 🛡️ FIX: antes la llave era solo "nombre | categoria(consola)" —
+                # si el mismo título existía en dos condiciones distintas (ej.
+                # Batman PS4 "Completo" a $600 y "Nuevo" a $1900), las dos caían
+                # en la MISMA llave y se quedaba solo una (la de mayor stock),
+                # descartando la otra en silencio. El bot nunca podía informar
+                # los distintos precios por condición porque el RAG ya solo le
+                # mandaba uno.
+                key = f"{nombre} | {item.get('categoria', 'N/A')} | {item.get('estado_general', 'N/A')}"
 
                 # Si ya existe, nos quedamos con el que tenga mayor stock
                 if key in diccionario_opciones:
@@ -189,10 +221,12 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     else:
         for item in items_disponibles:
             precio = float(item.get('precio') or 0.0)
+            genero_txt = str(item.get('genero') or '').strip()
+            sufijo_genero = f" | Género: {genero_txt}" if genero_txt else ""
             lineas_contexto.append(
                 f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
                 f"${precio:.2f} MXN | Stock: {item.get('stock', 0)} | "
-                f"Estado: {item.get('estado_general', 'N/A')}"
+                f"Estado: {item.get('estado_general', 'N/A')}{sufijo_genero}"
             )
 
     return "\n".join(lineas_contexto)[:1800]
