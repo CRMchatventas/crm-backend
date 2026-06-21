@@ -419,11 +419,24 @@ class BorrarRequest(BaseSchema):
     vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
 
 class NuevoArticulo(BaseSchema): 
+    # 🔧 FIX: esta clase ya estaba importada en db_api_endpoints.py pero nunca
+    # se usaba en ninguna ruta — /api/guardar_inventario, al que sí le pegan
+    # PanelVideojuegos.gd y PanelGenerico.gd, nunca existió. Se extendió con
+    # los campos reales que esos paneles mandan (antes solo tenía nombre,
+    # categoria, precio_compra, precio, stock).
+    id_catalogo: str = ""
     nombre: str = Field(min_length=1)
-    categoria: str = "General" 
+    categoria: str = "General"  # consola/plataforma en videojuegos; categoría general en otros giros
+    genero: str = ""
+    estado_general: str = ""
     precio_compra: float = Field(default=0.0, ge=0)
+    costo: float = Field(default=0.0, ge=0)
     precio: float = Field(default=0.0, ge=0)
+    precio_minimo_bot: float = Field(default=0.0, ge=0)
     stock: int = Field(default=1, ge=0)
+    codigo_barras: str = ""
+    url_portada: str = ""
+    descripcion_detallada: str = ""
     vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
     atributos_extra: Dict[str, Any] = Field(default_factory=dict)
     @field_validator("nombre", mode="before")
