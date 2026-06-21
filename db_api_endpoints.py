@@ -21,7 +21,7 @@ from config_and_schemas import (
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate,
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
-    ColumnaAction, RenombrarColumnaAction, BotConfigUpdate
+    ColumnaAction, RenombrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD
 )
 from ai_security_utils import verificar_sesion_b2b
 from db_core_wrapper import async_db_execute, supabase
@@ -144,31 +144,22 @@ async def obtener_config_bot_por_phone_id(phone_number_id: str) -> Optional[dict
         return None
 
 # ==========================================================
-# 💰 DESCUENTO AUTOMÁTICO DE INVENTARIO AL CONFIRMAR PAGO (Doberman)
+# ⏳ RESERVA TEMPORAL DE ÚLTIMA UNIDAD (Doberman ya NO descuenta inventario)
 # ==========================================================
-# Por qué existe: si dos clientes mandan comprobante por la última unidad de
-# un producto casi al mismo tiempo, sin esto los dos podrían "pagar" la
-# misma pieza inexistente. El descuento ocurre en el instante en que el
-# Doberman dice que el comprobante PARECE real — independientemente de si al
-# final resulta ser fraude. Esa decisión es intencional: nunca le confirmamos
-# al cliente que "ya está" (ver regla de no-sobreprometer en ai_gemini_core),
-# así que si resulta falso, el único daño es inventario desfasado que un
-# humano corrige a mano en el Visor — eso es mucho más barato que vender dos
-# veces la misma pieza real.
-async def intentar_descontar_inventario_automatico(vendedor_id: str, nombre_producto: str) -> dict:
-    """
-    Descuenta 1 unidad SOLO si encuentra exactamente UN artículo coincidente
-    con stock disponible. Si hay 0 o 2+ coincidencias, no toca nada — equivocarse
-    de producto es peor que no descontar a tiempo, eso queda para revisión humana.
-    Usa el mismo bloqueo optimista que /api/actualizar_stock (UPDATE condicionado
-    al stock exacto leído), así que dos confirmaciones casi simultáneas para la
-    última unidad nunca dejan el stock en negativo: la segunda simplemente falla
-    la condición y se reporta como "sin_stock" para manejo humano prioritario.
-    """
+# El inventario real NUNCA se descuenta solo — eso lo hace un humano a mano
+# en el Visor (botón "Vender", que ya manda la info a ventas/métricas
+# correctamente). Lo único que se automatiza es evitar que el bot le
+# prometa la ÚLTIMA unidad de un producto a dos clientes distintos mientras
+# el primero completa su pago: si detecta intención de COMPRA sobre un
+# producto con stock == 1, crea un "hold" de 1 hora. Mientras dure, CUALQUIER
+# conversación ve ese producto como agotado (ver db_rag_scraper.py). Si pasa
+# la hora sin que un humano lo haya descontado de verdad, expira solo y el
+# inventario real vuelve a mandar.
+async def evaluar_reserva_ultima_unidad(vendedor_id: str, nombre_producto: str, cliente: str, telefono: str) -> Optional[dict]:
     try:
         nombre_limpio = limpiar_texto(nombre_producto)[:120]
         if not nombre_limpio:
-            return {"status": "sin_producto"}
+            return None
 
         res = await asyncio.wait_for(
             async_db_execute(
@@ -180,33 +171,26 @@ async def intentar_descontar_inventario_automatico(vendedor_id: str, nombre_prod
             timeout=8.0
         )
         candidatos = res.data or []
-        if len(candidatos) != 1:
-            logger.warning(f"⚠️ [VENTA AUTO] Ambigüedad ({len(candidatos)} candidatos) para '{nombre_limpio}', vendedor={vendedor_id}. No se descuenta automáticamente.")
-            return {"status": "ambiguo", "candidatos": len(candidatos)}
+        # Misma cautela que antes: si hay ambigüedad (0 o 2+ coincidencias),
+        # no se crea ningún hold — equivocarse de producto es peor que no
+        # bloquearlo a tiempo.
+        if len(candidatos) != 1 or int(candidatos[0].get('stock', 0)) != 1:
+            return None
 
         item = candidatos[0]
-        stock_actual = int(item.get('stock', 0))
-        nuevo_stock = stock_actual - 1
+        llave_reserva = f"{vendedor_id}:{item['id']}"
+        if llave_reserva in RESERVAS_TEMPORALES_ULTIMA_UNIDAD:
+            return None  # ya hay un hold activo para este artículo, no lo dupliquemos
 
-        # FIX FASE 1: allow_retry=False por mutación concurrente crítica (igual que actualizar_stock)
-        resultado_update = await asyncio.wait_for(
-            async_db_execute(
-                supabase.table('inventario').update({'stock': nuevo_stock})
-                .eq('id', item['id']).eq('stock', stock_actual),
-                allow_retry=False
-            ),
-            timeout=8.0
-        )
-        if not resultado_update.data:
-            logger.warning(f"🚨 [VENTA AUTO] Colisión de stock en '{item.get('nombre')}' (vendedor={vendedor_id}) — probable venta duplicada simultánea.")
-            return {"status": "sin_stock", "nombre_item": item.get('nombre')}
-
-        logger.info(f"💰 [VENTA AUTO] Inventario descontado automáticamente: '{item.get('nombre')}' ({stock_actual} → {nuevo_stock}) para vendedor={vendedor_id}.")
-        return {"status": "ok", "nombre_item": item.get('nombre'), "id_item": item['id'], "stock_anterior": stock_actual, "stock_nuevo": nuevo_stock}
+        RESERVAS_TEMPORALES_ULTIMA_UNIDAD[llave_reserva] = {
+            "cliente": cliente, "telefono": telefono, "ts": now_ts(), "nombre_item": item.get('nombre')
+        }
+        logger.info(f"⏳ [RESERVA] Última unidad de '{item.get('nombre')}' bloqueada 1h para {enmascarar_telefono(telefono)} (vendedor={vendedor_id}).")
+        return {"nombre_item": item.get('nombre'), "id_item": item['id']}
 
     except Exception as e:
-        logger.exception(f"❌ [VENTA AUTO] Fallo al intentar descuento automático: {e}")
-        return {"status": "error"}
+        logger.exception(f"❌ [RESERVA] Fallo evaluando reserva de última unidad: {e}")
+        return None
 
 # ==========================================================
 # 🤖 0. ORQUESTADOR MAESTRO IA (FLATTENED & HARDENED)
@@ -309,15 +293,12 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 "ultimo_interes": producto_detectado, "ultima_intencion": intencion_ia
             }
 
-            # 💰 DESCUENTO AUTOMÁTICO DE INVENTARIO: ver función arriba para la lógica
-            # completa. Usamos "ultimo_interes" del perfil (guardado en CADA mensaje
-            # anterior) en vez del producto_detectado de ESTE mensaje, porque el
-            # mensaje que trae el comprobante casi nunca vuelve a nombrar el producto.
-            venta_auto_resultado = None
-            if analisis_comprobante is not None and bool(analisis_comprobante.get("es_pago", False)):
-                producto_candidato = str(perfil_cliente_previo.get("ultimo_interes") or producto_detectado or "").strip()
-                if producto_candidato:
-                    venta_auto_resultado = await intentar_descontar_inventario_automatico(vendedor_id, producto_candidato)
+            # ⏳ RESERVA TEMPORAL DE ÚLTIMA UNIDAD: ver función arriba. Solo entra en
+            # juego cuando la intención es COMPRA y queda exactamente 1 unidad — para
+            # 2+ no se hace nada especial, sigue el flujo normal de abajo.
+            reserva_resultado = None
+            if intencion_ia == "COMPRA" and producto_detectado:
+                reserva_resultado = await evaluar_reserva_ultima_unidad(vendedor_id, producto_detectado, cliente, telefono)
 
             # 🔧 FIX ILUMINACIÓN: el default era "blanco" (= ya leído), y se aplicaba
             # a CUALQUIER intención que no fuera exactamente una de las 4 de abajo
@@ -329,34 +310,18 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             # es "oro" (pendiente de revisar).
             nueva_columna, iluminacion = columna_actual, "oro"
 
-            if venta_auto_resultado and venta_auto_resultado.get("status") == "ok":
-                # 🆕 Pago verificado por IA + inventario ya descontado de forma
-                # atómica. Color y columna distintos a todo lo demás porque esta
-                # tarjeta necesita atención humana AHORA — si el comprobante
-                # resulta falso, el inventario quedó adelantado y hay que
-                # corregirlo a mano en el Visor antes de que afecte otra venta.
+            if reserva_resultado:
+                # 🆕 Última unidad bloqueada temporalmente para este cliente — color y
+                # columna distintos a todo lo demás porque hay una ventana de 1 hora
+                # en la que esa pieza está "congelada" para que nadie más se la lleve.
                 nueva_columna, iluminacion = "Vendidos", "rojo_prioridad"
-                resumen = await generar_resumen_handoff_ia(cliente, "PAGO_RECIBIDO", historial)
+                resumen = await generar_resumen_handoff_ia(cliente, "COMPRA", historial)
                 aviso_admin = (
-                    f"💰 VENTA AUTOMÁTICA CONFIRMADA POR IA — verificar banco AHORA.\n"
-                    f"Artículo descontado: {venta_auto_resultado.get('nombre_item')} "
-                    f"({venta_auto_resultado.get('stock_anterior')} → {venta_auto_resultado.get('stock_nuevo')})\n\n"
-                    f"{resumen}"
+                    f"⏳ Solo queda 1 '{reserva_resultado.get('nombre_item')}' — bloqueado "
+                    f"1 hora para este cliente mientras completa el pago. Actualiza el "
+                    f"inventario en el Visor en cuanto confirmes que el dinero llegó.\n\n{resumen}"
                 )
-                await enviar_alerta_whatsapp_admin(cliente, telefono, "PAGO_RECIBIDO", aviso_admin, config)
-            elif venta_auto_resultado and venta_auto_resultado.get("status") == "sin_stock":
-                # 🚨 Dos clientes mandaron comprobante casi al mismo tiempo por la
-                # última unidad — el bloqueo optimista evitó que el stock se fuera
-                # a negativo, pero ESTE cliente específico necesita atención
-                # prioritaria para resolver el conflicto (reembolso, otra unidad, etc.).
-                nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
-                resumen = await generar_resumen_handoff_ia(cliente, "PAGO_RECIBIDO", historial)
-                aviso_admin = (
-                    f"🚨 POSIBLE VENTA DUPLICADA — el cliente mandó comprobante de "
-                    f"'{venta_auto_resultado.get('nombre_item')}' pero el stock ya se agotó "
-                    f"(alguien más se adelantó). Resolver con prioridad.\n\n{resumen}"
-                )
-                await enviar_alerta_whatsapp_admin(cliente, telefono, "PAGO_RECIBIDO", aviso_admin, config)
+                await enviar_alerta_whatsapp_admin(cliente, telefono, "COMPRA", aviso_admin, config)
             elif intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO", "PAGO_RECIBIDO"]:
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
                 resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
