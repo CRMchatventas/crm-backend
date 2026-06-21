@@ -21,7 +21,7 @@ from config_and_schemas import (
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate,
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
-    ColumnaAction, RenombrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD
+    ColumnaAction, RenombrarColumnaAction, BorrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD
 )
 from ai_security_utils import verificar_sesion_b2b
 from db_core_wrapper import async_db_execute, supabase
@@ -669,6 +669,53 @@ async def renombrar_columna(datos: RenombrarColumnaAction, _sesion: str = Depend
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo renombrando columna: {e}")
         raise HTTPException(status_code=500, detail="Error al renombrar la columna.")
+
+# ==========================================================
+# 🗑️ 10C. BORRADO DE COLUMNAS DINÁMICAS
+# Godot ya llamaba a esta ruta (_borrar_columna_en_nube) pero nunca existió
+# en el backend — cualquier intento de borrar una columna fallaba en
+# silencio (el callback de Godot ni siquiera revisaba el código de
+# respuesta). Como la fila nunca se borraba de 'configuracion', el siguiente
+# ciclo de sync la recreaba de inmediato, dando la sensación de que "ya ni
+# siquiera se borran".
+# ==========================================================
+@router.post("/api/borrar_columna")
+async def borrar_columna(datos: BorrarColumnaAction, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🎮 [TRACE:{trace_id}] Borrando columna '{datos.nombre_columna}' para {_sesion}")
+    try:
+        nombre_seguro = sanitizar_nombre_columna(datos.nombre_columna, permitir_reservadas=True)
+
+        # 🛡️ Blindaje 1: las columnas fijas (izquierda/derecha) nunca se pueden
+        # borrar — Godot ya bloquea esto visualmente (son columnas sin botón de
+        # borrar), pero esto es la fuente de verdad real, no solo confianza en
+        # el cliente.
+        columnas_fijas_upper = [c.upper() for c in (COLUMNAS_FIJAS_IZQ + COLUMNAS_FIJAS_DER)]
+        if nombre_seguro.upper() in columnas_fijas_upper:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] Intento de borrar columna fija '{nombre_seguro}' rechazado.")
+            raise HTTPException(status_code=400, detail="Las columnas fijas del sistema no se pueden eliminar.")
+
+        # 🛡️ Blindaje 2: igual que Godot ya valida visualmente, pero verificado
+        # aquí también — si hay prospectos en esta columna, no se borra. Esto
+        # cubre la carrera donde una tarjeta se mueve a la columna justo entre
+        # la validación visual de Godot y esta petición.
+        res_check = await asyncio.wait_for(
+            async_db_execute(supabase.table('prospectos').select('id').eq('vendedor_id', str(_sesion)).eq('fila', nombre_seguro).limit(1)),
+            timeout=5.0
+        )
+        if res_check.data:
+            raise HTTPException(status_code=400, detail="La columna tiene prospectos asignados. Muévelos antes de eliminarla.")
+
+        # FIX FASE 1: allow_retry=False por mutación crítica (DELETE)
+        resultado = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion').delete().eq('vendedor_id', str(_sesion)).eq('nombre_columna', nombre_seguro), allow_retry=False),
+            timeout=8.0
+        )
+        if resultado.data: return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Columna no encontrada.")
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo borrando columna: {e}")
+        raise HTTPException(status_code=500, detail="Error al eliminar la columna.")
 
 # ==========================================================
 # 📱 11. ENDPOINTS MÓVILES (APP ASESORES Y GODOT)
