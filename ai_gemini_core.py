@@ -13,6 +13,7 @@ import requests
 import bleach
 import orjson
 import urllib3
+from datetime import datetime, timezone, date
 from cachetools import TTLCache
 
 # ==========================================================
@@ -73,6 +74,8 @@ ENUMS_VALIDOS = {
         "COMPRA", "COTIZACION", "HUMANO", "REGATEO", "POSTVENTA", "PAGO_RECIBIDO",
         # set adicional del validador
         "PEDIDO_ESPECIAL", "GARANTIA", "SPAM", "MAYOREO", "SALUDO", "ENOJO",
+        # 🆕 venta cruzada de Veltrix Engine (auto-venta del propio bot)
+        "INTERES_VELTRIX",
     },
     "etapa_venta":        {"descubrimiento", "negociacion", "cierre"},
     "objecion_detectada": {"precio", "indecision", "autoridad", "ninguna"},
@@ -1263,6 +1266,56 @@ async def analizar_intencion_venta_ia(
    describe lo que se detectó y pide que revise o mande el comprobante correcto."""
 
 
+                # 🆕 Bloque SIEMPRE activo: interés explícito en Veltrix Engine (distinto del
+                # bloque suave de abajo, que solo aplica al cerrar una venta de videojuegos).
+                # Aquí el cliente preguntó directamente por el chatbot — se responde de
+                # inmediato, sin esperar a un humano y sin el límite diario.
+                _bloque_interes_veltrix = """
+7A. INTERÉS EXPLÍCITO EN VELTRIX ENGINE (SIEMPRE ACTIVO, sin límite diario — responde tú mismo)
+   Si el cliente pregunta directamente por el chatbot/la plataforma con la que está hablando
+   — frases como "quiero un chatbot", "cómo consigo esto para mi negocio", "info de Veltrix",
+   "cuánto cuesta esto", "me interesa Veltrix Engine", "automatizar ventas", etc. — pon
+   intencion="INTERES_VELTRIX" y responde TÚ MISMO ahí mismo, sin decir que un humano le va a
+   contestar después:
+   - Usa el hecho de que TÚ MISMO eres la prueba viva: algo como "justo así te estoy
+     respondiendo yo — así atendería a tus clientes, las 24 horas, sin que se te escape
+     ninguno".
+   - Menciona los planes: Básico $299/mes, Profesional $699/mes, Premium $1,290/mes — sin
+     entrar en el detalle de cada uno a menos que pregunte específicamente.
+   - Manda a veltrixengine.pro para más información.
+   - Ofrece una demo: pregúntale a qué giro se dedica su negocio. Si te responde con un giro,
+     dale UN ejemplo breve e ilustrativo (inventado, genérico, dejando claro que es solo un
+     ejemplo de muestra) de cómo le responderías a un cliente de ESE giro — no necesitas datos
+     reales de inventario para esto, es solo una demostración de estilo.
+   - Menciona que el primer mes tiene 50% de descuento, o que le ayudan a configurarlo sin
+     costo si no se siente cómodo con la parte técnica.
+   - Nunca inventes detalles técnicos que no sepas con certeza (facturación, integraciones
+     específicas, etc.) — para eso dile que un asesor humano le contacta para profundizar."""
+
+                # 🆕 Descuento de LANZAMIENTO por venir de Facebook/Marketplace — temporal
+                # (Opción A acordada) y con tope de $200 MXN por seguridad de margen. El tope
+                # y la fecha límite se calculan aquí en Python, nunca se le pide al modelo que
+                # compare fechas. Fecha límite ajustable: hoy son 3 semanas desde que se activó.
+                FECHA_LIMITE_PROMO_FACEBOOK = date(2026, 7, 12)
+                promo_facebook_activa = datetime.now(timezone.utc).date() <= FECHA_LIMITE_PROMO_FACEBOOK
+
+                _bloque_descuento_facebook = ""
+                if promo_facebook_activa:
+                    _bloque_descuento_facebook = """
+4B. DESCUENTO DE LANZAMIENTO POR VENIR DE FACEBOOK/MARKETPLACE (temporal)
+   Si el cliente menciona que viene de Facebook, Marketplace o un anuncio (ej. "vi tu
+   publicación", "te escribo por el anuncio"), ofrécele TÚ MISMO, sin que lo pida, un 5% de
+   descuento sobre el precio de lista por concretar la compra vía WhatsApp — pero el
+   descuento NUNCA debe superar $200 MXN en ningún caso (si el 5% calculado pasa de $200,
+   usa $200 fijos en su lugar). No le digas al cliente que existe ese tope, ni que es por
+   tiempo limitado, a menos que pregunte directamente — si pregunta cuánto es exactamente su
+   descuento, dale el número real ya con el tope aplicado, nunca le mientas. Para mencionarlo
+   de forma general usa frases como "5% de descuento en productos seleccionados", nunca
+   prometas el 5% como si aplicara sin límite a cualquier precio. Este descuento es
+   independiente de cualquier regateo normal — no lo sumes a otro descuento ya ofrecido, y
+   nunca dejes que el precio final caiga por debajo del "Piso de descuento autorizado AHORA"
+   del [RAG] si ese producto ya tiene uno."""
+
                 # 🆕 Bloque opcional de promoción de Veltrix (solo si el tenant
                 # lo habilitó Y no se ha superado el tope diario).
                 _bloque_promo_veltrix = ""
@@ -1354,6 +1407,7 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
    junto con el estado general — ej. "tengo Batman de PS2, completo, en
    excelente estado, en $550" o "tengo Batman de PS2, solo disco, con
    rayaduras, en $100". No la inventes si el [RAG] no la trae para ese artículo.
+{_bloque_descuento_facebook}
  
 5. ESTRATEGIA DE CIERRE
    Usa la estrategia: {estrategia}.
@@ -1361,6 +1415,7 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 
 6. DATOS DE PAGO, ENTREGA Y HORARIO (usa SOLO esto, no inventes nada más)
 {_bloque_pago_entrega}
+{_bloque_interes_veltrix}
 {_bloque_promo_veltrix}
 {_bloque_comprobante}
  
@@ -1375,7 +1430,7 @@ IMPORTANTE: dentro de "respuesta", nunca uses comillas dobles ("). Si quieres re
 nombre de un producto, hazlo sin comillas o con *un solo asterisco* — las comillas dobles
 dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.
 {{
-  "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO",
+  "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO|INTERES_VELTRIX",
   "respuesta":          "Texto natural hacia el cliente",
   "emocion_cliente":    "neutral|feliz|frustrado|ansioso|dudoso",
   "temperatura_lead":   "frio|tibio|caliente",
