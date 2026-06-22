@@ -124,6 +124,12 @@ async def _procesar_mensaje_en_segundo_plano(
 
 
 @app.get("/")
+@app.head("/")
+# 🛡️ FIX: Render manda un HEAD / como healthcheck por defecto (si no se
+# configuró una ruta personalizada). FastAPI no agrega soporte a HEAD
+# automáticamente solo por declarar GET — sin esto, Render recibía 405,
+# interpretaba el servicio como "no sano", y lo reiniciaba en bucle sin
+# parar, aunque el servidor en realidad arrancara bien por dentro.
 async def root():
     return {"status": "Veltrix Engine Online", "motor_db": "Conectado", "version": config.SCHEMA_VERSION}
 
