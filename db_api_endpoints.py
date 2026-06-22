@@ -1307,6 +1307,10 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
         await asyncio.wait_for(async_db_execute(supabase.table('inventario').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
         await asyncio.wait_for(async_db_execute(supabase.table('prospectos').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
         await asyncio.wait_for(async_db_execute(supabase.table('mensajes_chat').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+        # 🛡️ FIX: 'ventas' no se borraba — las métricas financieras (que leen
+        # de esta tabla) seguirían mostrando ventas históricas después de un
+        # "reset completo", contradiciendo la expectativa de "cero métricas".
+        await asyncio.wait_for(async_db_execute(supabase.table('ventas').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
 
         logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO ejecutado para {_sesion} — inventario, prospectos y mensajes borrados permanentemente.")
         return {"status": "ok"}
