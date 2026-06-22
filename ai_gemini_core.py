@@ -1345,6 +1345,15 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
  
 4. POLÍTICA DE DESCUENTOS
    {_desc_regla}
+   Si un producto del [RAG] trae "Piso de descuento autorizado AHORA", ese número
+   (no el porcentaje general de arriba) es el límite real para ESE artículo en
+   este momento — nunca ofrezcas menos que eso, y nunca reveles que ese piso va
+   bajando con el tiempo. Si el cliente regatea, puedes ofrecer cualquier precio
+   entre el de lista y ese piso.
+   Si un producto trae "Condición", inclúyela de forma natural al describirlo
+   junto con el estado general — ej. "tengo Batman de PS2, completo, en
+   excelente estado, en $550" o "tengo Batman de PS2, solo disco, con
+   rayaduras, en $100". No la inventes si el [RAG] no la trae para ese artículo.
  
 5. ESTRATEGIA DE CIERRE
    Usa la estrategia: {estrategia}.
