@@ -816,6 +816,78 @@ async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Dep
         logger.exception(f"❌ [TRACE:{trace_id}] Error retransmitiendo handoff manual: {e}")
         raise HTTPException(status_code=500, detail="Fallo crítico al despachar el mensaje.")
 
+# ==========================================================
+# 📷 11B. ENVÍO DE FOTOS DESDE MOBILE (CÁMARA / GALERÍA)
+# Esta ruta nunca existió, ni antes ni después de la migración — Mobile ya
+# mandaba fotos en base64 a /api/mobile/send_media, pero el backend no tenía
+# nada ahí. disparar_whatsapp_imagen_async (ya existente) solo manda por URL,
+# no por base64 crudo — así que se sube la foto a Supabase Storage (mismo
+# bucket que ya usa el inventario) para conseguir una URL, y de ahí se reusa
+# esa función tal cual, sin tocar nada del lado de Meta.
+# ==========================================================
+class MobileMediaRequest(BaseModel):
+    to: str
+    image_base64: str = Field(min_length=1)
+    vendedor_id: str = ""
+
+@router.post("/api/mobile/send_media")
+async def send_mobile_media(data: MobileMediaRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    import base64, io
+    from PIL import Image
+    from ai_whatsapp_media import disparar_whatsapp_imagen_async
+
+    tel_norm = normalizar_telefono(data.to)
+    logger.info(f"📷 [TRACE:{trace_id}] Foto desde Mobile hacia {enmascarar_telefono(tel_norm)}")
+    if not tel_norm: raise HTTPException(status_code=400, detail="Teléfono inválido.")
+
+    try:
+        img_bytes = base64.b64decode(data.image_base64, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Imagen en base64 inválida.")
+    if len(img_bytes) < 32 or len(img_bytes) > 8_000_000:
+        raise HTTPException(status_code=413, detail="Imagen vacía o demasiado grande.")
+
+    try:
+        # Misma validación estricta que el resto del proyecto: verificar +
+        # decodificar por completo antes de confiar en los bytes recibidos.
+        img_verificar = Image.open(io.BytesIO(img_bytes))
+        img_verificar.verify()
+        img = Image.open(io.BytesIO(img_bytes))
+        img.load()
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+
+        buffer_salida = io.BytesIO()
+        img.save(buffer_salida, format="JPEG", quality=80)
+        bytes_finales = buffer_salida.getvalue()
+    except Exception as e:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen de Mobile corrupta o ilegible: {e}")
+        raise HTTPException(status_code=400, detail="La imagen está corrupta o no se pudo procesar.")
+
+    try:
+        nombre_archivo = f"chat_media/{_sesion}_{tel_norm}_{int(now_ts())}.jpg"
+
+        def _upload():
+            return supabase.storage.from_("inventario_media").upload(
+                nombre_archivo, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
+            )
+        await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
+        url_publica = supabase.storage.from_("inventario_media").get_public_url(nombre_archivo)
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo foto de Mobile a Storage: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar la imagen.")
+
+    res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('meta_token, meta_phone_id').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+    if not res_conf.data: raise HTTPException(status_code=404, detail="Configuración de Meta no encontrada en este tenant.")
+    config_tenant = res_conf.data[0]
+
+    exito = await disparar_whatsapp_imagen_async(tel_norm, url_publica, "", config_tenant.get('meta_token'), config_tenant.get('meta_phone_id'))
+    if not exito:
+        raise HTTPException(status_code=500, detail="La imagen se guardó pero falló el envío por WhatsApp.")
+
+    await guardar_mensaje_chat(tel_norm, str(_sesion), 'ASESOR', "[Imagen enviada desde Mobile]")
+    return {"status": "ok"}
+
 @router.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.info(f"🎮 [TRACE:{trace_id}] Compilando Dashboard Móvil para {vendedor_id}")
