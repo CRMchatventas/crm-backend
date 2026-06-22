@@ -755,7 +755,7 @@ async def get_mobile_chat_history(telefono: str, limit: int = 50, offset: int = 
         offset_seguro, limit_seguro = max(0, offset), min(limit, 100)
         res = await asyncio.wait_for(
             async_db_execute(
-                supabase.table("mensajes_chat").select("mensaje, autor, created_at").eq("vendedor_id", str(vendedor_id)).eq("telefono", tel_norm)
+                supabase.table("mensajes_chat").select("mensaje, autor, created_at, wamid").eq("vendedor_id", str(vendedor_id)).eq("telefono", tel_norm)
                 .order("created_at", desc=True).range(offset_seguro, offset_seguro + limit_seguro - 1)
             ),
             timeout=8.0
@@ -764,7 +764,11 @@ async def get_mobile_chat_history(telefono: str, limit: int = 50, offset: int = 
             {
                 "contenido": bleach.clean(str(m.get("mensaje") or ""), tags=[], strip=True),
                 "es_mio": str(m.get("autor", "")).upper() in ["BOT", "ASESOR", "HUMANO", "SISTEMA", "BOT_REMARKETING", "VENDEDOR"],
-                "fecha": str(m.get("created_at", ""))
+                "fecha": str(m.get("created_at", "")),
+                # 🆕 FIX: se regresa el mismo id que Mobile mandó al enviar (si
+                # lo mandó) — sin esto, Mobile nunca podía reconocer su propia
+                # burbuja optimista y el mensaje se duplicaba en pantalla.
+                "client_msg_id": str(m.get("wamid") or "")
             } for m in reversed(res.data or [])
         ]
         return {"status": "ok", "historial": historial_formateado}
@@ -796,7 +800,12 @@ async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Dep
 
         # FIX FASE 4: TRAZABILIDAD ANTES QUE EFECTO SECUNDARIO. Guardamos en base de datos primero para
         # garantizar auditoría; si la API externa cae o responde lento, el mensaje humano no queda huérfano.
-        await guardar_mensaje_chat(tel_norm, str(vendedor_id), 'ASESOR', mensaje_limpio)
+        # 🆕 FIX: se reusa el mismo campo 'wamid' que ya existe en mensajes_chat
+        # (sirve como "id de mensaje externo" sin importar si viene de Meta o
+        # de Mobile) — esto es lo que permite que el historial pueda regresarle
+        # a Mobile el mismo client_msg_id que mandó, para que reconozca su
+        # propia burbuja optimista y no la duplique.
+        await guardar_mensaje_chat(tel_norm, str(vendedor_id), 'ASESOR', mensaje_limpio, wamid=data.client_msg_id)
         await actualizar_estado_crm(tel_norm, str(vendedor_id), "En Conversacion", "azul", "")
 
         # Efecto secundario (Llamada HTTP externa a la API de Meta)
