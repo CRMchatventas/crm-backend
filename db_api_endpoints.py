@@ -1213,6 +1213,114 @@ async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, background_tasks:
         raise HTTPException(status_code=500, detail="Fallo campaña masiva.")
 
 # ==========================================================
+# 📄 16. PLANTILLA CSV DE INVENTARIO (IMPORTAR / EXPORTAR)
+# Ninguna de las dos rutas existía — ni en este backend modular ni en el
+# monolito original — a pesar de que Godot ya las llama
+# (_generar_plantilla_csv / _procesar_importacion_csv en dashboard_main.gd).
+# Columnas oficiales por giro: videojuegos tiene su propio set; cualquier
+# otro giro cae en un set genérico hasta que se definan sus columnas reales.
+# ==========================================================
+COLUMNAS_CSV_VIDEOJUEGOS = [
+    "nombre", "plataforma", "genero", "estado_general", "condicion",
+    "precio_compra", "precio_venta", "cantidad", "codigo_barras",
+    "precio_min_inmediato", "precio_min_24h", "precio_min_72h"
+]
+COLUMNAS_CSV_GENERICO = ["nombre", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
+
+EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "PS4", "Acción", "Completo", "Excelente estado", "300", "550", "1", "", "500", "450", "400"]
+EJEMPLO_CSV_GENERICO = ["Producto de ejemplo", "General", "100", "200", "1", "Descripción breve"]
+
+@router.get("/api/descargar_plantilla")
+async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    from fastapi.responses import Response
+    import csv, io as io_csv
+    logger.info(f"📄 [TRACE:{trace_id}] Generando plantilla CSV de inventario para {_sesion}")
+    try:
+        res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        giro = str(res_conf.data[0].get('giro', '')).lower() if res_conf.data else ""
+
+        es_videojuegos = "videojueg" in giro or giro == ""  # default a videojuegos si no hay giro configurado aún
+        columnas = COLUMNAS_CSV_VIDEOJUEGOS if es_videojuegos else COLUMNAS_CSV_GENERICO
+        ejemplo = EJEMPLO_CSV_VIDEOJUEGOS if es_videojuegos else EJEMPLO_CSV_GENERICO
+
+        buffer = io_csv.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columnas)
+        writer.writerow(ejemplo)
+        contenido = buffer.getvalue()
+
+        return Response(
+            content=contenido,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=Plantilla_Veltrix_Importar.csv"}
+        )
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo generando plantilla CSV: {e}")
+        raise HTTPException(status_code=500, detail="Error al generar la plantilla.")
+
+class ImportarInventarioRequest(BaseModel):
+    vendedor_id: str = ""
+    inventario: List[dict] = Field(default_factory=list)
+
+def _safe_float_importacion(valor) -> float:
+    try:
+        if valor is None or str(valor).strip() == "": return 0.0
+        limpio = str(valor).replace("$", "").replace(",", "").strip()
+        return float(limpio)
+    except Exception:
+        return 0.0
+
+def _safe_float_opcional(valor) -> Optional[float]:
+    if valor is None or str(valor).strip() == "": return None
+    resultado = _safe_float_importacion(valor)
+    return resultado if resultado > 0 else None
+
+@router.post("/api/importar_inventario")
+async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"📄 [TRACE:{trace_id}] Importando {len(datos.inventario)} artículos para {_sesion}")
+    try:
+        if not datos.inventario:
+            raise HTTPException(status_code=400, detail="El lote de inventario está vacío.")
+        if len(datos.inventario) > 1000:
+            raise HTTPException(status_code=413, detail="Demasiados artículos en un solo lote (máximo 1000).")
+
+        filas_finales = []
+        for item in datos.inventario:
+            nombre = bleach.clean(str(item.get("nombre", "")).strip(), tags=[], strip=True)[:200]
+            if not nombre:
+                continue
+            filas_finales.append({
+                "vendedor_id": str(_sesion),
+                "nombre": nombre,
+                "categoria": bleach.clean(str(item.get("categoria", "")).strip(), tags=[], strip=True)[:100] or "General",
+                "genero": bleach.clean(str(item.get("genero", "")).strip(), tags=[], strip=True)[:100] or None,
+                "estado_general": bleach.clean(str(item.get("estado_general", "")).strip(), tags=[], strip=True)[:100] or None,
+                "descripcion_detallada": bleach.clean(str(item.get("descripcion_detallada", "")).strip(), tags=[], strip=True)[:2000],
+                "precio": _safe_float_importacion(item.get("precio")),
+                "costo": _safe_float_importacion(item.get("costo")),
+                "stock": max(0, int(_safe_float_importacion(item.get("stock")))),
+                "codigo_barras": bleach.clean(str(item.get("codigo_barras", "")).strip(), tags=[], strip=True)[:100] or None,
+                "precio_min_inmediato": _safe_float_opcional(item.get("precio_min_inmediato")),
+                "precio_min_24h": _safe_float_opcional(item.get("precio_min_24h")),
+                "precio_min_72h": _safe_float_opcional(item.get("precio_min_72h")),
+                "atributos_extra": item.get("atributos_extra", {}) or {},
+            })
+
+        if not filas_finales:
+            raise HTTPException(status_code=400, detail="Ningún artículo tenía nombre válido.")
+
+        # FIX FASE 1: allow_retry=False por inserción masiva (INSERT)
+        resultado = await asyncio.wait_for(
+            async_db_execute(supabase.table('inventario').insert(filas_finales), allow_retry=False),
+            timeout=20.0
+        )
+        return {"status": "ok", "insertados": len(resultado.data) if resultado.data else len(filas_finales)}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en importar_inventario: {e}")
+        raise HTTPException(status_code=500, detail="Error al importar el inventario.")
+
+# ==========================================================
 # 💰 15. PRECIO DE MERCADO (PRICECHARTING) — recuperado del monolito
 # ==========================================================
 # Godot lo llama desde PanelVideojuegos.gd (_pedir_precios_sugeridos) al
