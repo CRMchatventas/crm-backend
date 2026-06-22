@@ -1353,7 +1353,12 @@ async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trac
     logger.info(f"📄 [TRACE:{trace_id}] Generando plantilla CSV de inventario para {_sesion}")
     try:
         res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
-        giro = str(res_conf.data[0].get('giro', '')).lower() if res_conf.data else ""
+        # 🛡️ FIX: si 'giro' existe en la fila pero su valor es NULL, .get('giro', '')
+        # regresa None (no el default ''), porque el default solo aplica cuando la
+        # LLAVE no existe — no cuando existe con valor nulo. str(None) = "none", lo
+        # que hacía que nunca detectara correctamente el giro "videojuegos".
+        giro_crudo = res_conf.data[0].get('giro') if res_conf.data else None
+        giro = str(giro_crudo or '').lower()
 
         es_videojuegos = "videojueg" in giro or giro == ""  # default a videojuegos si no hay giro configurado aún
         columnas = COLUMNAS_CSV_VIDEOJUEGOS if es_videojuegos else COLUMNAS_CSV_GENERICO
