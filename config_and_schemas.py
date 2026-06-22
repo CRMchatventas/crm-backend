@@ -347,6 +347,11 @@ class LoginUpdate(BaseSchema):
 class MobileMessageRequest(BaseSchema): 
     to: str
     msg: str = Field(min_length=1)
+    # 🆕 FIX: Mobile ya mandaba esto para poder reconocer su propia burbuja
+    # optimista cuando regresa en el historial — pero el esquema nunca tenía
+    # este campo, así que Pydantic lo descartaba en silencio. Nunca se
+    # guardaba, nunca podía regresar, y el mensaje se duplicaba en pantalla.
+    client_msg_id: str = ""
     @field_validator("to", mode="before")
     @classmethod
     def v_t(cls, v: Any): return _local_validar_tel(v)
