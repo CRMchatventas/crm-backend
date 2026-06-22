@@ -24,6 +24,7 @@ import urllib.parse
 import hashlib
 import asyncio
 import httpx
+from datetime import datetime, timezone
 from PIL import Image
 from typing import Optional
 from rapidfuzz import process, fuzz
@@ -77,6 +78,51 @@ TITULOS_COMPUESTOS = {
 # ==========================================================
 # ⏳ FILTRO DE RESERVAS TEMPORALES (ver patch arriba)
 # ==========================================================
+# ==========================================================
+# 💸 PISO DE DESCUENTO VIGENTE (descuento escalonado por tiempo)
+# ==========================================================
+def _calcular_piso_descuento_vigente(item: dict) -> Optional[float]:
+    """
+    Resuelve cuál es el precio MÁS BAJO que el bot puede ofrecer EN ESTE
+    MOMENTO para este artículo, según cuánto tiempo lleva publicado:
+    - Menos de 24h: precio_min_inmediato (lo que se puede dar si piden descuento ya).
+    - 24h o más: precio_min_24h.
+    - 72h (3 días) o más: precio_min_72h (el piso más bajo).
+    Se calcula aquí, en Python, y NUNCA se le pide al modelo que haga la
+    cuenta de fechas — eso es exactamente el tipo de aritmética en la que un
+    LLM se equivoca con facilidad. Al prompt solo le llega el número final.
+    Si un nivel no está configurado (columna en null), se usa el nivel
+    anterior disponible; si no hay ninguno, no hay piso de descuento.
+    """
+    inmediato = item.get('precio_min_inmediato')
+    d24 = item.get('precio_min_24h')
+    d72 = item.get('precio_min_72h')
+    fecha_alta_raw = item.get('fecha_alta')
+
+    dias_publicado = 0
+    if fecha_alta_raw:
+        try:
+            texto_fecha = str(fecha_alta_raw).replace('Z', '+00:00')
+            dt_alta = datetime.fromisoformat(texto_fecha)
+            if dt_alta.tzinfo is None:
+                dt_alta = dt_alta.replace(tzinfo=timezone.utc)
+            dias_publicado = (datetime.now(timezone.utc) - dt_alta).days
+        except Exception as e:
+            logger.warning(f"⚠️ [DESCUENTO] No se pudo parsear fecha_alta='{fecha_alta_raw}': {e}")
+            dias_publicado = 0
+
+    if dias_publicado >= 3 and d72 is not None:
+        return float(d72)
+    if dias_publicado >= 1 and d24 is not None:
+        return float(d24)
+    if inmediato is not None:
+        return float(inmediato)
+    # Sin niveles configurados para este artículo — fallback al último disponible.
+    if d24 is not None: return float(d24)
+    if d72 is not None: return float(d72)
+    return None
+
+
 def _filtrar_items_reservados(vendedor_id: str, items: list) -> list:
     """
     Excluye cualquier artículo con un hold de última-unidad activo (llave
@@ -137,7 +183,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             query = (
                 supabase.table('inventario')
-                .select('id, nombre, categoria, genero, precio, stock, estado_general')
+                .select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta')
                 .eq('vendedor_id', vendedor_id)
                 .ilike('nombre', f"%{termino_fuerte}%")
                 .gt('stock', 0)
@@ -157,7 +203,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
                 try:
                     query_genero = (
                         supabase.table('inventario')
-                        .select('id, nombre, categoria, genero, precio, stock, estado_general')
+                        .select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta')
                         .eq('vendedor_id', vendedor_id)
                         .ilike('genero', f"%{termino_fuerte}%")
                         .gt('stock', 0)
@@ -173,7 +219,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
             if not inventario:
-                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, stock, estado_general').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
                 res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
                 inventario = res_inv.data or []
 
@@ -223,10 +269,14 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
             precio = float(item.get('precio') or 0.0)
             genero_txt = str(item.get('genero') or '').strip()
             sufijo_genero = f" | Género: {genero_txt}" if genero_txt else ""
+            condicion_txt = str(item.get('descripcion_detallada') or '').strip()
+            sufijo_condicion = f" | Condición: {condicion_txt}" if condicion_txt else ""
+            piso_descuento = _calcular_piso_descuento_vigente(item)
+            sufijo_descuento = f" | Piso de descuento autorizado AHORA: ${piso_descuento:.2f} MXN" if piso_descuento is not None else ""
             lineas_contexto.append(
                 f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
                 f"${precio:.2f} MXN | Stock: {item.get('stock', 0)} | "
-                f"Estado: {item.get('estado_general', 'N/A')}{sufijo_genero}"
+                f"Estado: {item.get('estado_general', 'N/A')}{sufijo_condicion}{sufijo_genero}{sufijo_descuento}"
             )
 
     return "\n".join(lineas_contexto)[:1800]
