@@ -10,7 +10,7 @@ from typing import Optional, List, Any
 from cachetools import TTLCache
 
 from fastapi import APIRouter, Request, HTTPException, Depends, BackgroundTasks, Header
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 # ==========================================================
