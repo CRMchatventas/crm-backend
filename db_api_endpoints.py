@@ -956,7 +956,10 @@ async def actualizar_bot_config(datos: BotConfigUpdate, _sesion: str = Depends(v
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo guardando bot_config: {e}")
         raise HTTPException(status_code=500, detail="Error al guardar la configuración del asistente.")
 
-@router.post("/api/actualizar_notes")
+@router.post("/api/actualizar_notas")
+# 🛡️ FIX: el backend tenía esta ruta en inglés ("notes") mientras Godot
+# siempre pidió la versión en español ("notas") — esto explica el error de
+# "Error al Guardar" al editar notas de un cliente que vimos hace rato.
 async def actualizar_notas(datos: NotasUpdate, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     try:
         tel_norm = normalizar_telefono(datos.telefono)
@@ -1211,6 +1214,106 @@ async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, background_tasks:
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en encolamiento de ejecución masiva: {e}")
         raise HTTPException(status_code=500, detail="Fallo campaña masiva.")
+
+# ==========================================================
+# 🔍 16B. BÚSQUEDA EN CATÁLOGO MAESTRO (autocompletado de PanelVideojuegos.gd)
+# Esta ruta nunca existió — el autocompletado mientras se escribe en
+# PanelVideojuegos siempre regresaba 404 en silencio.
+# ==========================================================
+@router.get("/api/buscar_maestro")
+async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🔍 [TRACE:{trace_id}] Buscando en catálogo maestro: '{q}'")
+    try:
+        termino = limpiar_texto(q)[:100]
+        if len(termino) < 2:
+            return {"status": "ok", "resultados": []}
+        # 🛡️ Nombres de columna inferidos del lado de Godot (PanelVideojuegos.gd
+        # ya espera exactamente estos campos) — verifica que coincidan con el
+        # esquema real de 'catalogo_maestro' si algo no aparece bien poblado.
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('catalogo_maestro')
+                .select('id, nombre, consola, url_portada_oficial, precio_nuevo, precio_cib, precio_incompleto, precio_suelto')
+                .ilike('nombre', f'%{termino}%').limit(10)
+            ),
+            timeout=8.0
+        )
+        return {"status": "ok", "resultados": res.data or []}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en buscar_maestro: {e}")
+        raise HTTPException(status_code=500, detail="Error al buscar en el catálogo maestro.")
+
+# ==========================================================
+# 💰 16C. MÉTRICAS FINANCIERAS (panel de finanzas en tiempo real)
+# Tampoco existía — el botón de "Finanzas" en dashboard_main.gd siempre
+# mostraba "Error al conectar con Finanzas".
+# ==========================================================
+@router.get("/api/metricas")
+async def obtener_metricas_financieras(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"💰 [TRACE:{trace_id}] Calculando métricas financieras para {_sesion}")
+    try:
+        res_inv = await asyncio.wait_for(
+            async_db_execute(supabase.table('inventario').select('stock, precio, costo, nombre').eq('vendedor_id', str(_sesion))),
+            timeout=10.0
+        )
+        items = res_inv.data or []
+        piezas = sum(int(it.get('stock', 0) or 0) for it in items)
+        costo_inv = sum(float(it.get('costo', 0) or 0) * int(it.get('stock', 0) or 0) for it in items)
+        valor = sum(float(it.get('precio', 0) or 0) * int(it.get('stock', 0) or 0) for it in items)
+        ganancia_potencial = valor - costo_inv
+        costo_por_nombre = {str(it.get('nombre', '')).strip().lower(): float(it.get('costo', 0) or 0) for it in items}
+
+        res_ventas = await asyncio.wait_for(
+            async_db_execute(supabase.table('ventas').select('monto, cantidad, nombre_producto').eq('vendedor_id', str(_sesion))),
+            timeout=10.0
+        )
+        ventas = res_ventas.data or []
+        ventas_totales = sum(float(v.get('monto', 0) or 0) for v in ventas)
+        # 🛡️ Aproximación deliberada: la tabla 'ventas' no guarda el costo al
+        # momento de cada venta, así que la ganancia real usa el costo ACTUAL
+        # del artículo — puede no coincidir exacto si el costo cambió desde
+        # que se vendió. Sería más preciso si 'ventas' guardara el costo al
+        # momento de la transacción, pero eso es un cambio más grande.
+        costo_de_lo_vendido = sum(
+            costo_por_nombre.get(str(v.get('nombre_producto', '')).strip().lower(), 0.0) * int(v.get('cantidad', 1) or 1)
+            for v in ventas
+        )
+        ganancia_real = ventas_totales - costo_de_lo_vendido
+
+        return {
+            "status": "ok", "piezas": piezas, "costo_inv": round(costo_inv, 2),
+            "valor": round(valor, 2), "ganancia_potencial": round(ganancia_potencial, 2),
+            "ventas_totales": round(ventas_totales, 2), "ganancia_real": round(ganancia_real, 2)
+        }
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo calculando métricas: {e}")
+        raise HTTPException(status_code=500, detail="Error al calcular métricas financieras.")
+
+# ==========================================================
+# 💀 16D. RESET COMPLETO (DESTRUCTIVO — exclusivo para Administrador)
+# Tampoco existía. Borra TODO el inventario, prospectos y mensajes del
+# tenant — irreversible. Mismo candado de rol que /api/borrar_permanente.
+# ==========================================================
+@router.post("/api/reset_limpio")
+async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO solicitado para {_sesion}")
+    try:
+        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        if not res_admin.data or str(res_admin.data[0].get('rol', '')).lower() != 'admin':
+            logger.warning(f"🚨 [TRACE:{trace_id}] Intento de reset completo bloqueado. Requiere privilegios de Administrador.")
+            raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
+
+        # FIX FASE 1: allow_retry=False — destrucción masiva e irreversible (DELETE)
+        await asyncio.wait_for(async_db_execute(supabase.table('inventario').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+        await asyncio.wait_for(async_db_execute(supabase.table('prospectos').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+        await asyncio.wait_for(async_db_execute(supabase.table('mensajes_chat').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+
+        logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO ejecutado para {_sesion} — inventario, prospectos y mensajes borrados permanentemente.")
+        return {"status": "ok"}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en reset_limpio: {e}")
+        raise HTTPException(status_code=500, detail="Error al ejecutar el reset.")
 
 # ==========================================================
 # 📄 16. PLANTILLA CSV DE INVENTARIO (IMPORTAR / EXPORTAR)
