@@ -339,6 +339,15 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                     f"inventario en el Visor en cuanto confirmes que el dinero llegó.\n\n{resumen}"
                 )
                 await enviar_alerta_whatsapp_admin(cliente, telefono, "COMPRA", aviso_admin, config)
+            elif intencion_ia == "INTERES_VELTRIX":
+                # 🆕 Lead de venta cruzada para Veltrix Engine (no confundir con soporte de
+                # Fantasy Games) — el bot ya le respondió la parte de info/demo solo, pero el
+                # cierre real de una suscripción B2B se beneficia de seguimiento humano. Aviso
+                # con encabezado propio para que nunca se mezcle a simple vista con quejas o
+                # soporte normal de clientes de videojuegos.
+                nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+                aviso_admin = f"🚀 LEAD DE VELTRIX ENGINE (no es soporte de Fantasy Games) — {cliente} ({enmascarar_telefono(telefono)}) preguntó por el chatbot. El bot ya le dio info/demo; dale seguimiento para cerrar la suscripción."
+                await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, aviso_admin, config)
             elif intencion_ia in ["HUMANO", "POSTVENTA", "GARANTIA", "ENOJO", "PAGO_RECIBIDO"]:
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
                 resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
