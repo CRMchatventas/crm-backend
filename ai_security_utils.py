@@ -103,6 +103,16 @@ async def lifespan(app: FastAPI):
     
     # Lanzamos únicamente el Garbage Collector maestro (Evitamos colisiones)
     lanzar_tarea_segura(config.task_gc_locks())
+
+    # 🆕 FIX: el watchdog de remarketing autónomo de 24h (bucle_seguimiento_24h,
+    # en db_crm_logic.py) estaba completamente construido — RPC atómico
+    # anti-doble-envío, métricas de éxito/fallo — pero nunca se arrancaba en
+    # ningún lado. Sin esto, el remarketing automático nunca se ejecutaba,
+    # aunque todo el motor para hacerlo ya existiera. Import local (igual que
+    # el resto del proyecto) para evitar cualquier riesgo de import circular;
+    # confirmado que db_crm_logic.py no importa nada de este módulo.
+    from db_crm_logic import bucle_seguimiento_24h
+    lanzar_tarea_segura(bucle_seguimiento_24h())
     
     try:
         yield
