@@ -1136,14 +1136,21 @@ async def actualizar_stock(item: VentaItem, request: Request, _sesion: str = Dep
 # 📦 13B. INVENTARIO: CARGA, EDICIÓN Y BORRADO (VISOR)
 # ==========================================================
 class EditarItemVisorRequest(BaseModel):
-    id: Any
+    # 🛡️ FIX: estaba tipado como 'Any' — Pydantic nunca limpiaba el float que
+    # GDScript manda siempre para cualquier número que venga de un JSON
+    # parseado (1510.0 en vez de 1510), y Postgres rechazaba la consulta
+    # contra la columna 'id' (int8/bigint) con un error de tipo. VentaItem ya
+    # usaba 'int' aquí y por eso /api/actualizar_stock nunca tuvo este
+    # problema — Pydantic limpia automáticamente un float sin parte
+    # fraccionaria real cuando el campo está tipado como int.
+    id: Optional[int] = None
     nombre: Optional[str] = ""
     consola: Optional[str] = ""
     precio: float = 0.0
     stock: int = 0
 
 class BorrarItemRequest(BaseModel):
-    id: Any
+    id: Optional[int] = None
     nombre: Optional[str] = ""
     consola: Optional[str] = ""
 
