@@ -1418,13 +1418,17 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
 # otro giro cae en un set genérico hasta que se definan sus columnas reales.
 # ==========================================================
 COLUMNAS_CSV_VIDEOJUEGOS = [
-    "nombre", "plataforma", "genero", "estado_general", "condicion",
+    "nombre", "plataforma", "genero", "estado_general", "descripcion_detallada",
     "precio_compra", "precio_venta", "cantidad", "codigo_barras",
     "precio_min_inmediato", "precio_min_24h", "precio_min_72h"
 ]
 COLUMNAS_CSV_GENERICO = ["nombre", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
 
-EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "PS4", "Acción", "Completo", "Excelente estado", "300", "550", "1", "", "500", "450", "400"]
+# 🛡️ FIX: la columna se llamaba "condicion" — ambiguo, sonaba a un valor fijo
+# tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
+# "le falta el case", etc. — lo que el bot lee para describirle el estado
+# real al cliente). Se renombra para que sea explícito.
+EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
 EJEMPLO_CSV_GENERICO = ["Producto de ejemplo", "General", "100", "200", "1", "Descripción breve"]
 
 @router.get("/api/descargar_plantilla")
