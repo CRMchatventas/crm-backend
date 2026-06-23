@@ -771,7 +771,28 @@ async def get_mobile_chat_history(telefono: str, limit: int = 50, offset: int = 
                 "client_msg_id": str(m.get("wamid") or "")
             } for m in reversed(res.data or [])
         ]
-        return {"status": "ok", "historial": historial_formateado}
+        # 🛡️ FIX #1 (segunda parte — tras reinicio completo de la app): el
+        # tablero (/api/cargar_todo) es "Modo Ligero" y NUNCA incluye
+        # notas/etiquetas — eso significa que toda tarjeta CREADA DE CERO
+        # (siempre que se reinicia Veltrix PC) arranca con esos campos
+        # vacíos en memoria, sin importar lo que ya esté guardado en
+        # Supabase. El primer fix solo evitó que un refresco periódico
+        # BORRARA un valor ya cargado — pero nunca le dio al chat una forma
+        # de cargar el valor real si nunca llegó a existir en memoria. Como
+        # el chat YA llama a este endpoint al abrir, se le agrega el perfil
+        # completo aquí — así el chat siempre tiene el dato correcto sin
+        # depender de qué tan fresca esté la tarjeta del tablero.
+        res_perfil = await asyncio.wait_for(
+            async_db_execute(supabase.table("prospectos").select("notas, etiquetas, fila").eq("vendedor_id", str(vendedor_id)).eq("telefono", tel_norm).limit(1)),
+            timeout=5.0
+        )
+        perfil = res_perfil.data[0] if res_perfil.data else {}
+        return {
+            "status": "ok", "historial": historial_formateado,
+            "notas": str(perfil.get("notas") or ""),
+            "etiquetas": str(perfil.get("etiquetas") or ""),
+            "fila": str(perfil.get("fila") or "Bandeja Nueva")
+        }
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Error recuperando chat_history móvil: {e}")
         raise HTTPException(status_code=500, detail="Error al recuperar logs de conversación.")
@@ -865,7 +886,12 @@ async def send_mobile_media(data: MobileMediaRequest, _sesion: str = Depends(ver
         raise HTTPException(status_code=400, detail="La imagen está corrupta o no se pudo procesar.")
 
     try:
-        nombre_archivo = f"chat_media/{_sesion}_{tel_norm}_{int(now_ts())}.jpg"
+        nombre_archivo = f"portadas/chat_{_sesion}_{tel_norm}_{int(now_ts())}.jpg"
+        # 🛡️ FIX: se usa el mismo prefijo "portadas/" que ya usa
+        # procesar_imagen_juego (db_rag_scraper.py) para subir al mismo
+        # bucket — si las políticas de Storage en Supabase están limitadas
+        # a ese prefijo específico, un prefijo nuevo ("chat_media/") se
+        # rechaza en silencio y aparece como un 500 genérico aquí.
 
         def _upload():
             return supabase.storage.from_("inventario_media").upload(
