@@ -1206,7 +1206,13 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
             "precio": datos.precio,
             "costo": costo_final,
             "stock": datos.stock,
-            "precio_minimo_bot": datos.precio_minimo_bot,
+            "precio_minimo_bot": int(datos.precio_minimo_bot),
+            # 🛡️ FIX (causa probable del 422 persistente en TODAS las altas):
+            # esta columna es int8 en Supabase, pero el esquema de Pydantic
+            # la tipa como float — siempre se mandaba con decimales (0.0,
+            # etc.) sin importar lo que el usuario llenara en el formulario,
+            # lo cual explica que el error fuera 100% consistente. Mismo
+            # patrón que ya se corrigió para 'id' en editar/borrar.
             "codigo_barras": bleach.clean(datos.codigo_barras.strip(), tags=[], strip=True)[:100] if datos.codigo_barras.strip() else None,
             "url_portada": datos.url_portada.strip()[:500] if datos.url_portada.strip() else None,
             "descripcion_detallada": bleach.clean(datos.descripcion_detallada.strip(), tags=[], strip=True)[:2000],
