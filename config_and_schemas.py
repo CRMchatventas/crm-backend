@@ -432,12 +432,25 @@ class NuevoArticulo(BaseSchema):
     id_catalogo: str = ""
     nombre: str = Field(min_length=1)
     categoria: str = "General"  # consola/plataforma en videojuegos; categoría general en otros giros
+    # 🆕 Separado de 'categoria': antes esa misma columna mezclaba dos cosas
+    # distintas según el giro/contexto (a veces plataforma como "ps4", a
+    # veces tipo general como "accesorios"), sin forma de distinguirlas.
+    # 'categoria' se queda exclusivamente como plataforma de aquí en
+    # adelante (PS3/PS4/Xbox/Nintendo/etc.); 'tipo_producto' es el tipo
+    # general (Videojuegos/Accesorios/Reparaciones/etc.), útil para
+    # cualquier giro, no solo videojuegos.
+    tipo_producto: str = ""
     genero: str = ""
     estado_general: str = ""
     precio_compra: float = Field(default=0.0, ge=0)
     costo: float = Field(default=0.0, ge=0)
     precio: float = Field(default=0.0, ge=0)
     precio_minimo_bot: float = Field(default=0.0, ge=0)
+    # 🆕 Faltaban en este esquema — ya existían en EditarItemVisorRequest y
+    # en la tabla real, pero nunca se podían capturar desde el alta misma.
+    precio_min_inmediato: Optional[float] = None
+    precio_min_24h: Optional[float] = None
+    precio_min_72h: Optional[float] = None
     stock: int = Field(default=1, ge=0)
     codigo_barras: str = ""
     url_portada: str = ""
