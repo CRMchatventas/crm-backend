@@ -1184,6 +1184,8 @@ class EditarItemVisorRequest(BaseModel):
     precio_min_inmediato: Optional[float] = None
     precio_min_24h: Optional[float] = None
     precio_min_72h: Optional[float] = None
+    descripcion_detallada: Optional[str] = None
+    tipo_producto: Optional[str] = None
 
 class BorrarItemRequest(BaseModel):
     id: Optional[int] = None
@@ -1211,6 +1213,7 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
         campos = {
             "nombre": bleach.clean(datos.nombre.strip(), tags=[], strip=True)[:200],
             "categoria": bleach.clean(datos.categoria.strip(), tags=[], strip=True)[:100] if datos.categoria.strip() else "General",
+            "tipo_producto": bleach.clean(datos.tipo_producto.strip(), tags=[], strip=True)[:100] if datos.tipo_producto.strip() else None,
             "genero": bleach.clean(datos.genero.strip(), tags=[], strip=True)[:100] if datos.genero.strip() else None,
             "estado_general": bleach.clean(datos.estado_general.strip(), tags=[], strip=True)[:100] if datos.estado_general.strip() else None,
             "precio": datos.precio,
@@ -1228,6 +1231,13 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
             "descripcion_detallada": bleach.clean(datos.descripcion_detallada.strip(), tags=[], strip=True)[:2000],
             "atributos_extra": datos.atributos_extra or {},
         }
+        # 🆕 Igual que en edición: solo se incluyen si de verdad se mandaron.
+        if datos.precio_min_inmediato is not None:
+            campos["precio_min_inmediato"] = datos.precio_min_inmediato
+        if datos.precio_min_24h is not None:
+            campos["precio_min_24h"] = datos.precio_min_24h
+        if datos.precio_min_72h is not None:
+            campos["precio_min_72h"] = datos.precio_min_72h
         if datos.id_catalogo and datos.id_catalogo.strip():
             campos["id_catalogo"] = datos.id_catalogo.strip()[:100]
 
@@ -1305,6 +1315,10 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
             campos["precio_min_24h"] = item.precio_min_24h
         if item.precio_min_72h is not None:
             campos["precio_min_72h"] = item.precio_min_72h
+        if item.descripcion_detallada is not None:
+            campos["descripcion_detallada"] = bleach.clean(item.descripcion_detallada.strip(), tags=[], strip=True)[:2000]
+        if item.tipo_producto is not None:
+            campos["tipo_producto"] = bleach.clean(item.tipo_producto.strip(), tags=[], strip=True)[:100] if item.tipo_producto.strip() else None
 
         res = await asyncio.wait_for(async_db_execute(supabase.table("inventario").update(campos).eq("id", item.id).eq("vendedor_id", str(vendedor_id)), allow_retry=False), timeout=10.0)
         return {"status": "ok", "updated": len(res.data) if res.data else 0}
