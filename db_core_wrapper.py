@@ -1,5 +1,5 @@
 # ==============================================================================
-# 🚀 MÓDULO: db_core_wrapper.py (GOLD PRODUCTION STANDARD - v2.8)
+# 🚀 MÓDULO: db_core_wrapper.py (GOLD PRODUCTION STANDARD - v2.9)
 # refactorizado ok
 # ==============================================================================
 import asyncio
@@ -99,9 +99,16 @@ async def async_db_execute(query_builder: Any, timeout_seg: float = 15.0, allow_
             error_code = getattr(e, 'code', 'UNKNOWN')
             error_details = getattr(e, 'message', str(e))
             
-            # 23505 = unique_violation, 23503 = foreign_key_violation
-            if error_code in ["23505", "23503"]:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conflicto de integridad o duplicidad.")
+            # 🛡️ FIX (mensajes claros por tipo real de conflicto): antes 23505
+            # (duplicado) y 23503 (llave foránea) compartían el mismo mensaje
+            # genérico "Conflicto de integridad o duplicidad" — un usuario
+            # viendo eso al intentar BORRAR un artículo con ventas ya
+            # registradas no tiene ninguna pista de qué pasó ni qué hacer.
+            # Se separan en dos mensajes que sí explican la causa real.
+            if error_code == "23505":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un registro con ese mismo valor único (posible duplicado).")
+            if error_code == "23503":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No se puede eliminar: este registro está relacionado con otros datos existentes (por ejemplo, ventas ya registradas).")
             
             # 42XXX o 22XXX = syntax_error, undefined_table, data_exception
             if error_code.startswith(("42", "22")):
