@@ -1174,6 +1174,16 @@ class EditarItemVisorRequest(BaseModel):
     consola: Optional[str] = ""
     precio: float = 0.0
     stock: int = 0
+    # 🆕 Campos nuevos editables desde el Visor en Modo Avanzado/Agotados —
+    # todos Optional y sin default forzado: si el Visor no los manda (ej.
+    # editando desde Modo Básico, que no tiene estas columnas), la ruta no
+    # debe tocarlos en absoluto, no sobreescribirlos con un valor vacío.
+    estado_general: Optional[str] = None
+    costo: Optional[float] = None
+    genero: Optional[str] = None
+    precio_min_inmediato: Optional[float] = None
+    precio_min_24h: Optional[float] = None
+    precio_min_72h: Optional[float] = None
 
 class BorrarItemRequest(BaseModel):
     id: Optional[int] = None
@@ -1277,6 +1287,24 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
         if item.consola and item.consola.strip():
             # En Supabase la columna se llama "categoria", no "consola"
             campos["categoria"] = bleach.clean(item.consola.strip(), tags=[], strip=True)
+        # 🆕 Campos nuevos editables desde Modo Avanzado/Agotados — se
+        # incluyen SOLO si de verdad se mandaron (no None). Esto es crítico
+        # para el borrado suave (que solo manda id/nombre/consola/precio/
+        # stock=0): sin este guard, esos campos llegarían como None y
+        # borrarían por accidente el estado/costo/género/descuentos que el
+        # producto ya tenía guardados.
+        if item.estado_general is not None and item.estado_general.strip():
+            campos["estado_general"] = bleach.clean(item.estado_general.strip(), tags=[], strip=True)[:100]
+        if item.costo is not None:
+            campos["costo"] = item.costo
+        if item.genero is not None:
+            campos["genero"] = bleach.clean(item.genero.strip(), tags=[], strip=True)[:100] if item.genero.strip() else None
+        if item.precio_min_inmediato is not None:
+            campos["precio_min_inmediato"] = item.precio_min_inmediato
+        if item.precio_min_24h is not None:
+            campos["precio_min_24h"] = item.precio_min_24h
+        if item.precio_min_72h is not None:
+            campos["precio_min_72h"] = item.precio_min_72h
 
         res = await asyncio.wait_for(async_db_execute(supabase.table("inventario").update(campos).eq("id", item.id).eq("vendedor_id", str(vendedor_id)), allow_retry=False), timeout=10.0)
         return {"status": "ok", "updated": len(res.data) if res.data else 0}
