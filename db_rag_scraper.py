@@ -338,14 +338,17 @@ async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: st
         out_bytes = out_bytes_io.getvalue()
 
         nombre_archivo = f"portadas/{limpiar_texto(nombre_juego).replace(' ', '_').lower()}_{int(now_ts())}.jpg"
-
+        # 🛡️ FIX URGENTE: "inventario_media" nunca existió como bucket real
+        # en Supabase Storage — el bucket real es "portadas" (confirmado por
+        # captura). Toda subida hacia "inventario_media" fallaría con
+        # "Bucket not found" en producción.
         def _upload():
-            return supabase.storage.from_("inventario_media").upload(
+            return supabase.storage.from_("portadas").upload(
                 nombre_archivo, out_bytes, file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
 
         await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
-        url_publica = supabase.storage.from_("inventario_media").get_public_url(nombre_archivo)
+        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
 
         # 🚀 Actualización validada y con verificación de existencia
         res_update = await async_db_execute(
