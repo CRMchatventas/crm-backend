@@ -1644,6 +1644,71 @@ async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trac
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo generando plantilla CSV: {e}")
         raise HTTPException(status_code=500, detail="Error al generar la plantilla.")
 
+# ==========================================================
+# 📦 16B. EXPORTAR INVENTARIO REAL A CSV
+# Antes solo existía la plantilla en blanco — no había forma de sacar el
+# inventario YA CARGADO para respaldarlo o editarlo en bloque. Usa las
+# mismas columnas que la plantilla/importación (mismo giro), para que el
+# ciclo exportar → editar en Excel → reimportar funcione sin fricción.
+# ==========================================================
+# Traduce cada columna del CSV al nombre real de la columna en la tabla —
+# espejo de COLUMNAS_OFICIALES en dashboard_main.gd, pero en la dirección
+# inversa (de cara afuera hacia adentro de la base).
+_MAPA_CSV_A_CAMPO_REAL = {
+    "plataforma": "categoria", "categoria": "categoria",
+    "tipo_producto": "tipo_producto",
+    "genero": "genero",
+    "estado_general": "estado_general",
+    "descripcion_detallada": "descripcion_detallada", "descripcion": "descripcion_detallada",
+    "precio_compra": "costo",
+    "precio_venta": "precio",
+    "cantidad": "stock",
+    "codigo_barras": "codigo_barras",
+    "precio_min_inmediato": "precio_min_inmediato",
+    "precio_min_24h": "precio_min_24h",
+    "precio_min_72h": "precio_min_72h",
+}
+
+@router.get("/api/exportar_inventario")
+async def exportar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    from fastapi.responses import Response
+    import csv, io as io_csv
+    logger.info(f"📦 [TRACE:{trace_id}] Exportando inventario real para {_sesion}")
+    try:
+        res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        giro_crudo = res_conf.data[0].get('giro') if res_conf.data else None
+        giro = str(giro_crudo or '').lower()
+        es_videojuegos = "videojueg" in giro or giro == ""
+        columnas = COLUMNAS_CSV_VIDEOJUEGOS if es_videojuegos else COLUMNAS_CSV_GENERICO
+
+        res = await asyncio.wait_for(async_db_execute(supabase.table('inventario').select('*').eq('vendedor_id', str(_sesion)).order('nombre').limit(5000)), timeout=15.0)
+        items = res.data or []
+
+        buffer = io_csv.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columnas)
+        for item in items:
+            fila = []
+            for col in columnas:
+                if col == "nombre":
+                    fila.append(str(item.get("nombre", "") or ""))
+                    continue
+                campo_real = _MAPA_CSV_A_CAMPO_REAL.get(col, col)
+                valor = item.get(campo_real)
+                fila.append("" if valor is None else str(valor))
+            writer.writerow(fila)
+        contenido = buffer.getvalue()
+
+        logger.info(f"✅ [TRACE:{trace_id}] Exportados {len(items)} productos para {_sesion}.")
+        return Response(
+            content=contenido,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=Mi_Inventario_Veltrix.csv"}
+        )
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo exportando inventario CSV: {e}")
+        raise HTTPException(status_code=500, detail="Error al exportar el inventario.")
+
 class ImportarInventarioRequest(BaseModel):
     vendedor_id: str = ""
     inventario: List[dict] = Field(default_factory=list)
@@ -1663,6 +1728,7 @@ def _safe_float_opcional(valor) -> Optional[float]:
 
 @router.post("/api/importar_inventario")
 async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    from rapidfuzz import process, fuzz
     logger.info(f"📄 [TRACE:{trace_id}] Importando {len(datos.inventario)} artículos para {_sesion}")
     try:
         if not datos.inventario:
@@ -1670,13 +1736,50 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         if len(datos.inventario) > 1000:
             raise HTTPException(status_code=413, detail="Demasiados artículos en un solo lote (máximo 1000).")
 
+        # 🆕 BLINDAJE COMPLETO DE IMPORTACIÓN MASIVA — antes esta ruta no tenía
+        # NINGUNA de las protecciones que ya tiene el Alta manual del Visor:
+        # ni capitalización, ni detección de posibles duplicados, y desde que
+        # codigo_barras es único (esta sesión), UN solo código repetido tumbaba
+        # el lote COMPLETO sin decir cuál era el problemático. Se carga el
+        # inventario existente una sola vez para comparar contra él.
+        vid_str = str(_sesion)
+        res_existente = await asyncio.wait_for(
+            async_db_execute(supabase.table('inventario').select('nombre, codigo_barras').eq('vendedor_id', vid_str)),
+            timeout=15.0
+        )
+        nombres_existentes = [str(r.get('nombre', '')) for r in (res_existente.data or []) if r.get('nombre')]
+        codigos_existentes = {str(r['codigo_barras']).strip() for r in (res_existente.data or []) if r.get('codigo_barras')}
+
         filas_finales = []
-        for item in datos.inventario:
-            nombre = bleach.clean(str(item.get("nombre", "")).strip(), tags=[], strip=True)[:200]
+        advertencias_similares = []      # posibles duplicados por nombre parecido — NO bloquea, solo se reporta
+        omitidos_codigo_duplicado = []    # código de barras repetido (en BD o dentro del mismo CSV) — SÍ se omite, porque insertarlo tronaría el lote completo
+        codigos_vistos_en_lote = set()
+
+        for idx, item in enumerate(datos.inventario):
+            fila_num = idx + 2  # +2: fila 1 es la cabecera del CSV, así el número coincide con lo que el usuario ve en Excel/Sheets
+            # 🆕 Capitalización — mismo criterio que el Alta manual del Visor,
+            # para que "siren" importado por CSV y "Siren" capturado a mano no
+            # se vuelvan productos distintos por la diferencia de mayúsculas.
+            nombre = bleach.clean(str(item.get("nombre", "")).strip(), tags=[], strip=True)[:200].title()
             if not nombre:
                 continue
+
+            codigo = bleach.clean(str(item.get("codigo_barras", "")).strip(), tags=[], strip=True)[:100] or None
+            if codigo:
+                if codigo in codigos_existentes or codigo in codigos_vistos_en_lote:
+                    omitidos_codigo_duplicado.append({"fila": fila_num, "nombre": nombre, "codigo_barras": codigo})
+                    continue  # esta fila específica se omite — el resto del lote sigue su curso normal
+                codigos_vistos_en_lote.add(codigo)
+
+            # 🆕 Mismo umbral y librería (rapidfuzz) que ya usa el RAG del bot
+            # — no bloquea la importación, solo se reporta para revisión.
+            if nombres_existentes:
+                match = process.extractOne(nombre, nombres_existentes, scorer=fuzz.WRatio)
+                if match and match[1] >= 80 and match[0].lower() != nombre.lower():
+                    advertencias_similares.append({"fila": fila_num, "nombre_importado": nombre, "parecido_a_existente": match[0], "similitud": round(match[1], 1)})
+
             filas_finales.append({
-                "vendedor_id": str(_sesion),
+                "vendedor_id": vid_str,
                 "nombre": nombre,
                 "categoria": bleach.clean(str(item.get("categoria", "")).strip(), tags=[], strip=True)[:100] or "General",
                 "tipo_producto": bleach.clean(str(item.get("tipo_producto", "")).strip(), tags=[], strip=True)[:100] or None,
@@ -1686,7 +1789,7 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
                 "precio": _safe_float_importacion(item.get("precio")),
                 "costo": _safe_float_importacion(item.get("costo")),
                 "stock": max(0, int(_safe_float_importacion(item.get("stock")))),
-                "codigo_barras": bleach.clean(str(item.get("codigo_barras", "")).strip(), tags=[], strip=True)[:100] or None,
+                "codigo_barras": codigo,
                 "precio_min_inmediato": _safe_float_opcional(item.get("precio_min_inmediato")),
                 "precio_min_24h": _safe_float_opcional(item.get("precio_min_24h")),
                 "precio_min_72h": _safe_float_opcional(item.get("precio_min_72h")),
@@ -1694,14 +1797,20 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
             })
 
         if not filas_finales:
-            raise HTTPException(status_code=400, detail="Ningún artículo tenía nombre válido.")
+            raise HTTPException(status_code=400, detail="Ningún artículo tenía nombre válido, o todos chocaban por código de barras duplicado.")
 
         # FIX FASE 1: allow_retry=False por inserción masiva (INSERT)
         resultado = await asyncio.wait_for(
             async_db_execute(supabase.table('inventario').insert(filas_finales), allow_retry=False),
             timeout=20.0
         )
-        return {"status": "ok", "insertados": len(resultado.data) if resultado.data else len(filas_finales)}
+        logger.info(f"✅ [TRACE:{trace_id}] Importación completa: {len(filas_finales)} insertados, {len(omitidos_codigo_duplicado)} omitidos por código duplicado, {len(advertencias_similares)} posibles duplicados por nombre.")
+        return {
+            "status": "ok",
+            "insertados": len(resultado.data) if resultado.data else len(filas_finales),
+            "omitidos_codigo_barras_duplicado": omitidos_codigo_duplicado,
+            "advertencias_posibles_duplicados": advertencias_similares,
+        }
     except HTTPException: raise
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en importar_inventario: {e}")
