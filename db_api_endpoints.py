@@ -21,9 +21,10 @@ from config_and_schemas import (
     JWT_SECRET, DUMMY_HASH, pwd_context, LoginUpdate, LeadAction, EstadoUpdate,
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
-    ColumnaAction, RenombrarColumnaAction, BorrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD
+    ColumnaAction, RenombrarColumnaAction, BorrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD,
+    RAWG_API_KEY
 )
-from ai_security_utils import verificar_sesion_b2b
+from ai_security_utils import verificar_sesion_b2b, get_http_client
 from db_core_wrapper import async_db_execute, supabase
 from db_chat import guardar_mensaje_chat, obtener_historial_chat
 from db_crm_logic import actualizar_estado_crm
@@ -1520,6 +1521,54 @@ async def buscar_maestro(q: str, _sesion: str = Depends(verificar_sesion_b2b), t
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en buscar_maestro: {e}")
         raise HTTPException(status_code=500, detail="Error al buscar en el catálogo maestro.")
+
+# ==========================================================
+# 🔍 16B-2. PROXY DE BÚSQUEDA RAWG (portadas de videojuegos)
+# 🛡️ FIX SEGURIDAD: la API key de RAWG vivía hardcodeada directo en
+# PanelVideojuegos.gd — cualquiera que descompilara el ejecutable de
+# Veltrix PC podía extraerla y usarla por su cuenta (agotando la cuota, o
+# arriesgando que RAWG la bloquee para todos los clientes de videojuegos
+# a la vez). Ahora Godot le pide esto a esta ruta, y la key vive solo
+# aquí, como variable de entorno — nunca sale al cliente.
+# ==========================================================
+@router.get("/api/buscar_rawg")
+async def buscar_rawg(q: str, platforms: str = "", _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🌐 [TRACE:{trace_id}] Buscando portada en RAWG: '{q}' (platforms={platforms})")
+    if not RAWG_API_KEY:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] RAWG_API_KEY no configurada — se regresa lista vacía sin tronar.")
+        return {"status": "ok", "results": []}
+    try:
+        termino = limpiar_texto(q)[:150]
+        if len(termino) < 2:
+            return {"status": "ok", "results": []}
+        # Solo números y comas — son IDs de plataforma de RAWG, nunca texto libre.
+        plataformas_limpias = re.sub(r"[^0-9,]", "", str(platforms))[:50]
+
+        cliente = get_http_client()
+        params = {"key": RAWG_API_KEY, "search": termino, "page_size": 10}
+        if plataformas_limpias:
+            params["platforms"] = plataformas_limpias
+
+        resp = await asyncio.wait_for(cliente.get("https://api.rawg.io/api/games", params=params), timeout=10.0)
+        if resp.status_code != 200:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] RAWG respondió código {resp.status_code} — se regresa lista vacía.")
+            return {"status": "ok", "results": []}
+
+        data = resp.json()
+        # Solo se exponen los dos campos que el cliente realmente usa — no se
+        # reenvía la respuesta completa de RAWG (ratings, metacritic, etc. no
+        # hacen falta y solo aumentan el tamaño de la respuesta sin razón).
+        resultados = [
+            {"name": str(r.get("name", "")), "background_image": str(r.get("background_image", "") or "")}
+            for r in (data.get("results") or [])[:10]
+        ]
+        return {"status": "ok", "results": resultados}
+    except asyncio.TimeoutError:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] RAWG tardó demasiado — se regresa lista vacía.")
+        return {"status": "ok", "results": []}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo consultando RAWG: {e}")
+        return {"status": "ok", "results": []}
 
 # ==========================================================
 # 💰 16C. MÉTRICAS FINANCIERAS (panel de finanzas en tiempo real)
