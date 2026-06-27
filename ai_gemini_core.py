@@ -1129,6 +1129,48 @@ async def analizar_intencion_venta_ia(
         # usuarios_veltrix.giro_comercial -> "giro"), usamos algo neutral en vez
         # de sesgar el prompt hacia un giro específico.
         giro         = str(config_dict.get("giro",           "productos y servicios"))
+        # 🔧 FIX MULTIGIRO (continuación): el prompt YA le decía a Gemini el
+        # giro real del negocio ({giro}, abajo), pero el ESQUEMA de salida
+        # seguía forzando categorías de videojuegos sin importar el giro
+        # ("consola|juego|accesorio|otro", "consolas_favoritas") — el modelo
+        # sabía que hablaba con, por ejemplo, una tienda de ropa, pero estaba
+        # obligado a clasificar cada conversación como si fuera de
+        # videojuegos. Se usa esta bandera para condicionar esas partes.
+        es_videojuegos_giro = "videojueg" in giro.lower()
+        if es_videojuegos_giro:
+            _titulo_2b = "CONSOLA Y VARIANTES DE CONDICIÓN"
+            _bloque_2b_variantes = """- Si el cliente menciona una consola específica (ej. "Batman para PS2") y en el
+     [RAG] solo aparece ese título para OTRA consola (ej. PS4), NUNCA lo ofrezcas
+     como si fuera lo que pidió. Acláralo explícitamente: dile que en la consola que
+     mencionó no lo tienes, pero si tienes esa versión en otra consola, pregunta si
+     le interesa esa en vez de asumirlo — el cliente puede no tener esa consola.
+   - Si el [RAG] muestra el MISMO título en varias consolas a la vez (ej. PS2, PS3 y
+     PS4), pregunta cuál consola tiene antes de dar precio, en vez de elegir una al
+     azar."""
+        else:
+            _titulo_2b = "VARIANTES Y CONDICIÓN"
+            _bloque_2b_variantes = """- Si el cliente menciona una variante específica (talla, color, modelo, etc.) y en
+     el [RAG] solo aparece ese producto en OTRA variante, NUNCA lo ofrezcas como si
+     fuera lo que pidió. Acláralo explícitamente: dile que en esa variante no lo
+     tienes, pero si tienes otra variante, pregunta si le interesa esa en vez de
+     asumirlo — el cliente puede no querer esa otra variante.
+   - Si el [RAG] muestra el MISMO producto en varias variantes a la vez, pregunta
+     cuál variante quiere antes de dar precio, en vez de elegir una al azar."""
+        # 🔧 FIX MULTIGIRO: este enum forzaba a Gemini a clasificar TODA
+        # conversación como "consola|juego|accesorio|otro" sin importar el
+        # giro real (ya informado más arriba en el prompt como {giro}).
+        _categoria_enum = "consola|juego|accesorio|otro" if es_videojuegos_giro else "producto|servicio|accesorio|otro"
+        # 🔧 FIX MULTIGIRO: "consolas_favoritas"/"generos" en perfil_actualizado
+        # se dejan tal cual (no se renombran — otros componentes podrían leer
+        # esos nombres exactos), pero se le aclara a Gemini qué hacer con
+        # ellos cuando el giro no es de videojuegos, en vez de forzarlo a
+        # intentar extraer "consolas favoritas" de un cliente de, por
+        # ejemplo, una tienda de ropa.
+        _nota_perfil = "" if es_videojuegos_giro else (
+            '\nNOTA: el giro de este negocio NO es videojuegos — "consolas_favoritas" '
+            'no aplica, déjalo siempre como []. Usa "generos" de forma más amplia, '
+            'para categorías o tipos de producto que el cliente muestre interés en.'
+        )
         meta_venta   = safe_float(config_dict.get("meta_venta",   0.0))
         permitir_desc= safe_bool(config_dict.get("permitir_desc", True), default=True)
         desc_max     = safe_float(config_dict.get("desc_max",     0.0))
@@ -1373,15 +1415,8 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
    campo "Género" de los productos del [RAG] para responder solo con los que de
    verdad coincidan — no ofrezcas algo de otro género solo por mencionarlo primero.
 
-2B. CONSOLA Y VARIANTES DE CONDICIÓN (videojuegos y similares)
-   - Si el cliente menciona una consola específica (ej. "Batman para PS2") y en el
-     [RAG] solo aparece ese título para OTRA consola (ej. PS4), NUNCA lo ofrezcas
-     como si fuera lo que pidió. Acláralo explícitamente: dile que en la consola que
-     mencionó no lo tienes, pero si tienes esa versión en otra consola, pregunta si
-     le interesa esa en vez de asumirlo — el cliente puede no tener esa consola.
-   - Si el [RAG] muestra el MISMO título en varias consolas a la vez (ej. PS2, PS3 y
-     PS4), pregunta cuál consola tiene antes de dar precio, en vez de elegir una al
-     azar.
+2B. {_titulo_2b}
+   {_bloque_2b_variantes}
    - Si el [RAG] muestra el MISMO título en varias condiciones/precios (ej. "sin
      librito" a $350, "completo" a $600, "nuevo" a $1900), menciona las opciones
      relevantes con su precio y condición — no te quedes solo con una si el cliente
@@ -1428,14 +1463,14 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
 [FORMATO JSON OBLIGATORIO — sin texto fuera del JSON]
 IMPORTANTE: dentro de "respuesta", nunca uses comillas dobles ("). Si quieres resaltar el
 nombre de un producto, hazlo sin comillas o con *un solo asterisco* — las comillas dobles
-dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.
+dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.{_nota_perfil}
 {{
   "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO|INTERES_VELTRIX",
   "respuesta":          "Texto natural hacia el cliente",
   "emocion_cliente":    "neutral|feliz|frustrado|ansioso|dudoso",
   "temperatura_lead":   "frio|tibio|caliente",
   "producto_detectado": "nombre exacto del RAG o vacío",
-  "categoria_preferida":"consola|juego|accesorio|otro",
+  "categoria_preferida":"{_categoria_enum}",
   "lead_score":         {lead_score},
   "probabilidad_cierre":0.8,
   "estrategia_venta":   "{estrategia}",
