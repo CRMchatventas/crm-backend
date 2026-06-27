@@ -934,6 +934,75 @@ async def send_mobile_media(data: MobileMediaRequest, _sesion: str = Depends(ver
     await guardar_mensaje_chat(tel_norm, str(_sesion), 'ASESOR', "[Imagen enviada desde Mobile]")
     return {"status": "ok"}
 
+# ==========================================================
+# 📷 11C. FOTO DE PRODUCTO (MANUAL — CUALQUIER GIRO)
+# Antes la ÚNICA forma de poner url_portada era el flujo de RAWG en
+# PanelVideojuegos (búsqueda automática de portadas de videojuegos) — sin
+# equivalente para ningún otro giro. Esta ruta permite subir una foto
+# directo desde el Visor y asociarla al producto, sin importar el giro.
+# Reusa la misma validación/redimensión de imagen que /api/mobile/send_media,
+# pero sin disparar nada por WhatsApp — solo sube y guarda la URL.
+# ==========================================================
+class SubirFotoProductoRequest(BaseModel):
+    item_id: int
+    image_base64: str = Field(min_length=1)
+
+@router.post("/api/subir_foto_producto")
+async def subir_foto_producto(data: SubirFotoProductoRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    import base64, io
+    from PIL import Image
+
+    logger.info(f"📷 [TRACE:{trace_id}] Subiendo foto manual para producto {data.item_id} de {_sesion}")
+
+    # 🛡️ Se valida que el producto exista Y pertenezca a este tenant ANTES
+    # de subir nada a Storage — evita gastar el upload si el item_id es
+    # inválido o de otro vendedor.
+    res_check = await asyncio.wait_for(async_db_execute(supabase.table('inventario').select('id').eq('id', data.item_id).eq('vendedor_id', str(_sesion)).limit(1)), timeout=10.0)
+    if not res_check.data:
+        raise HTTPException(status_code=404, detail="Producto no encontrado o no pertenece a tu cuenta.")
+
+    try:
+        img_bytes = base64.b64decode(data.image_base64, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Imagen en base64 inválida.")
+    if len(img_bytes) < 32 or len(img_bytes) > 8_000_000:
+        raise HTTPException(status_code=413, detail="Imagen vacía o demasiado grande.")
+
+    try:
+        img_verificar = Image.open(io.BytesIO(img_bytes))
+        img_verificar.verify()
+        img = Image.open(io.BytesIO(img_bytes))
+        img.load()
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buffer_salida = io.BytesIO()
+        img.save(buffer_salida, format="JPEG", quality=80)
+        bytes_finales = buffer_salida.getvalue()
+    except Exception as e:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen de producto corrupta o ilegible: {e}")
+        raise HTTPException(status_code=400, detail="La imagen está corrupta o no se pudo procesar.")
+
+    try:
+        nombre_archivo = f"portadas/producto_{_sesion}_{data.item_id}_{int(now_ts())}.jpg"
+        def _upload():
+            return supabase.storage.from_("inventario_media").upload(
+                nombre_archivo, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
+            )
+        await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
+        url_publica = supabase.storage.from_("inventario_media").get_public_url(nombre_archivo)
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo foto de producto a Storage: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar la imagen.")
+
+    try:
+        await asyncio.wait_for(async_db_execute(supabase.table('inventario').update({'url_portada': url_publica}).eq('id', data.item_id).eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=10.0)
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Foto subida pero no se pudo asociar al producto: {e}")
+        raise HTTPException(status_code=500, detail="La imagen se subió pero no se pudo guardar en el producto. Intenta de nuevo.")
+
+    logger.info(f"✅ [TRACE:{trace_id}] Foto de producto {data.item_id} actualizada con éxito.")
+    return {"status": "ok", "url_portada": url_publica}
+
 @router.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.info(f"🎮 [TRACE:{trace_id}] Compilando Dashboard Móvil para {vendedor_id}")
@@ -1293,7 +1362,14 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
 async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.info(f"📦 [TRACE:{trace_id}] Cargando inventario para {vendedor_id}")
     try:
-        res = await asyncio.wait_for(async_db_execute(supabase.table("inventario").select("*").eq("vendedor_id", str(vendedor_id)).order("nombre").limit(500)), timeout=12.0)
+        # 🛡️ FIX: estaba en .limit(500) — un cliente con más productos que
+        # eso JAMÁS vería el resto en el Visor (ni en la lista, ni en la
+        # detección de duplicados, ni en las listas dinámicas de Tipo/
+        # Consola/Género), sin ningún aviso de que faltaban. Se sube a 5000
+        # (~5MB de respuesta con todos los campos nuevos, dentro del límite
+        # que ya valida el cliente Godot). Si algún cliente llega a superar
+        # esto, lo correcto es paginación real, no subir el número otra vez.
+        res = await asyncio.wait_for(async_db_execute(supabase.table("inventario").select("*").eq("vendedor_id", str(vendedor_id)).order("nombre").limit(5000)), timeout=12.0)
         items = res.data or []
         # Si algún ítem trae datos extra anidados (ej. de importación CSV), los exponemos también en el nivel
         # superior sin pisar columnas reales.
