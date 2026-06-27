@@ -1309,7 +1309,9 @@ async def analizar_intencion_venta_ia(
 
 
                 # 🆕 Bloque SIEMPRE activo: interés explícito en Veltrix Engine (distinto del
-                # bloque suave de abajo, que solo aplica al cerrar una venta de videojuegos).
+                # bloque suave de abajo — "PROMOCIÓN DE VELTRIX" — que es opcional, con tope
+                # diario, y NO tiene ninguna restricción de giro a pesar de lo que decía este
+                # comentario antes; aplica igual para cualquier tipo de negocio).
                 # Aquí el cliente preguntó directamente por el chatbot — se responde de
                 # inmediato, sin esperar a un humano y sin el límite diario.
                 _bloque_interes_veltrix = """
@@ -1377,7 +1379,7 @@ Eres Veltrix, asesor experto de {negocio} (giro: {giro}).
 TONO: {tono}.
 ESTILO DE VOZ: expresa esa personalidad con un toque más profesional, nunca acartonado
 ni robótico. Evita repetir la misma frase de apertura en cada mensaje (ej. no abras
-siempre con "¡Qué onda, gamer!" o equivalentes) — varía el saludo, y si ya llevan
+siempre con "¡Hola! ¿En qué te puedo ayudar?" o equivalentes) — varía el saludo, y si ya llevan
 varios mensajes de conversación, ni falta hace saludar de nuevo. No abuses de los
 signos de exclamación: úsalos donde de verdad aporten energía, no en cada frase.
 Evita frases exageradas tipo "te va a volar la cabeza" — transmite el mismo
