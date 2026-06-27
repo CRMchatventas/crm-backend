@@ -512,6 +512,13 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
             # plantilla CSV en modo videojuegos — inconsistente.
             giro_str = str(giro_crudo or '').lower().strip()
             giro_final = giro_str if giro_str != "" else "videojuegos"
+            if giro_str == "":
+                # 🆕 Aviso visible — si un cliente nunca tuvo su giro
+                # configurado, esto se cae a "videojuegos" por compatibilidad
+                # silenciosa, pero conviene que quede una pista clara en los
+                # logs en vez de que nadie se entere hasta que el cliente
+                # se queje de ver términos de videojuegos sin venir al caso.
+                logger.warning(f"⚠️ [TRACE:{trace_id}] El tenant {vendedor_id} no tiene 'giro' configurado en configuracion_bot — usando 'videojuegos' por default. Si NO es un cliente de videojuegos, hace falta configurarlo.")
         except Exception as e:
             logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo obtener el giro al hacer login (no bloqueante): {e}")
         ahora = datetime.now(timezone.utc)
