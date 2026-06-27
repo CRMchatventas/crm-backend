@@ -1660,6 +1660,126 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         raise HTTPException(status_code=500, detail="Error al cargar la tienda.")
 
 # ==========================================================
+# 🛒 16C-2. "VELTRIX STORE" COMUNITARIO — marketplace entre vendedores
+# En vez de una vitrina aislada por cliente, el comprador elige un GIRO,
+# y puede buscar por nombre (viendo resultados de TODOS los vendedores
+# de ese giro, con ciudad/estado y WhatsApp de cada uno para decidir por
+# cercanía/precio) o elegir un vendedor específico para ver su catálogo
+# completo. Mismas protecciones de datos que la tienda individual: nunca
+# costo, código de barras, ni stock exacto.
+# ==========================================================
+def _es_mismo_giro(giro_a: str, giro_b_buscado_es_videojuegos: bool) -> bool:
+    g = str(giro_a or '').lower()
+    return ("videojueg" in g or g == "") == giro_b_buscado_es_videojuegos
+
+async def _vendedores_activos_por_giro(giro_buscado: str) -> list:
+    """Regresa [{vendedor_id, nombre, ciudad, estado_ubicacion}] de cuentas activas que comparten el mismo giro (videojuegos vs. cualquier otro, igual que en el resto del sistema)."""
+    es_vj_buscado = "videojueg" in giro_buscado.lower() or giro_buscado.strip() == ""
+    res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
+    ids_match = [r['vendedor_id'] for r in (res_giros.data or []) if _es_mismo_giro(r.get('giro'), es_vj_buscado)]
+    if not ids_match:
+        return []
+    res_neg = await asyncio.wait_for(
+        async_db_execute(supabase.table('usuarios_veltrix').select('vendedor_id, nombre_contacto, ciudad, estado_ubicacion, estado').in_('vendedor_id', ids_match)),
+        timeout=10.0
+    )
+    return [
+        {"vendedor_id": r['vendedor_id'], "nombre": str(r.get('nombre_contacto', '') or 'Tienda'), "ciudad": str(r.get('ciudad', '') or ''), "estado_ubicacion": str(r.get('estado_ubicacion', '') or '')}
+        for r in (res_neg.data or []) if r.get('estado') == 'activo'
+    ]
+
+@router.get("/api/store/giros")
+async def store_giros(trace_id: str = Depends(obtener_trace_id)):
+    """Lista de giros que de verdad tienen al menos un vendedor activo — para llenar el selector de categorías."""
+    try:
+        res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
+        res_activos = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('vendedor_id').eq('estado', 'activo')), timeout=10.0)
+        ids_activos = {r['vendedor_id'] for r in (res_activos.data or [])}
+        giros_vistos = set()
+        for r in (res_giros.data or []):
+            if r['vendedor_id'] not in ids_activos: continue
+            g = str(r.get('giro') or '').lower().strip()
+            giros_vistos.add('videojuegos' if ('videojueg' in g or g == '') else g)
+        return {"status": "ok", "giros": sorted(giros_vistos)}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en store_giros: {e}")
+        return {"status": "ok", "giros": []}
+
+@router.get("/api/store/vendedores")
+async def store_vendedores(giro: str, trace_id: str = Depends(obtener_trace_id)):
+    """Lista de vendedores activos de un giro — para el selector de 'o elige un vendedor directamente'."""
+    try:
+        return {"status": "ok", "vendedores": await _vendedores_activos_por_giro(giro)}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en store_vendedores: {e}")
+        return {"status": "ok", "vendedores": []}
+
+_RATE_LIMIT_STORE_BUSQUEDA = TTLCache(maxsize=5000, ttl=60)
+
+@router.get("/api/store/buscar")
+async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depends(obtener_trace_id)):
+    """Búsqueda cruzada entre TODOS los vendedores activos de un giro — el corazón del marketplace comunitario."""
+    ip_cliente = request.client.host if request.client else "desconocido"
+    conteo_actual = _RATE_LIMIT_STORE_BUSQUEDA.get(ip_cliente, 0)
+    if conteo_actual > 60:
+        raise HTTPException(status_code=429, detail="Demasiadas búsquedas. Intenta de nuevo en un momento.")
+    _RATE_LIMIT_STORE_BUSQUEDA[ip_cliente] = conteo_actual + 1
+
+    termino = limpiar_texto(q)[:100].strip()
+    if len(termino) < 2:
+        return {"status": "ok", "resultados": []}
+    try:
+        vendedores = await _vendedores_activos_por_giro(giro)
+        if not vendedores:
+            return {"status": "ok", "resultados": []}
+        mapa_vendedores = {v['vendedor_id']: v for v in vendedores}
+
+        res_inv = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('inventario')
+                .select('id, vendedor_id, nombre, categoria, tipo_producto, genero, estado_general, precio, precio_min_inmediato, url_portada, stock')
+                .in_('vendedor_id', list(mapa_vendedores.keys()))
+                .gt('stock', 0)
+                .ilike('nombre', f'%{termino}%')
+                .limit(100)
+            ),
+            timeout=15.0
+        )
+
+        # También se necesita el teléfono de cada vendedor para el enlace de WhatsApp.
+        res_tel = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, admin_phone').in_('vendedor_id', list(mapa_vendedores.keys()))),
+            timeout=10.0
+        )
+        telefonos = {r['vendedor_id']: str(r.get('admin_phone', '') or '') for r in (res_tel.data or [])}
+
+        resultados = []
+        for item in (res_inv.data or []):
+            vid = item.get('vendedor_id')
+            v = mapa_vendedores.get(vid, {})
+            precio = float(item.get('precio') or 0)
+            precio_especial = item.get('precio_min_inmediato')
+            tiene_oferta = precio_especial is not None and float(precio_especial) > 0 and float(precio_especial) < precio
+            resultados.append({
+                "nombre": str(item.get('nombre', '')),
+                "categoria": str(item.get('categoria', '') or ''),
+                "genero": str(item.get('genero', '') or ''),
+                "estado": str(item.get('estado_general', '') or ''),
+                "precio": precio,
+                "precio_especial": float(precio_especial) if tiene_oferta else None,
+                "foto": str(item.get('url_portada', '') or ''),
+                "vendedor_id": vid,
+                "vendedor_nombre": v.get('nombre', 'Tienda'),
+                "vendedor_ciudad": v.get('ciudad', ''),
+                "vendedor_estado": v.get('estado_ubicacion', ''),
+                "vendedor_whatsapp": telefonos.get(vid, ''),
+            })
+        return {"status": "ok", "resultados": resultados}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en store_buscar: {e}")
+        return {"status": "ok", "resultados": []}
+
+# ==========================================================
 # 💰 16C. MÉTRICAS FINANCIERAS (panel de finanzas en tiempo real)
 # Tampoco existía — el botón de "Finanzas" en dashboard_main.gd siempre
 # mostraba "Error al conectar con Finanzas".
