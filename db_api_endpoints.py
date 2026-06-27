@@ -1356,6 +1356,7 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
             )
             return {"status": "ok", "accion": "actualizado", "id": existente['id']}
         else:
+            await _verificar_cupo_inventario(str(_sesion), 1, trace_id)
             campos["vendedor_id"] = str(_sesion)
             resultado = await asyncio.wait_for(
                 async_db_execute(supabase.table('inventario').insert(campos), allow_retry=False),
@@ -1621,11 +1622,38 @@ COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_c
 EJEMPLO_CSV_VIDEOJUEGOS = ["", "Batman Arkham Knight", "Videojuegos", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
 EJEMPLO_CSV_GENERICO = ["", "Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
+INSTRUCCIONES_CSV_VIDEOJUEGOS = [
+    "DÉJALO VACÍO si es alta nueva. Con un número = actualiza ESE producto (viene de exportar tu inventario)",
+    "Nombre del producto — OBLIGATORIO",
+    "Tipo: Videojuegos, Accesorios, Reparaciones, etc. — tú decides las categorías de tu negocio",
+    "Plataforma: PS5, PS4, Xbox, Switch, etc.",
+    "Género: Acción, Aventura, RPG, Deportes, etc.",
+    "Estado físico: Nuevo/Sellado, Completo CIB, Solo Disco, etc.",
+    "Notas o defectos visibles — texto libre, ej. 'rayón leve en el disco'",
+    "Costo de compra — número, sin signo de pesos",
+    "Precio de venta — OBLIGATORIO, número mayor a cero",
+    "Cantidad en stock — número entero. CERO está bien (queda guardado pero oculto hasta que le pongas stock)",
+    "Código de barras si tiene uno — déjalo vacío si no",
+    "Precio mínimo autorizado de inmediato — opcional, déjalo vacío si no aplica",
+    "Precio mínimo autorizado a 24h — opcional",
+    "Precio mínimo autorizado a 72h — opcional",
+]
+INSTRUCCIONES_CSV_GENERICO = [
+    "DÉJALO VACÍO si es alta nueva. Con un número = actualiza ESE producto (viene de exportar tu inventario)",
+    "Nombre del producto — OBLIGATORIO",
+    "Tipo: tú decides las categorías de tu negocio (ej. Ropa, Accesorios, Servicios)",
+    "Categoría / variante (ej. talla, color, modelo) — texto libre",
+    "Costo de compra — número, sin signo de pesos",
+    "Precio de venta — OBLIGATORIO, número mayor a cero",
+    "Cantidad en stock — número entero. CERO está bien (queda guardado pero oculto hasta que le pongas stock)",
+    "Descripción breve — texto libre",
+]
+
 @router.get("/api/descargar_plantilla")
-async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+async def descargar_plantilla(prellenada: bool = False, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     from fastapi.responses import Response
     import csv, io as io_csv
-    logger.info(f"📄 [TRACE:{trace_id}] Generando plantilla CSV de inventario para {_sesion}")
+    logger.info(f"📄 [TRACE:{trace_id}] Generando plantilla CSV de inventario para {_sesion} (prellenada={prellenada})")
     try:
         res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
         # 🛡️ FIX: si 'giro' existe en la fila pero su valor es NULL, .get('giro', '')
@@ -1637,18 +1665,68 @@ async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trac
 
         es_videojuegos = "videojueg" in giro or giro == ""  # default a videojuegos si no hay giro configurado aún
         columnas = COLUMNAS_CSV_VIDEOJUEGOS if es_videojuegos else COLUMNAS_CSV_GENERICO
-        ejemplo = EJEMPLO_CSV_VIDEOJUEGOS if es_videojuegos else EJEMPLO_CSV_GENERICO
+        instrucciones = INSTRUCCIONES_CSV_VIDEOJUEGOS if es_videojuegos else INSTRUCCIONES_CSV_GENERICO
+        filas_datos = [EJEMPLO_CSV_VIDEOJUEGOS if es_videojuegos else EJEMPLO_CSV_GENERICO]
+
+        # 🆕 PLANTILLA PRELLENADA — en vez de tabla propia de "catálogo
+        # maestro" (que existe pero es 100% específica de videojuegos), se
+        # usa el inventario REAL de otros tenants del MISMO giro como fuente
+        # del catálogo compartido. Crece solo: en el momento que cualquier
+        # tenant guarda un producto nuevo, ya está disponible aquí para los
+        # demás — no hace falta ningún paso de "anexar" por separado.
+        # 🛡️ Privacidad: SOLO se comparten nombre/categoría/tipo/género —
+        # nunca precio, stock, costo, código de barras ni notas de otro
+        # tenant. Todo eso es información competitiva/privada de cada quien.
+        if prellenada:
+            res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
+            vendedores_mismo_giro = []
+            for r in (res_giros.data or []):
+                g = str(r.get('giro') or '').lower()
+                es_vj_otro = "videojueg" in g or g == ""
+                if es_vj_otro == es_videojuegos:
+                    vendedores_mismo_giro.append(r['vendedor_id'])
+
+            if vendedores_mismo_giro:
+                res_catalogo = await asyncio.wait_for(
+                    async_db_execute(supabase.table('inventario').select('nombre, categoria, tipo_producto, genero, estado_general').in_('vendedor_id', vendedores_mismo_giro).limit(5000)),
+                    timeout=20.0
+                )
+                vistos = set()
+                filas_catalogo = []
+                for item in (res_catalogo.data or []):
+                    nombre_c = str(item.get('nombre', '')).strip()
+                    cat_c = str(item.get('categoria', '') or '').strip()
+                    if not nombre_c: continue
+                    llave = (nombre_c.lower(), cat_c.lower())
+                    if llave in vistos: continue
+                    vistos.add(llave)
+                    if es_videojuegos:
+                        filas_catalogo.append(["", nombre_c, str(item.get('tipo_producto', '') or ''), cat_c, str(item.get('genero', '') or ''), str(item.get('estado_general', '') or ''), "", "0", "0", "0", "", "", "", ""])
+                    else:
+                        filas_catalogo.append(["", nombre_c, str(item.get('tipo_producto', '') or ''), cat_c, "0", "0", "0", ""])
+                if filas_catalogo:
+                    filas_datos = filas_catalogo
+                    logger.info(f"✅ [TRACE:{trace_id}] Plantilla prellenada: {len(filas_catalogo)} productos únicos de {len(vendedores_mismo_giro)} tenant(s) del mismo giro.")
+                else:
+                    logger.info(f"ℹ️ [TRACE:{trace_id}] Plantilla prellenada solicitada, pero el catálogo de este giro está vacío todavía — se manda la plantilla normal.")
 
         buffer = io_csv.StringIO()
         writer = csv.writer(buffer)
+        # 🆕 Fila de instrucciones (fila 1), encabezados reales (fila 2), y
+        # datos desde la fila 3. Un CSV no se puede "proteger" como un Excel
+        # real, pero esto deja muy claro qué va en cada columna sin
+        # necesidad de un archivo aparte.
+        writer.writerow(instrucciones)
         writer.writerow(columnas)
-        writer.writerow(ejemplo)
+        for fila in filas_datos:
+            writer.writerow(fila)
         contenido = buffer.getvalue()
 
+        nombre_archivo = "Plantilla_Veltrix_Prellenada.csv" if (prellenada and len(filas_datos) > 1) else "Plantilla_Veltrix_Importar.csv"
         return Response(
             content=contenido,
             media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=Plantilla_Veltrix_Importar.csv"}
+            headers={"Content-Disposition": f"attachment; filename={nombre_archivo}"}
         )
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo generando plantilla CSV: {e}")
@@ -1690,12 +1768,18 @@ async def exportar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trac
         giro = str(giro_crudo or '').lower()
         es_videojuegos = "videojueg" in giro or giro == ""
         columnas = COLUMNAS_CSV_VIDEOJUEGOS if es_videojuegos else COLUMNAS_CSV_GENERICO
+        instrucciones = INSTRUCCIONES_CSV_VIDEOJUEGOS if es_videojuegos else INSTRUCCIONES_CSV_GENERICO
 
         res = await asyncio.wait_for(async_db_execute(supabase.table('inventario').select('*').eq('vendedor_id', str(_sesion)).order('nombre').limit(5000)), timeout=15.0)
         items = res.data or []
 
         buffer = io_csv.StringIO()
         writer = csv.writer(buffer)
+        # 🆕 Misma estructura de 3 filas que la plantilla: instrucciones,
+        # encabezados, datos desde la fila 3 — así un archivo exportado se
+        # puede reimportar directo sin que la fila 1 de instrucciones se
+        # confunda con un producto real.
+        writer.writerow(instrucciones)
         writer.writerow(columnas)
         for item in items:
             fila = []
@@ -1722,6 +1806,36 @@ async def exportar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trac
 class ImportarInventarioRequest(BaseModel):
     vendedor_id: str = ""
     inventario: List[dict] = Field(default_factory=list)
+
+# ==========================================================
+# 🆕 TOPE DE INVENTARIO POR PAQUETE DE PRECIO
+# Sin esto, nada impedía que una cuenta acumulara inventario sin límite —
+# incluyendo abuso intencional (muchas peticiones pequeñas para esquivar
+# el límite por lote) o simplemente un cliente creciendo más allá de lo
+# que paga. El límite se guarda en usuarios_veltrix.limite_inventario
+# (default 1000), pensado para ligarse a los 3 paquetes de precio.
+# ==========================================================
+async def _verificar_cupo_inventario(vendedor_id: str, cuantos_nuevos: int, trace_id: str) -> None:
+    res_limite = await asyncio.wait_for(
+        async_db_execute(supabase.table('usuarios_veltrix').select('limite_inventario').eq('vendedor_id', vendedor_id).limit(1)),
+        timeout=5.0
+    )
+    limite = int(res_limite.data[0].get('limite_inventario') or 1000) if res_limite.data else 1000
+    # Se cuenta con select('id') + len() en vez de count='exact' — más lento
+    # para inventarios enormes, pero garantizado a funcionar sin depender de
+    # un detalle de versión del cliente de Supabase que no se puede probar
+    # en este entorno.
+    res_actuales = await asyncio.wait_for(
+        async_db_execute(supabase.table('inventario').select('id').eq('vendedor_id', vendedor_id)),
+        timeout=10.0
+    )
+    actuales = len(res_actuales.data or [])
+    if actuales + cuantos_nuevos > limite:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Tope de inventario alcanzado para {vendedor_id}: {actuales} actuales + {cuantos_nuevos} nuevos > límite {limite}.")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tu plan permite hasta {limite} productos. Tienes {actuales} y esto agregaría {cuantos_nuevos} más. Elimina productos sin uso, o contacta a soporte para ampliar tu plan."
+        )
 
 def _safe_float_importacion(valor) -> float:
     try:
@@ -1855,6 +1969,10 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         actualizados = 0
 
         if filas_para_insertar:
+            # 🆕 Tope de inventario — se cuenta SOLO lo que se va a INSERTAR
+            # (filas nuevas), no lo que se va a actualizar (eso no crece el
+            # total). Se revisa antes de insertar nada del lote completo.
+            await _verificar_cupo_inventario(vid_str, len(filas_para_insertar), trace_id)
             # FIX FASE 1: allow_retry=False por inserción masiva (INSERT)
             resultado = await asyncio.wait_for(
                 async_db_execute(supabase.table('inventario').insert(filas_para_insertar), allow_retry=False),
