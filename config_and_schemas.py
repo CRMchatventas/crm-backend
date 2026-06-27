@@ -80,6 +80,14 @@ if not WEBHOOK_SECRET:
 META_APP_SECRET: Final = os.getenv("META_APP_SECRET", "").strip()
 if not META_APP_SECRET:
     raise RuntimeError("❌ FATAL: META_APP_SECRET no configurada.")
+
+# 🛡️ FIX SEGURIDAD: esta key vivía hardcodeada en el cliente de Godot
+# (PanelVideojuegos.gd) — cualquiera que descompilara el ejecutable podía
+# extraerla. Ahora vive solo aquí, server-side. No es FATAL si falta —
+# la búsqueda de portadas de RAWG es una función complementaria (no afecta
+# ventas, inventario, ni seguridad de cuentas), así que si falta, esa
+# función específica se desactiva sola en vez de tumbar todo el servidor.
+RAWG_API_KEY: Final = os.getenv("RAWG_API_KEY", "").strip()
 print("[*] Secretos core verificados y cargados con éxito.")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -521,7 +529,7 @@ class PeticionCopy(BaseSchema):
     prompt_interno: str = Field(min_length=1, max_length=5000)
 
 __all__ = [
-    "SCHEMA_VERSION", "MODO_LABORATORIO", "JWT_SECRET", "WEBHOOK_SECRET", "META_APP_SECRET", 
+    "SCHEMA_VERSION", "MODO_LABORATORIO", "JWT_SECRET", "WEBHOOK_SECRET", "META_APP_SECRET", "RAWG_API_KEY",
     "DUMMY_HASH", "pwd_context", "BaseSchema", "now_ts", "limpiar_texto", "sanitizar_nombre_columna",
     "cache_respuestas_ia", "CHAT_MESSAGE_HASHES", "cache_precios_ram", "supabase",
     "PAYLOAD_FLOOD_CACHE", "IMAGE_HASHES_PROCESADOS", "tokens_consumidos_tenant", 
