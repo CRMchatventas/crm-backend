@@ -1598,18 +1598,21 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
 # otro giro cae en un set genérico hasta que se definan sus columnas reales.
 # ==========================================================
 COLUMNAS_CSV_VIDEOJUEGOS = [
-    "nombre", "tipo_producto", "plataforma", "genero", "estado_general", "descripcion_detallada",
+    # 🆕 "id": vacío para productos nuevos (el Alta de siempre); si tiene un
+    # número (viene de exportar tu inventario real), la importación lo
+    # toma como "actualiza este producto" en vez de crear uno duplicado.
+    "id", "nombre", "tipo_producto", "plataforma", "genero", "estado_general", "descripcion_detallada",
     "precio_compra", "precio_venta", "cantidad", "codigo_barras",
     "precio_min_inmediato", "precio_min_24h", "precio_min_72h"
 ]
-COLUMNAS_CSV_GENERICO = ["nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
+COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
 
 # 🛡️ FIX: la columna se llamaba "condicion" — ambiguo, sonaba a un valor fijo
 # tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
 # "le falta el case", etc. — lo que el bot lee para describirle el estado
 # real al cliente). Se renombra para que sea explícito.
-EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "Videojuegos", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
-EJEMPLO_CSV_GENERICO = ["Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
+EJEMPLO_CSV_VIDEOJUEGOS = ["", "Batman Arkham Knight", "Videojuegos", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
+EJEMPLO_CSV_GENERICO = ["", "Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
 @router.get("/api/descargar_plantilla")
 async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
@@ -1736,23 +1739,34 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         if len(datos.inventario) > 1000:
             raise HTTPException(status_code=413, detail="Demasiados artículos en un solo lote (máximo 1000).")
 
-        # 🆕 BLINDAJE COMPLETO DE IMPORTACIÓN MASIVA — antes esta ruta no tenía
-        # NINGUNA de las protecciones que ya tiene el Alta manual del Visor:
-        # ni capitalización, ni detección de posibles duplicados, y desde que
-        # codigo_barras es único (esta sesión), UN solo código repetido tumbaba
-        # el lote COMPLETO sin decir cuál era el problemático. Se carga el
-        # inventario existente una sola vez para comparar contra él.
+        # 🆕 BLINDAJE COMPLETO + ACTUALIZAR EN VEZ DE DUPLICAR — antes esta
+        # ruta no tenía NINGUNA de las protecciones del Alta manual, y
+        # siempre creaba productos nuevos sin importar si la fila ya
+        # existía. Ahora: exportar inventario → editar precio/cantidad en
+        # Excel → reimportar actualiza el producto original (vía su "id"),
+        # en vez de crear un duplicado.
         vid_str = str(_sesion)
         res_existente = await asyncio.wait_for(
-            async_db_execute(supabase.table('inventario').select('nombre, codigo_barras').eq('vendedor_id', vid_str)),
+            async_db_execute(supabase.table('inventario').select('id, nombre, codigo_barras').eq('vendedor_id', vid_str)),
             timeout=15.0
         )
-        nombres_existentes = [str(r.get('nombre', '')) for r in (res_existente.data or []) if r.get('nombre')]
-        codigos_existentes = {str(r['codigo_barras']).strip() for r in (res_existente.data or []) if r.get('codigo_barras')}
+        existentes_por_id = {}
+        for r in (res_existente.data or []):
+            rid = r.get('id')
+            if rid is not None:
+                existentes_por_id[int(rid)] = r
+        # 🛡️ FIX: esta lista se actualiza DENTRO del ciclo (ver abajo) — si no,
+        # dos filas DEL MISMO CSV (ej. "SIREN" y "siren") nunca se comparaban
+        # entre sí, solo contra lo que ya estaba en la base. Ahora compara
+        # contra TODO lo visto hasta ese punto, sea de la base o del mismo lote.
+        nombres_acumulados = [str(r.get('nombre', '')) for r in (res_existente.data or []) if r.get('nombre')]
+        codigos_existentes_global = {str(r['codigo_barras']).strip() for r in (res_existente.data or []) if r.get('codigo_barras')}
 
-        filas_finales = []
-        advertencias_similares = []      # posibles duplicados por nombre parecido — NO bloquea, solo se reporta
-        omitidos_codigo_duplicado = []    # código de barras repetido (en BD o dentro del mismo CSV) — SÍ se omite, porque insertarlo tronaría el lote completo
+        filas_para_insertar = []
+        filas_para_actualizar = []       # [{"id": int, "campos": {...}}]
+        advertencias_similares = []      # posibles duplicados por nombre parecido (solo aplica a productos NUEVOS) — NO bloquea, solo se reporta
+        omitidos_codigo_duplicado = []   # código de barras repetido (en BD o dentro del mismo CSV) — SÍ se omite, porque insertarlo tronaría el lote completo
+        ids_no_reconocidos = []          # la fila trae un "id" pero no es de este vendedor o no existe — se trata como producto nuevo, pero se avisa por si fue un error de captura
         codigos_vistos_en_lote = set()
 
         for idx, item in enumerate(datos.inventario):
@@ -1764,22 +1778,47 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
             if not nombre:
                 continue
 
+            # 🆕 ¿Esta fila trae un "id" que de verdad es de este vendedor?
+            # Si sí, es una actualización del producto existente, no un alta.
+            id_crudo = str(item.get("id", "")).strip()
+            es_actualizacion = False
+            id_objetivo = None
+            registro_existente = None
+            if id_crudo != "":
+                try:
+                    id_candidato = int(float(id_crudo))  # tolera "123" y "123.0" (Excel a veces guarda enteros como flotantes)
+                except (ValueError, TypeError):
+                    id_candidato = None
+                if id_candidato is not None and id_candidato in existentes_por_id:
+                    es_actualizacion = True
+                    id_objetivo = id_candidato
+                    registro_existente = existentes_por_id[id_candidato]
+                elif id_candidato is not None:
+                    ids_no_reconocidos.append({"fila": fila_num, "nombre": nombre, "id": id_candidato})
+
             codigo = bleach.clean(str(item.get("codigo_barras", "")).strip(), tags=[], strip=True)[:100] or None
             if codigo:
-                if codigo in codigos_existentes or codigo in codigos_vistos_en_lote:
+                # Si es una actualización y el código es el MISMO que ya
+                # tenía ese producto, no es un conflicto — es su propio dato.
+                codigo_previo = str(registro_existente.get('codigo_barras', '') or '').strip() if registro_existente else None
+                es_su_propio_codigo = es_actualizacion and codigo == codigo_previo
+                if not es_su_propio_codigo and (codigo in codigos_existentes_global or codigo in codigos_vistos_en_lote):
                     omitidos_codigo_duplicado.append({"fila": fila_num, "nombre": nombre, "codigo_barras": codigo})
                     continue  # esta fila específica se omite — el resto del lote sigue su curso normal
                 codigos_vistos_en_lote.add(codigo)
 
-            # 🆕 Mismo umbral y librería (rapidfuzz) que ya usa el RAG del bot
-            # — no bloquea la importación, solo se reporta para revisión.
-            if nombres_existentes:
-                match = process.extractOne(nombre, nombres_existentes, scorer=fuzz.WRatio)
-                if match and match[1] >= 80 and match[0].lower() != nombre.lower():
-                    advertencias_similares.append({"fila": fila_num, "nombre_importado": nombre, "parecido_a_existente": match[0], "similitud": round(match[1], 1)})
+            # 🆕 Mismo umbral y librería (rapidfuzz) que ya usa el RAG del bot.
+            # Solo aplica a productos NUEVOS — un producto que se está
+            # actualizando lógicamente "se parece" a sí mismo, eso no aporta
+            # nada como advertencia.
+            if not es_actualizacion:
+                if nombres_acumulados:
+                    match = process.extractOne(nombre, nombres_acumulados, scorer=fuzz.WRatio)
+                    if match and match[1] >= 80:
+                        advertencias_similares.append({"fila": fila_num, "nombre_importado": nombre, "parecido_a_existente": match[0], "similitud": round(match[1], 1)})
+                nombres_acumulados.append(nombre)
 
-            filas_finales.append({
-                "vendedor_id": vid_str,
+            campos = {
                 "nombre": nombre,
                 "categoria": bleach.clean(str(item.get("categoria", "")).strip(), tags=[], strip=True)[:100] or "General",
                 "tipo_producto": bleach.clean(str(item.get("tipo_producto", "")).strip(), tags=[], strip=True)[:100] or None,
@@ -1794,22 +1833,57 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
                 "precio_min_24h": _safe_float_opcional(item.get("precio_min_24h")),
                 "precio_min_72h": _safe_float_opcional(item.get("precio_min_72h")),
                 "atributos_extra": item.get("atributos_extra", {}) or {},
-            })
+            }
 
-        if not filas_finales:
+            if es_actualizacion:
+                filas_para_actualizar.append({"id": id_objetivo, "campos": campos})
+            else:
+                campos["vendedor_id"] = vid_str
+                filas_para_insertar.append(campos)
+
+        if not filas_para_insertar and not filas_para_actualizar:
             raise HTTPException(status_code=400, detail="Ningún artículo tenía nombre válido, o todos chocaban por código de barras duplicado.")
 
-        # FIX FASE 1: allow_retry=False por inserción masiva (INSERT)
-        resultado = await asyncio.wait_for(
-            async_db_execute(supabase.table('inventario').insert(filas_finales), allow_retry=False),
-            timeout=20.0
-        )
-        logger.info(f"✅ [TRACE:{trace_id}] Importación completa: {len(filas_finales)} insertados, {len(omitidos_codigo_duplicado)} omitidos por código duplicado, {len(advertencias_similares)} posibles duplicados por nombre.")
+        insertados = 0
+        actualizados = 0
+
+        if filas_para_insertar:
+            # FIX FASE 1: allow_retry=False por inserción masiva (INSERT)
+            resultado = await asyncio.wait_for(
+                async_db_execute(supabase.table('inventario').insert(filas_para_insertar), allow_retry=False),
+                timeout=20.0
+            )
+            insertados = len(resultado.data) if resultado.data else len(filas_para_insertar)
+
+        if filas_para_actualizar:
+            # 🛡️ Supabase no permite "actualizar muchas filas con valores
+            # distintos cada una" en una sola llamada — cada producto se
+            # actualiza por separado, pero en paralelo (no uno por uno en
+            # serie) para que un lote de cientos de actualizaciones no tarde
+            # minutos.
+            async def _actualizar_uno(fila):
+                return await async_db_execute(
+                    supabase.table('inventario').update(fila["campos"]).eq('id', fila["id"]).eq('vendedor_id', vid_str),
+                    allow_retry=False
+                )
+            resultados_update = await asyncio.wait_for(
+                asyncio.gather(*[_actualizar_uno(f) for f in filas_para_actualizar], return_exceptions=True),
+                timeout=30.0
+            )
+            for r in resultados_update:
+                if isinstance(r, Exception):
+                    logger.warning(f"⚠️ [TRACE:{trace_id}] Falló la actualización de un producto durante importación: {r}")
+                else:
+                    actualizados += 1
+
+        logger.info(f"✅ [TRACE:{trace_id}] Importación completa: {insertados} nuevos, {actualizados} actualizados, {len(omitidos_codigo_duplicado)} omitidos por código duplicado, {len(advertencias_similares)} posibles duplicados por nombre.")
         return {
             "status": "ok",
-            "insertados": len(resultado.data) if resultado.data else len(filas_finales),
+            "insertados": insertados,
+            "actualizados": actualizados,
             "omitidos_codigo_barras_duplicado": omitidos_codigo_duplicado,
             "advertencias_posibles_duplicados": advertencias_similares,
+            "ids_no_reconocidos": ids_no_reconocidos,
         }
     except HTTPException: raise
     except Exception as e:
