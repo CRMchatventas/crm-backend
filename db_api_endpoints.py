@@ -906,19 +906,18 @@ async def send_mobile_media(data: MobileMediaRequest, _sesion: str = Depends(ver
         raise HTTPException(status_code=400, detail="La imagen está corrupta o no se pudo procesar.")
 
     try:
-        nombre_archivo = f"portadas/chat_{_sesion}_{tel_norm}_{int(now_ts())}.jpg"
-        # 🛡️ FIX: se usa el mismo prefijo "portadas/" que ya usa
-        # procesar_imagen_juego (db_rag_scraper.py) para subir al mismo
-        # bucket — si las políticas de Storage en Supabase están limitadas
-        # a ese prefijo específico, un prefijo nuevo ("chat_media/") se
-        # rechaza en silencio y aparece como un 500 genérico aquí.
-
+        nombre_archivo = f"chat/chat_{_sesion}_{tel_norm}_{int(now_ts())}.jpg"
+        # 🛡️ FIX URGENTE: "inventario_media" nunca existió como bucket real
+        # en Supabase Storage — los buckets reales son "portadas" (para
+        # fotos de producto/portadas de juego) y "multimedia" (para esto:
+        # imágenes mandadas dentro del chat). Toda subida hacia
+        # "inventario_media" fallaría con "Bucket not found" en producción.
         def _upload():
-            return supabase.storage.from_("inventario_media").upload(
+            return supabase.storage.from_("multimedia").upload(
                 nombre_archivo, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
-        url_publica = supabase.storage.from_("inventario_media").get_public_url(nombre_archivo)
+        url_publica = supabase.storage.from_("multimedia").get_public_url(nombre_archivo)
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo foto de Mobile a Storage: {e}")
         raise HTTPException(status_code=500, detail="Error al guardar la imagen.")
@@ -984,12 +983,16 @@ async def subir_foto_producto(data: SubirFotoProductoRequest, _sesion: str = Dep
 
     try:
         nombre_archivo = f"portadas/producto_{_sesion}_{data.item_id}_{int(now_ts())}.jpg"
+        # 🛡️ FIX URGENTE: "inventario_media" nunca existió como bucket real —
+        # los buckets reales en Supabase Storage son "portadas" y
+        # "multimedia" (confirmado por captura). Toda subida hacia
+        # "inventario_media" fallaría con "Bucket not found" en producción.
         def _upload():
-            return supabase.storage.from_("inventario_media").upload(
+            return supabase.storage.from_("portadas").upload(
                 nombre_archivo, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
-        url_publica = supabase.storage.from_("inventario_media").get_public_url(nombre_archivo)
+        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo foto de producto a Storage: {e}")
         raise HTTPException(status_code=500, detail="Error al guardar la imagen.")
