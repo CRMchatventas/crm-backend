@@ -352,6 +352,14 @@ class LoginUpdate(BaseSchema):
         if not v or len(v) < 8: raise ValueError("Password inválida.")
         return v
 
+# 🆕 Para que el cliente pueda cambiar su propia contraseña — antes no
+# existía ninguna ruta para esto, la única forma de tener una contraseña
+# era que el dueño de Veltrix la conociera en texto plano para crear el
+# hash al dar de alta la cuenta.
+class CambiarPasswordRequest(BaseSchema):
+    password_actual: str = Field(min_length=1, max_length=128)
+    password_nueva: str = Field(min_length=8, max_length=128)
+
 class MobileMessageRequest(BaseSchema): 
     to: str
     msg: str = Field(min_length=1)
@@ -545,7 +553,7 @@ __all__ = [
     "InventarioItem", "InventarioItemUpdate", "VentaItem", "LoginUpdate",
     "MobileMessageRequest", "ClienteIdentificador", "ColumnaUpdate",
     "ColumnaAction", "RenombrarColumnaAction", "BorrarColumnaAction", "NotasUpdate", "EstadoUpdate", "BotConfigUpdate",
-    "ReordenarColumnasAction", "LeadAction", "BorrarRequest", "NuevoArticulo",
+    "ReordenarColumnasAction", "LeadAction", "BorrarRequest", "NuevoArticulo", "CambiarPasswordRequest",
     "PreciosDetalle", "PrecioResponse", "NuevaCita", "EstadoCita",
     "NuevaPublicacion", "CampanaMasiva", "PeticionCopy"
 ]
