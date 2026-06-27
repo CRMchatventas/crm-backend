@@ -500,11 +500,18 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
         # consulta una sola vez aquí, en vez de cada vez que se abre el
         # Visor — ya existe esta misma consulta en /api/descargar_plantilla,
         # se reusa el mismo patrón.
-        giro_final = "general"
+        giro_final = "videojuegos"
         try:
             res_giro = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
             giro_crudo = res_giro.data[0].get('giro') if res_giro.data else None
-            giro_final = str(giro_crudo or 'general').lower().strip()
+            # 🛡️ FIX: alineado con /api/descargar_plantilla — ahí mismo, un
+            # giro vacío/sin configurar cae a "videojuegos" por compatibilidad
+            # con clientes existentes (todos eran de ese giro antes de esta
+            # función). Usar un default distinto aquí ("general") haría que
+            # el mismo tenant viera el Visor en modo genérico pero la
+            # plantilla CSV en modo videojuegos — inconsistente.
+            giro_str = str(giro_crudo or '').lower().strip()
+            giro_final = giro_str if giro_str != "" else "videojuegos"
         except Exception as e:
             logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo obtener el giro al hacer login (no bloqueante): {e}")
         ahora = datetime.now(timezone.utc)
@@ -1512,18 +1519,18 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
 # otro giro cae en un set genérico hasta que se definan sus columnas reales.
 # ==========================================================
 COLUMNAS_CSV_VIDEOJUEGOS = [
-    "nombre", "plataforma", "genero", "estado_general", "descripcion_detallada",
+    "nombre", "tipo_producto", "plataforma", "genero", "estado_general", "descripcion_detallada",
     "precio_compra", "precio_venta", "cantidad", "codigo_barras",
     "precio_min_inmediato", "precio_min_24h", "precio_min_72h"
 ]
-COLUMNAS_CSV_GENERICO = ["nombre", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
+COLUMNAS_CSV_GENERICO = ["nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
 
 # 🛡️ FIX: la columna se llamaba "condicion" — ambiguo, sonaba a un valor fijo
 # tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
 # "le falta el case", etc. — lo que el bot lee para describirle el estado
 # real al cliente). Se renombra para que sea explícito.
-EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
-EJEMPLO_CSV_GENERICO = ["Producto de ejemplo", "General", "100", "200", "1", "Descripción breve"]
+EJEMPLO_CSV_VIDEOJUEGOS = ["Batman Arkham Knight", "Videojuegos", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
+EJEMPLO_CSV_GENERICO = ["Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
 @router.get("/api/descargar_plantilla")
 async def descargar_plantilla(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
@@ -1593,6 +1600,7 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
                 "vendedor_id": str(_sesion),
                 "nombre": nombre,
                 "categoria": bleach.clean(str(item.get("categoria", "")).strip(), tags=[], strip=True)[:100] or "General",
+                "tipo_producto": bleach.clean(str(item.get("tipo_producto", "")).strip(), tags=[], strip=True)[:100] or None,
                 "genero": bleach.clean(str(item.get("genero", "")).strip(), tags=[], strip=True)[:100] or None,
                 "estado_general": bleach.clean(str(item.get("estado_general", "")).strip(), tags=[], strip=True)[:100] or None,
                 "descripcion_detallada": bleach.clean(str(item.get("descripcion_detallada", "")).strip(), tags=[], strip=True)[:2000],
