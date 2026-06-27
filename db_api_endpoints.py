@@ -22,7 +22,7 @@ from config_and_schemas import (
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
     ColumnaAction, RenombrarColumnaAction, BorrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD,
-    RAWG_API_KEY
+    RAWG_API_KEY, CambiarPasswordRequest
 )
 from ai_security_utils import verificar_sesion_b2b, get_http_client
 from db_core_wrapper import async_db_execute, supabase
@@ -1171,6 +1171,50 @@ async def actualizar_bot_config(datos: BotConfigUpdate, _sesion: str = Depends(v
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo guardando bot_config: {e}")
         raise HTTPException(status_code=500, detail="Error al guardar la configuración del asistente.")
+
+# ==========================================================
+# 🔑 CAMBIAR CONTRASEÑA
+# Antes no existía ninguna forma de que el cliente cambiara su propia
+# contraseña — la única manera de tenerla era que el dueño de Veltrix la
+# conociera en texto plano para crear el hash al dar de alta la cuenta.
+# ==========================================================
+@router.post("/api/cambiar_password")
+async def cambiar_password(datos: CambiarPasswordRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🔑 [TRACE:{trace_id}] Solicitud de cambio de contraseña para {_sesion}")
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(supabase.table('usuarios_veltrix').select('password').eq('vendedor_id', str(_sesion)).limit(1)),
+            timeout=10.0
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+        password_guardada = str(res.data[0].get('password', DUMMY_HASH))
+
+        # Mismo patrón de verificación que el login — soporta el caso legacy
+        # (contraseña antigua en texto plano, sin hashear todavía) además
+        # del caso normal con bcrypt.
+        if password_guardada.startswith('$2b$'):
+            password_valida = await run_in_threadpool(pwd_context.verify, datos.password_actual, password_guardada)
+        else:
+            password_valida = (datos.password_actual == password_guardada)
+
+        if not password_valida:
+            raise HTTPException(status_code=401, detail="La contraseña actual no es correcta.")
+        if datos.password_nueva == datos.password_actual:
+            raise HTTPException(status_code=400, detail="La contraseña nueva debe ser diferente a la actual.")
+
+        nuevo_hash = await run_in_threadpool(pwd_context.hash, datos.password_nueva)
+        await asyncio.wait_for(
+            async_db_execute(supabase.table('usuarios_veltrix').update({'password': nuevo_hash}).eq('vendedor_id', str(_sesion)), allow_retry=False),
+            timeout=10.0
+        )
+        logger.info(f"✅ [TRACE:{trace_id}] Contraseña actualizada correctamente para {_sesion}")
+        return {"status": "ok", "detail": "Contraseña actualizada correctamente."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en cambiar_password para {_sesion}: {e}")
+        raise HTTPException(status_code=500, detail="Error al cambiar la contraseña.")
 
 @router.post("/api/actualizar_notas")
 # 🛡️ FIX: el backend tenía esta ruta en inglés ("notes") mientras Godot
