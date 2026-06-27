@@ -494,6 +494,19 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
             raise HTTPException(status_code=500, detail="Estructura de aislamiento corrupta. Contacte soporte.")
 
         vendedor_id = str(vendedor_id).strip()
+        # 🆕 Se manda el giro real del tenant en el login — el Visor lo
+        # necesita para saber si debe mostrar las listas/etiquetas de
+        # videojuegos o el modo genérico para cualquier otro giro. Se
+        # consulta una sola vez aquí, en vez de cada vez que se abre el
+        # Visor — ya existe esta misma consulta en /api/descargar_plantilla,
+        # se reusa el mismo patrón.
+        giro_final = "general"
+        try:
+            res_giro = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
+            giro_crudo = res_giro.data[0].get('giro') if res_giro.data else None
+            giro_final = str(giro_crudo or 'general').lower().strip()
+        except Exception as e:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo obtener el giro al hacer login (no bloqueante): {e}")
         ahora = datetime.now(timezone.utc)
         # FIX FASE 3: Modificado algoritmo a HS512 para total paridad con el validador central de seguridad
         token_jwt = jwt.encode({
@@ -505,7 +518,7 @@ async def login_b2b(datos: LoginUpdate, request: Request, background_tasks: Back
         logger.info(f"✅ [TRACE:{trace_id}] Tenant [{vendedor_id}] verificado con éxito. Despachando token HS512 hacia Godot 4.6.")
         return {
             "status": "ok", "access_token": token_jwt, "token_type": "bearer",
-            "datos": {"vendedor_id": vendedor_id, "email": usuario['email'], "nombre": usuario.get('nombre_contacto', 'Vendedor'), "rol": usuario.get('rol', 'vendedor')}
+            "datos": {"vendedor_id": vendedor_id, "email": usuario['email'], "nombre": usuario.get('nombre_contacto', 'Vendedor'), "rol": usuario.get('rol', 'vendedor'), "giro": giro_final}
         }
     except HTTPException: raise
     except asyncio.TimeoutError:
