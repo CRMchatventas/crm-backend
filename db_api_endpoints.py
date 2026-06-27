@@ -1571,6 +1571,95 @@ async def buscar_rawg(q: str, platforms: str = "", _sesion: str = Depends(verifi
         return {"status": "ok", "results": []}
 
 # ==========================================================
+# 🛒 16C. CATÁLOGO PÚBLICO ("Veltrix Store") — SIN AUTENTICACIÓN
+# Pensado para clientes FINALES (no dueños de negocio) — para que puedan
+# ver el inventario completo de un vendedor y comprar directo por
+# WhatsApp, sin necesitar cuenta ni login. Es justo lo que ya se promete
+# en la página de Veltrix Engine como "Veltrix Store: vende en segundos
+# con un solo clic".
+#
+# 🛡️ MUY IMPORTANTE — esta ruta es pública por diseño, así que se filtra
+# con cuidado lo que se expone: NUNCA costo, código de barras, notas
+# internas, ni el conteo exacto de stock (solo "disponible: sí/no") —
+# eso es información privada/competitiva del negocio, no del cliente final.
+# ==========================================================
+_RATE_LIMIT_STORE = TTLCache(maxsize=5000, ttl=60)  # máx peticiones por vendedor por minuto
+
+@router.get("/api/store/{vendedor_id}")
+async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depends(obtener_trace_id)):
+    vendedor_id = re.sub(r"[^A-Za-z0-9\-_]", "", vendedor_id)[:50]
+    if not vendedor_id:
+        raise HTTPException(status_code=404, detail="Tienda no encontrada.")
+
+    # Límite simple por vendedor — esta ruta es pública (sin login), así que
+    # es el único punto de abuso que un escáner/bot externo podría intentar.
+    conteo_actual = _RATE_LIMIT_STORE.get(vendedor_id, 0)
+    if conteo_actual > 120:
+        raise HTTPException(status_code=429, detail="Demasiadas peticiones. Intenta de nuevo en un momento.")
+    _RATE_LIMIT_STORE[vendedor_id] = conteo_actual + 1
+
+    try:
+        res_neg = await asyncio.wait_for(
+            async_db_execute(supabase.table('usuarios_veltrix').select('nombre_contacto, estado').eq('vendedor_id', vendedor_id).limit(1)),
+            timeout=5.0
+        )
+        if not res_neg.data or res_neg.data[0].get('estado') != 'activo':
+            raise HTTPException(status_code=404, detail="Tienda no encontrada.")
+        nombre_negocio = str(res_neg.data[0].get('nombre_contacto', 'Tienda'))
+
+        res_conf = await asyncio.wait_for(
+            async_db_execute(supabase.table('configuracion_bot').select('giro, admin_phone').eq('vendedor_id', vendedor_id).limit(1)),
+            timeout=5.0
+        )
+        giro = str((res_conf.data[0].get('giro') if res_conf.data else None) or '').lower()
+        es_videojuegos = "videojueg" in giro or giro == ""
+        telefono_whatsapp = str((res_conf.data[0].get('admin_phone') if res_conf.data else None) or '')
+
+        query = supabase.table('inventario').select(
+            'id, nombre, categoria, tipo_producto, genero, estado_general, precio, precio_min_inmediato, url_portada, stock'
+        ).eq('vendedor_id', vendedor_id).gt('stock', 0)
+        termino = limpiar_texto(q)[:100].strip()
+        if termino:
+            query = query.ilike('nombre', f'%{termino}%')
+        res_inv = await asyncio.wait_for(async_db_execute(query.order('nombre').limit(1000)), timeout=15.0)
+
+        productos = []
+        for item in (res_inv.data or []):
+            precio = float(item.get('precio') or 0)
+            precio_especial = item.get('precio_min_inmediato')
+            tiene_precio_especial = precio_especial is not None and float(precio_especial) > 0 and float(precio_especial) < precio
+            productos.append({
+                "id": item.get('id'),
+                "nombre": str(item.get('nombre', '')),
+                "categoria": str(item.get('categoria', '') or ''),
+                "tipo_producto": str(item.get('tipo_producto', '') or ''),
+                "genero": str(item.get('genero', '') or ''),
+                "estado": str(item.get('estado_general', '') or ''),
+                "precio": precio,
+                "precio_especial": float(precio_especial) if tiene_precio_especial else None,
+                "foto": str(item.get('url_portada', '') or ''),
+                # Solo disponibilidad — nunca el conteo exacto.
+                "disponible": True,
+            })
+
+        return {
+            "status": "ok",
+            "negocio": {
+                "nombre": nombre_negocio,
+                "giro_videojuegos": es_videojuegos,
+                "etiqueta_item": "Juego" if es_videojuegos else "Producto",
+                "etiqueta_variante": "Consola" if es_videojuegos else "Variante",
+                "whatsapp": telefono_whatsapp,
+            },
+            "productos": productos,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en catalogo_publico para {vendedor_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar la tienda.")
+
+# ==========================================================
 # 💰 16C. MÉTRICAS FINANCIERAS (panel de finanzas en tiempo real)
 # Tampoco existía — el botón de "Finanzas" en dashboard_main.gd siempre
 # mostraba "Error al conectar con Finanzas".
