@@ -104,6 +104,12 @@ async def lifespan(app: FastAPI):
     # Lanzamos únicamente el Garbage Collector maestro (Evitamos colisiones)
     lanzar_tarea_segura(config.task_gc_locks())
 
+    # 🆕 Recupera las revocaciones de sesión que sobrevivieron un reinicio
+    # anterior (ver cargar_revocaciones_persistentes) — se espera a que
+    # termine (await directo, no lanzar_tarea_segura) porque queremos que
+    # la blacklist esté lista ANTES de aceptar tráfico real.
+    await cargar_revocaciones_persistentes()
+
     # 🆕 FIX: el watchdog de remarketing autónomo de 24h (bucle_seguimiento_24h,
     # en db_crm_logic.py) estaba completamente construido — RPC atómico
     # anti-doble-envío, métricas de éxito/fallo — pero nunca se arrancaba en
@@ -277,8 +283,55 @@ async def revocar_token_jwt(token: str):
                     # Guardamos el jti revocado
                     JWT_REVOKED_CACHE[jti] = True
                 logger.info(f"🔐 [AUTH] Token {jti} revocado exitosamente.")
+                # 🛡️ FIX: la blacklist vivía SOLO en memoria — si el servidor se
+                # reiniciaba (deploy, crash, restart de Render), todo "logout"
+                # anterior quedaba sin efecto y esos tokens volvían a ser
+                # válidos hasta su expiración natural (hasta 24h). Se persiste
+                # también en Supabase; si esto falla, el logout sigue
+                # funcionando en ESTE proceso (la caché en memoria ya quedó
+                # actualizada arriba) — solo no sobreviviría un reinicio.
+                try:
+                    from db_core_wrapper import async_db_execute, supabase
+                    await asyncio.wait_for(
+                        async_db_execute(
+                            supabase.table('jwt_revocados').upsert({
+                                "jti": jti,
+                                "expira_en": datetime.fromtimestamp(exp, tz=timezone.utc).isoformat(),
+                            }),
+                            allow_retry=False
+                        ),
+                        timeout=5.0
+                    )
+                except Exception as e_persist:
+                    logger.warning(f"⚠️ [AUTH] No se pudo persistir la revocación de {jti} en Supabase (sigue activa en memoria para este proceso): {e_persist}")
     except Exception as e:
         logger.warning(f"⚠️ [AUTH] Intento de revocar token malformado: {e}")
+
+async def cargar_revocaciones_persistentes():
+    """
+    🆕 Se llama una vez al arrancar el servidor (lifespan) — recupera las
+    revocaciones que sobrevivieron un reinicio desde Supabase y las vuelve a
+    poner en la caché rápida en memoria. Sin esto, cada deploy/reinicio
+    "des-cerraba sesión" silenciosamente a cualquiera que se hubiera
+    deslogueado antes.
+    """
+    try:
+        from db_core_wrapper import async_db_execute, supabase
+        ahora_iso = datetime.now(timezone.utc).isoformat()
+        res = await asyncio.wait_for(
+            async_db_execute(supabase.table('jwt_revocados').select('jti').gt('expira_en', ahora_iso)),
+            timeout=10.0
+        )
+        cargados = 0
+        async with config.global_cache_lock:
+            for fila in (res.data or []):
+                jti = fila.get('jti')
+                if jti:
+                    JWT_REVOKED_CACHE[jti] = True
+                    cargados += 1
+        logger.info(f"🔐 [AUTH] {cargados} revocación(es) de sesión recuperadas de Supabase tras el arranque.")
+    except Exception as e:
+        logger.warning(f"⚠️ [AUTH] No se pudieron recuperar las revocaciones persistentes al arrancar (no bloqueante): {e}")
 
 async def verificar_sesion_b2b(authorization: str = Header(None), auth_token: str = Header(None)) -> str:
     token = None
