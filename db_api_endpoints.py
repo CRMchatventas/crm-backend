@@ -1039,7 +1039,17 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), tra
         prospectos_limpios = [
             {
                 "id": p.get("id"), "nombre": bleach.clean(p.get("nombre") or "Cliente", tags=[], strip=True),
-                "telefono": normalizar_telefono(p.get("telefono", "")), "fila": sanitizar_nombre_columna(p.get("fila") or "Bandeja Nueva"),
+                "telefono": normalizar_telefono(p.get("telefono", "")),
+                # 🛡️ FIX REAL (encontrado en logs de producción): esta función
+                # existe para evitar que alguien CREE una columna nueva con el
+                # mismo nombre que una columna fija — pero aquí solo se está
+                # MOSTRANDO un valor que ya es legítimamente una columna fija
+                # (Bandeja Nueva, Requiere Asistencia, etc.). Sin
+                # permitir_reservadas=True, CUALQUIER prospecto en "Requiere
+                # Asistencia", "Por Entregar" o "Envíos Masivos" se forzaba a
+                # "Bandeja Nueva" SOLO en Mobile — exactamente la causa del
+                # mismatch real entre PC y Mobile que se vio en producción.
+                "fila": sanitizar_nombre_columna(p.get("fila") or "Bandeja Nueva", permitir_reservadas=True),
                 "ultima_interaccion_ia": p.get("ultima_interaccion_ia") or "", "ultimo_msj": bleach.clean(p.get("ultimo_msj") or "", tags=[], strip=True),
                 "estado_iluminacion": str(p.get("estado_iluminacion") or "blanco")
             } for p in (prospectos_res.data or [])
