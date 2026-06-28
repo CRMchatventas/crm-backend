@@ -1630,16 +1630,28 @@ def _es_mismo_giro(giro_a: str, giro_b_buscado_es_videojuegos: bool) -> bool:
 async def _vendedores_activos_por_giro(giro_buscado: str) -> list:
     """Regresa [{vendedor_id, nombre, ciudad, estado_ubicacion}] de cuentas activas que comparten el mismo giro (videojuegos vs. cualquier otro, igual que en el resto del sistema)."""
     es_vj_buscado = "videojueg" in giro_buscado.lower() or giro_buscado.strip() == ""
-    res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
+    # 🛡️ FIX: se agrega 'nombre_negocio' aquí mismo — vive en esta tabla
+    # (configuracion_bot), no en usuarios_veltrix. Antes el público veía el
+    # nombre de la PERSONA que abrió la cuenta (nombre_contacto), no el del
+    # negocio.
+    res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro, nombre_negocio')), timeout=10.0)
     ids_match = [r['vendedor_id'] for r in (res_giros.data or []) if _es_mismo_giro(r.get('giro'), es_vj_buscado)]
     if not ids_match:
         return []
+    nombres_negocio_por_id = {r['vendedor_id']: str(r.get('nombre_negocio') or '').strip() for r in (res_giros.data or [])}
     res_neg = await asyncio.wait_for(
         async_db_execute(supabase.table('usuarios_veltrix').select('vendedor_id, nombre_contacto, ciudad, estado_ubicacion, estado').in_('vendedor_id', ids_match)),
         timeout=10.0
     )
     return [
-        {"vendedor_id": r['vendedor_id'], "nombre": str(r.get('nombre_contacto', '') or 'Tienda'), "ciudad": str(r.get('ciudad', '') or ''), "estado_ubicacion": str(r.get('estado_ubicacion', '') or '')}
+        {
+            "vendedor_id": r['vendedor_id'],
+            # nombre_negocio primero; si un tenant nunca lo configuró, cae al
+            # nombre de contacto en vez de dejarlo vacío.
+            "nombre": nombres_negocio_por_id.get(r['vendedor_id']) or str(r.get('nombre_contacto', '') or 'Tienda'),
+            "ciudad": str(r.get('ciudad', '') or ''),
+            "estado_ubicacion": str(r.get('estado_ubicacion', '') or '')
+        }
         for r in (res_neg.data or []) if r.get('estado') == 'activo'
     ]
 
@@ -1702,11 +1714,15 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
         )
 
         # También se necesita el teléfono de cada vendedor para el enlace de WhatsApp.
+        # 🛡️ FIX PRIVACIDAD: usaba 'admin_phone' — ese es el número PERSONAL
+        # del dueño para alertas internas, nunca debió mostrarse a un
+        # cliente final navegando la tienda. Se usa el número público
+        # dedicado del bot.
         res_tel = await asyncio.wait_for(
-            async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, admin_phone').in_('vendedor_id', list(mapa_vendedores.keys()))),
+            async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, numero_bot_whatsapp').in_('vendedor_id', list(mapa_vendedores.keys()))),
             timeout=10.0
         )
-        telefonos = {r['vendedor_id']: str(r.get('admin_phone', '') or '') for r in (res_tel.data or [])}
+        telefonos = {r['vendedor_id']: str(r.get('numero_bot_whatsapp', '') or '') for r in (res_tel.data or [])}
 
         resultados = []
         for item in (res_inv.data or []):
@@ -1769,15 +1785,21 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         )
         if not res_neg.data or res_neg.data[0].get('estado') != 'activo':
             raise HTTPException(status_code=404, detail="Tienda no encontrada.")
-        nombre_negocio = str(res_neg.data[0].get('nombre_contacto', 'Tienda'))
 
         res_conf = await asyncio.wait_for(
-            async_db_execute(supabase.table('configuracion_bot').select('giro, admin_phone').eq('vendedor_id', vendedor_id).limit(1)),
+            async_db_execute(supabase.table('configuracion_bot').select('giro, numero_bot_whatsapp, nombre_negocio').eq('vendedor_id', vendedor_id).limit(1)),
             timeout=5.0
         )
+        # 🛡️ FIX: mostraba 'nombre_contacto' (la PERSONA que abrió la cuenta)
+        # en vez de 'nombre_negocio' (que vive en configuracion_bot) — cae a
+        # nombre_contacto solo si el tenant nunca configuró nombre_negocio.
+        nombre_negocio = str((res_conf.data[0].get('nombre_negocio') if res_conf.data else None) or res_neg.data[0].get('nombre_contacto') or 'Tienda')
         giro = str((res_conf.data[0].get('giro') if res_conf.data else None) or '').lower()
         es_videojuegos = "videojueg" in giro or giro == ""
-        telefono_whatsapp = str((res_conf.data[0].get('admin_phone') if res_conf.data else None) or '')
+        # 🛡️ FIX PRIVACIDAD: usaba 'admin_phone' (número PERSONAL del dueño
+        # para alertas internas) — un visitante cualquiera de la tienda
+        # estaba viendo ese número en vez del número público del bot.
+        telefono_whatsapp = str((res_conf.data[0].get('numero_bot_whatsapp') if res_conf.data else None) or '')
 
         query = supabase.table('inventario').select(
             'id, nombre, categoria, tipo_producto, genero, estado_general, precio, precio_min_inmediato, url_portada, stock'
