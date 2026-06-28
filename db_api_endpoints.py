@@ -1024,7 +1024,14 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), tra
 
         prospectos_res = await asyncio.wait_for(
             async_db_execute(
-                supabase.table("prospectos").select("id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj")
+                # 🛡️ FIX REAL: faltaba 'estado_iluminacion' — Mobile nunca
+                # recibía este campo, así que no tenía forma de saber si un
+                # prospecto pedía atención humana, tenía oferta especial,
+                # etc. Por eso un cliente podía verse en "Requiere Asistencia"
+                # en la PC y en "Bandeja Nueva" en Mobile al mismo tiempo —
+                # cada plataforma estaba calculando su propio estado por su
+                # cuenta, en vez de usar la misma verdad del servidor.
+                supabase.table("prospectos").select("id, nombre, telefono, fila, ultima_interaccion_ia, ultimo_msj, estado_iluminacion")
                 .eq("vendedor_id", str(vendedor_id)).order("ultima_interaccion_ia", desc=True).limit(50)
             ),
             timeout=8.0
@@ -1033,7 +1040,8 @@ async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), tra
             {
                 "id": p.get("id"), "nombre": bleach.clean(p.get("nombre") or "Cliente", tags=[], strip=True),
                 "telefono": normalizar_telefono(p.get("telefono", "")), "fila": sanitizar_nombre_columna(p.get("fila") or "Bandeja Nueva"),
-                "ultima_interaccion_ia": p.get("ultima_interaccion_ia") or "", "ultimo_msj": bleach.clean(p.get("ultimo_msj") or "", tags=[], strip=True)
+                "ultima_interaccion_ia": p.get("ultima_interaccion_ia") or "", "ultimo_msj": bleach.clean(p.get("ultimo_msj") or "", tags=[], strip=True),
+                "estado_iluminacion": str(p.get("estado_iluminacion") or "blanco")
             } for p in (prospectos_res.data or [])
         ]
         return {"status": "ok", "vendedor": vendedor_id, "ventas_hoy": total_hoy, "prospectos": prospectos_limpios}
