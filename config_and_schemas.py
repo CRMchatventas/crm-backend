@@ -439,6 +439,17 @@ class BorrarRequest(BaseSchema):
     nombre: str = Field(min_length=1)
     vendedor_id: str = Field(default="", pattern=r"^[A-Za-z0-9\-_]{0,50}$")
 
+class CrearAlertaRequest(BaseSchema):
+    nombre_juego: str = Field(min_length=1, max_length=200)
+    consola: str = Field(default="", max_length=100)
+    precio_max: float = Field(default=0.0, ge=0)
+    # 🆕 si esta alerta nace de un pedido de cliente (ver /api/encargos/pendientes),
+    # se manda su id aquí para que la alerta y el encargo queden vinculados.
+    encargo_id: Optional[int] = None
+
+class BorrarAlertaRequest(BaseSchema):
+    id: int
+
 class NuevoArticulo(BaseSchema): 
     # 🔧 FIX: esta clase ya estaba importada en db_api_endpoints.py pero nunca
     # se usaba en ninguna ruta — /api/guardar_inventario, al que sí le pegan
