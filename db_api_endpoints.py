@@ -28,6 +28,7 @@ from ai_security_utils import verificar_sesion_b2b, get_http_client
 from db_core_wrapper import async_db_execute, supabase
 from db_chat import guardar_mensaje_chat, obtener_historial_chat
 from db_crm_logic import actualizar_estado_crm
+from db_aprendizaje import registrar_venta_aprendizaje
 
 # CONSTANTE DE CRM GLOBAL
 FILA_PAPELERA = "Papelera"
@@ -327,6 +328,13 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             # default correcto para cualquier mensaje nuevo sin clasificación especial
             # es "oro" (pendiente de revisar).
             nueva_columna, iluminacion = columna_actual, "oro"
+            # 🛡️ FIX: 'resumen' solo se definía dentro de 2 de las 4 ramas de
+            # abajo (reserva y HUMANO/POSTVENTA/...) — en las otras dos
+            # (INTERES_VELTRIX y COMPRA) y en el caso por default, la
+            # variable nunca existía. No causaba error porque nada la leía
+            # después — pero el nuevo registro de aprendizaje sí necesita
+            # poder referenciarla siempre, sin importar la rama.
+            resumen = None
 
             if reserva_resultado:
                 # 🆕 Última unidad bloqueada temporalmente para este cliente — color y
@@ -359,6 +367,12 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             resultados_gather = await asyncio.gather(
                 actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado, nombre=cliente, mensaje=respuesta_final),
                 guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final),
+                # 🆕 PASO 1 DEL SISTEMA DE APRENDIZAJE: 'ventas_aprendizaje' ya
+                # existía en Supabase (con triggers e índices listos) pero
+                # nunca se conectó. Va en el mismo gather — solo escribe, no
+                # le agrega ni un token a Gemini ni un viaje secuencial extra
+                # al pipeline en vivo.
+                registrar_venta_aprendizaje(vendedor_id, telefono, texto_entrante, respuesta_final, decision, config_dict=config, resumen_handoff=resumen),
                 return_exceptions=True
             )
             for r in resultados_gather:
