@@ -93,13 +93,17 @@ async def disparar_whatsapp_dinamico_async(
     # ==========================================================
     # 🛡️ 5. ANTI DUPLICADOS OUTBOUND
     # ==========================================================
+    # 🛡️ FIX: ahora vive en su propia caché (RATE_LIMIT_MOBILE_OUTBOUND_DEDUPE),
+    # separada del contador de flood — antes ambos usos compartían el mismo
+    # diccionario para dos propósitos distintos (no chocaban entre sí porque
+    # las llaves nunca coincidían, pero era frágil y confuso de mantener).
     mensaje_hash = hashlib.sha256(f"{telefono_destino}:{texto_mensaje[:120]}".encode()).hexdigest()
 
     async with config.rate_limit_global_lock:
-        if mensaje_hash in config.RATE_LIMIT_MOBILE_OUTBOUND:
-            config.logger.warning(f"♻️ [WHATSAPP DUPLICATE BLOCK] Mensaje repetido bloqueado para {telefono_destino}")
+        if mensaje_hash in config.RATE_LIMIT_MOBILE_OUTBOUND_DEDUPE:
+            config.logger.warning(f"♻️ [WHATSAPP DUPLICATE BLOCK] Mensaje repetido bloqueado para {enmascarar_telefono(telefono_destino)}")
             return False
-        config.RATE_LIMIT_MOBILE_OUTBOUND[mensaje_hash] = config.now_ts()
+        config.RATE_LIMIT_MOBILE_OUTBOUND_DEDUPE[mensaje_hash] = config.now_ts()
 
     # ==========================================================
     # 🛡️ 6. RATE LIMIT GLOBAL OUTBOUND
@@ -107,11 +111,15 @@ async def disparar_whatsapp_dinamico_async(
     rl_key = f"{phone_id}:{telefono_destino}"
 
     async with config.rate_limit_global_lock:
-        outbound_actual = config.RATE_LIMIT_MOBILE_OUTBOUND.get(rl_key, 0)
+        outbound_actual = config.RATE_LIMIT_MOBILE_OUTBOUND_FLOOD.get(rl_key, 0)
         if outbound_actual >= 12:
-            config.logger.warning(f"🚨 [WHATSAPP FLOOD BLOCK] Outbound excedido hacia {telefono_destino}")
+            # 🛡️ FIX: log más visible (antes solo decía "Outbound excedido", sin
+            # aclarar que esto es un AUTO-BLOQUEO interno, no un rechazo de Meta —
+            # alguien revisando logs por primera vez podía confundir esto con un
+            # error real de la API de WhatsApp.
+            config.logger.warning(f"🚨 [WHATSAPP FLOOD BLOCK — AUTO-BLOQUEO INTERNO, NO ES ERROR DE META] Se bloqueó un envío hacia {enmascarar_telefono(telefono_destino)} por exceder 12 mensajes/60s a este mismo número. Esto NO significa que Meta rechazó nada — es un límite propio de Veltrix para evitar saturar a un mismo contacto.")
             return False
-        config.RATE_LIMIT_MOBILE_OUTBOUND[rl_key] = outbound_actual + 1
+        config.RATE_LIMIT_MOBILE_OUTBOUND_FLOOD[rl_key] = outbound_actual + 1
 
     # ==========================================================
     # 🛡️ 7. URL META API
@@ -180,7 +188,13 @@ async def disparar_whatsapp_dinamico_async(
             # 🚨 15. TOKEN INVÁLIDO / PHONE BLOQUEADO
             # ==========================================================
             if status in [400, 401, 403]:
-                config.logger.error(f"🚨 [META AUTH ERROR] Status={status} | Body={response.text[:500]}")
+                # 🛡️ FIX: esta es, con mucha probabilidad, la ventana de 24h de
+                # WhatsApp — Meta rechaza mensajes de texto libre a un número que
+                # no te ha escrito en las últimas 24 horas (requiere plantilla
+                # pre-aprobada en ese caso). El código del error de Meta suele
+                # aparecer en el body de la respuesta — por eso ahora se loguea
+                # completo, no truncado a 500 caracteres.
+                config.logger.error(f"🚨 [META AUTH/POLICY ERROR] Status={status} | Body={response.text} | Posible causa: ventana de 24h cerrada (Meta exige plantilla pre-aprobada para reabrir contacto), token inválido, o número bloqueado.")
                 return False
 
             # ==========================================================
