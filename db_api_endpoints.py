@@ -367,12 +367,24 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
             url_imagen = None
             if producto_detectado:
                 try:
-                    # FIX FASE 4: Se añade ordenamiento por relevancia y se mitiga el comodín masivo
+                    # 🛡️ FIX: antes la búsqueda exigía coincidencia literal exacta del
+                    # texto que extrajo la IA contra el nombre real en inventario — una
+                    # sola diferencia de puntuación (ej. "Batman: Arkham Knight" vs
+                    # "Batman Arkham Knight", con/sin dos puntos) rompía el match por
+                    # completo y el cliente se quedaba sin la foto aunque SÍ existiera.
+                    # Se quita puntuación común antes de buscar, para ser más tolerante.
+                    producto_normalizado = re.sub(r'[:\-,.]', ' ', producto_detectado)
+                    producto_normalizado = re.sub(r'\s+', ' ', producto_normalizado).strip()
                     res_juego = await async_db_execute(
-                        supabase.table('inventario').select('url_portada').ilike('nombre', f'%{producto_detectado}%')
+                        supabase.table('inventario').select('nombre, url_portada').ilike('nombre', f'%{producto_normalizado}%')
                         .eq('vendedor_id', vendedor_id).order('stock', desc=True).limit(1)
                     )
-                    if res_juego.data and res_juego.data[0].get('url_portada'): url_imagen = res_juego.data[0]['url_portada']
+                    if res_juego.data and res_juego.data[0].get('url_portada'):
+                        url_imagen = res_juego.data[0]['url_portada']
+                    # 🆕 FIX: log de diagnóstico — antes, si esto fallaba, no había
+                    # ninguna forma de saber por qué sin adivinar. Ahora queda visible
+                    # en los logs de Render exactamente qué se buscó y qué se encontró.
+                    logger.info(f"🖼️ [TRACE:{trace_id}] Búsqueda de portada — detectado='{producto_detectado}' normalizado='{producto_normalizado}' encontrado={'sí' if url_imagen else 'NO'}")
                 except Exception as e:
                     logger.warning(f"⚠️ [TRACE:{trace_id}] Fallo al buscar portada: {e}")
 
