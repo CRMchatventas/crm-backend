@@ -1405,6 +1405,12 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
      pregúntale su presupuesto, y que si llega un ejemplar dentro de ese rango de
      precio le avisas. Esto aplica siempre que el inventario de lo que pidió esté en
      cero, incluso después de ya haberle ofrecido la alternativa de arriba.
+   🆕 Si el cliente CONFIRMA que quiere el encargo (te da o ya tenía claro el producto
+   Y el presupuesto/rango de precio que está dispuesto a pagar) usa intencion ENCARGO
+   — esto es lo que hace que tu mensaje de "te aviso cuando llegue" sea una promesa
+   real y no solo una frase bonita: el dueño del negocio recibe un aviso claro con el
+   producto y presupuesto exactos para poder cumplirla. Si el cliente solo preguntó
+   "¿me avisas?" sin dar presupuesto, sigue en COTIZACION hasta que sí lo dé.
  
 2. PREGUNTAS ABIERTAS Y BÚSQUEDA POR CATEGORÍA
    Si el cliente pregunta alguna variante de "¿qué tienes?", "¿qué hay disponible?"
@@ -1478,7 +1484,7 @@ IMPORTANTE: dentro de "respuesta", nunca uses comillas dobles ("). Si quieres re
 nombre de un producto, hazlo sin comillas o con *un solo asterisco* — las comillas dobles
 dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.{_nota_perfil}
 {{
-  "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO|INTERES_VELTRIX",
+  "intencion":          "COMPRA|COTIZACION|HUMANO|REGATEO|POSTVENTA|PAGO_RECIBIDO|INTERES_VELTRIX|ENCARGO",
   "respuesta":          "Texto natural hacia el cliente",
   "emocion_cliente":    "neutral|feliz|frustrado|ansioso|dudoso",
   "temperatura_lead":   "frio|tibio|caliente",
