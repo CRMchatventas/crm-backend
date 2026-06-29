@@ -1969,7 +1969,7 @@ async def obtener_metricas_financieras(_sesion: str = Depends(verificar_sesion_b
 async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO solicitado para {_sesion}")
     try:
-        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol, giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
         if not res_admin.data or str(res_admin.data[0].get('rol', '')).lower() != 'admin':
             logger.warning(f"🚨 [TRACE:{trace_id}] Intento de reset completo bloqueado. Requiere privilegios de Administrador.")
             raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
@@ -1987,19 +1987,32 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
         # guardar cada producto (ver guardar_inventario) — esta cosecha es
         # la red de seguridad para todo lo que se guardó ANTES de que esa
         # conexión existiera.
+        #
+        # 🛡️ FIX (causa real del Código 422): 'giro' vive en
+        # 'configuracion_bot', NO en 'usuarios_veltrix' — pedirlo de la
+        # tabla equivocada rompía la consulta completa.
         # ==========================================================
-        giro_vendedor = str((res_admin.data[0].get('giro') if res_admin.data else '') or '').lower()
+        try:
+            res_giro = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+            giro_vendedor = str((res_giro.data[0].get('giro') if res_giro.data else '') or '').lower()
+        except Exception:
+            giro_vendedor = ""
+
         if 'videojueg' in giro_vendedor:
             try:
                 from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
+                # 🛡️ FIX: se quita el filtro .not_.is_('url_portada', 'null')
+                # que no se pudo verificar en este entorno — se trae todo y
+                # se filtra del lado de Python, sin depender de una sintaxis
+                # de PostgREST que no se podía probar en vivo.
                 res_items = await asyncio.wait_for(
                     async_db_execute(
                         supabase.table('inventario').select('nombre, categoria, genero, url_portada')
-                        .eq('vendedor_id', str(_sesion)).not_.is_('url_portada', 'null')
+                        .eq('vendedor_id', str(_sesion))
                     ),
                     timeout=20.0
                 )
-                items_con_portada = res_items.data or []
+                items_con_portada = [it for it in (res_items.data or []) if str(it.get('url_portada') or '').strip()]
                 logger.warning(f"📚 [TRACE:{trace_id}] Cosechando {len(items_con_portada)} portada(s) hacia el catálogo maestro antes de borrar...")
                 for item in items_con_portada:
                     await contribuir_catalogo_maestro_en_segundo_plano(
