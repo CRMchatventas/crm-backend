@@ -1676,27 +1676,41 @@ async def borrar_item(item: BorrarItemRequest, vendedor_id: str = Depends(verifi
 def procesar_en_lotes(lista, n):
     for i in range(0, len(lista), n): yield lista[i:i + n]
 
-async def background_enviar_campana(prospectos: list, mensaje: str, meta_token: str, meta_phone_id: str, trace_id: str):
+async def background_enviar_campana(prospectos: list, mensaje: str, meta_token: str, meta_phone_id: str, trace_id: str) -> dict:
     from ai_whatsapp_media import disparar_whatsapp_dinamico_async
     logger.info(f"🚀 [TRACE:{trace_id}] Iniciando envío masivo a {len(prospectos)} prospectos (En Lotes).")
     sem = asyncio.Semaphore(10)
+    # 🛡️ FIX REAL: antes esto corría como BackgroundTask y el endpoint le
+    # decía "envío exitoso" al usuario en el momento de ENCOLAR, sin esperar
+    # a saber si algo realmente llegó — el resultado de
+    # disparar_whatsapp_dinamico_async ni siquiera se leía. Ahora se cuenta
+    # de verdad cuántos llegaron y cuántos no, y el endpoint espera este
+    # resultado antes de responder.
+    contador = {"exitosos": 0, "fallidos": 0}
 
     async def enviar_con_semaforo(p):
         async with sem:
             try:
-                await disparar_whatsapp_dinamico_async(p['telefono'], mensaje, meta_token, meta_phone_id)
+                ok = await disparar_whatsapp_dinamico_async(p['telefono'], mensaje, meta_token, meta_phone_id)
+                if ok:
+                    contador["exitosos"] += 1
+                else:
+                    contador["fallidos"] += 1
+                    logger.warning(f"⚠️ [TRACE:{trace_id}] Envío NO confirmado a {enmascarar_telefono(p['telefono'])} (revisa el log de [WHATSAPP ...] de justo antes para la razón exacta).")
                 await asyncio.sleep(0.1)
             except Exception as e:
+                contador["fallidos"] += 1
                 logger.error(f"❌ [TRACE:{trace_id}] Fallo envío a {enmascarar_telefono(p['telefono'])}: {str(e)}")
 
     for lote in procesar_en_lotes(prospectos, 50):
         tareas = [asyncio.create_task(enviar_con_semaforo(p)) for p in lote]
         await asyncio.gather(*tareas)
         await asyncio.sleep(1.0)
-    logger.info(f"✅ [TRACE:{trace_id}] Campaña masiva completada exitosamente.")
+    logger.info(f"✅ [TRACE:{trace_id}] Campaña masiva terminada — {contador['exitosos']} confirmados, {contador['fallidos']} fallidos de {len(prospectos)}.")
+    return contador
 
 @router.post("/api/mensaje_masivo")
-async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, background_tasks: BackgroundTasks, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     try:
         vendedor_id = str(_sesion)
         res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('meta_token, meta_phone_id').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
@@ -1708,13 +1722,22 @@ async def ejecutar_campana_masiva(datos: CampanaMasivaRequest, background_tasks:
         fila_a_buscar = datos.columna_origen
         res_prospectos = await async_db_execute(supabase.table('prospectos').select('telefono, nombre').eq('vendedor_id', vendedor_id).eq('fila', fila_a_buscar))
         prospectos_data = res_prospectos.data or []
-        if not prospectos_data: return {"status": "ok", "msg": "No hay prospectos en la columna especificada."}
+        if not prospectos_data: return {"status": "ok", "msg": "No hay prospectos en la columna especificada.", "exitosos": 0, "fallidos": 0, "total_objetivos": 0}
 
-        background_tasks.add_task(background_enviar_campana, prospectos_data, datos.mensaje, meta_token, meta_phone, trace_id)
-        return {"status": "ok", "msg": "Campaña encolada en background", "total_objetivos": len(prospectos_data)}
+        # 🛡️ FIX REAL: ya no se usa BackgroundTasks — se espera el resultado
+        # real antes de responder, así "éxito" significa éxito de verdad, no
+        # solo "se encoló sin errores". Para columnas grandes esto tarda más
+        # en responder (es lo correcto: más vale tardar y decir la verdad
+        # que responder rápido y mentir).
+        resultado = await background_enviar_campana(prospectos_data, datos.mensaje, meta_token, meta_phone, trace_id)
+
+        msg_final = f"{resultado['exitosos']} de {len(prospectos_data)} mensajes confirmados."
+        if resultado['fallidos'] > 0:
+            msg_final += f" {resultado['fallidos']} fallaron — revisa los logs de Render para la razón exacta de cada uno."
+        return {"status": "ok", "msg": msg_final, "exitosos": resultado['exitosos'], "fallidos": resultado['fallidos'], "total_objetivos": len(prospectos_data)}
     except HTTPException: raise
     except Exception as e:
-        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en encolamiento de ejecución masiva: {e}")
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en ejecución masiva: {e}")
         raise HTTPException(status_code=500, detail="Fallo campaña masiva.")
 
 # ==========================================================
