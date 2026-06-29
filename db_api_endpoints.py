@@ -1491,9 +1491,11 @@ class EditarItemVisorRequest(BaseModel):
     estado_general: Optional[str] = None
     costo: Optional[float] = None
     genero: Optional[str] = None
-    precio_min_inmediato: Optional[float] = None
-    precio_min_24h: Optional[float] = None
-    precio_min_72h: Optional[float] = None
+    # 🆕 SISTEMA NUEVO DE DESCUENTOS — reemplaza precio_min_inmediato/24h/72h.
+    descuento_max_porcentaje: Optional[float] = None
+    precio_minimo_rotacion: Optional[float] = None
+    usar_precio_mercado_como_destino: Optional[bool] = None
+    precio_mercado_referencia: Optional[float] = None
     descripcion_detallada: Optional[str] = None
     tipo_producto: Optional[str] = None
 
@@ -1541,13 +1543,14 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
             "descripcion_detallada": bleach.clean(datos.descripcion_detallada.strip(), tags=[], strip=True)[:2000],
             "atributos_extra": datos.atributos_extra or {},
         }
-        # 🆕 Igual que en edición: solo se incluyen si de verdad se mandaron.
-        if datos.precio_min_inmediato is not None:
-            campos["precio_min_inmediato"] = datos.precio_min_inmediato
-        if datos.precio_min_24h is not None:
-            campos["precio_min_24h"] = datos.precio_min_24h
-        if datos.precio_min_72h is not None:
-            campos["precio_min_72h"] = datos.precio_min_72h
+        # 🆕 SISTEMA NUEVO DE DESCUENTOS — solo se incluyen si de verdad se mandaron.
+        if datos.descuento_max_porcentaje is not None:
+            campos["descuento_max_porcentaje"] = datos.descuento_max_porcentaje
+        if datos.precio_minimo_rotacion is not None:
+            campos["precio_minimo_rotacion"] = datos.precio_minimo_rotacion
+        campos["usar_precio_mercado_como_destino"] = datos.usar_precio_mercado_como_destino
+        if datos.precio_mercado_referencia is not None:
+            campos["precio_mercado_referencia"] = datos.precio_mercado_referencia
         if datos.id_catalogo and datos.id_catalogo.strip():
             campos["id_catalogo"] = datos.id_catalogo.strip()[:100]
 
@@ -1640,12 +1643,14 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
             campos["costo"] = item.costo
         if item.genero is not None:
             campos["genero"] = bleach.clean(item.genero.strip(), tags=[], strip=True)[:100] if item.genero.strip() else None
-        if item.precio_min_inmediato is not None:
-            campos["precio_min_inmediato"] = item.precio_min_inmediato
-        if item.precio_min_24h is not None:
-            campos["precio_min_24h"] = item.precio_min_24h
-        if item.precio_min_72h is not None:
-            campos["precio_min_72h"] = item.precio_min_72h
+        if item.descuento_max_porcentaje is not None:
+            campos["descuento_max_porcentaje"] = item.descuento_max_porcentaje
+        if item.precio_minimo_rotacion is not None:
+            campos["precio_minimo_rotacion"] = item.precio_minimo_rotacion
+        if item.usar_precio_mercado_como_destino is not None:
+            campos["usar_precio_mercado_como_destino"] = item.usar_precio_mercado_como_destino
+        if item.precio_mercado_referencia is not None:
+            campos["precio_mercado_referencia"] = item.precio_mercado_referencia
         if item.descripcion_detallada is not None:
             campos["descripcion_detallada"] = bleach.clean(item.descripcion_detallada.strip(), tags=[], strip=True)[:2000]
         if item.tipo_producto is not None:
@@ -1906,7 +1911,7 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
         res_inv = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario')
-                .select('id, vendedor_id, nombre, categoria, tipo_producto, genero, estado_general, precio, precio_min_inmediato, url_portada, stock')
+                .select('id, vendedor_id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, stock')
                 .in_('vendedor_id', list(mapa_vendedores.keys()))
                 .gt('stock', 0)
                 .ilike('nombre', f'%{termino}%')
@@ -1927,12 +1932,18 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
         telefonos = {r['vendedor_id']: str(r.get('numero_bot_whatsapp', '') or '') for r in (res_tel.data or [])}
 
         resultados = []
+        from db_rag_scraper import _calcular_precio_vigente_con_rampa
         for item in (res_inv.data or []):
             vid = item.get('vendedor_id')
             v = mapa_vendedores.get(vid, {})
             precio = float(item.get('precio') or 0)
-            precio_especial = item.get('precio_min_inmediato')
-            tiene_oferta = precio_especial is not None and float(precio_especial) > 0 and float(precio_especial) < precio
+            # 🛡️ FIX: antes usaba 'precio_min_inmediato' (sistema viejo de 3
+            # fechas fijas, ya retirado) como señal de "oferta especial" —
+            # ahora usa el precio REAL vigente de la rampa de rotación, que
+            # de verdad refleja si este producto está más barato hoy.
+            calculo = _calcular_precio_vigente_con_rampa(item)
+            precio_especial = calculo["precio_vigente"]
+            tiene_oferta = calculo["rotacion_activa"] and precio_especial < precio
             resultados.append({
                 "nombre": str(item.get('nombre', '')),
                 "categoria": str(item.get('categoria', '') or ''),
@@ -2004,7 +2015,7 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         telefono_whatsapp = str((res_conf.data[0].get('numero_bot_whatsapp') if res_conf.data else None) or '')
 
         query = supabase.table('inventario').select(
-            'id, nombre, categoria, tipo_producto, genero, estado_general, precio, precio_min_inmediato, url_portada, stock'
+            'id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, stock'
         ).eq('vendedor_id', vendedor_id).gt('stock', 0)
         termino = limpiar_texto(q)[:100].strip()
         if termino:
@@ -2012,10 +2023,14 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         res_inv = await asyncio.wait_for(async_db_execute(query.order('nombre').limit(1000)), timeout=15.0)
 
         productos = []
+        from db_rag_scraper import _calcular_precio_vigente_con_rampa
         for item in (res_inv.data or []):
             precio = float(item.get('precio') or 0)
-            precio_especial = item.get('precio_min_inmediato')
-            tiene_precio_especial = precio_especial is not None and float(precio_especial) > 0 and float(precio_especial) < precio
+            # 🛡️ FIX: mismo cambio que en la búsqueda cruzada — precio real
+            # de la rampa de rotación, no el campo viejo retirado.
+            calculo = _calcular_precio_vigente_con_rampa(item)
+            precio_especial = calculo["precio_vigente"]
+            tiene_precio_especial = calculo["rotacion_activa"] and precio_especial < precio
             productos.append({
                 "id": item.get('id'),
                 "nombre": str(item.get('nombre', '')),
@@ -2346,7 +2361,12 @@ COLUMNAS_CSV_VIDEOJUEGOS = [
     # "actualiza este producto" en vez de crear uno duplicado.
     "id", "codigo_barras", "nombre", "plataforma", "cantidad",
     "precio_compra", "precio_venta",
-    "precio_min_inmediato", "precio_min_24h", "precio_min_72h",
+    # 🆕 SISTEMA NUEVO DE DESCUENTOS — reemplaza los 3 precios mínimos por
+    # fecha fija (que generaban confusión: ¿se suman? ¿se reemplazan?). Ahora
+    # son 2 controles independientes: cuánto puede regatear el bot en
+    # conversación normal (%), y a dónde quieres que llegue el precio si el
+    # producto no se vende en 90 días (deja vacío para apagar esto último).
+    "descuento_max_pct", "precio_minimo_rotacion", "usar_precio_mercado",
     "estado_general", "descripcion_detallada", "genero", "tipo_producto"
 ]
 COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
@@ -2355,7 +2375,7 @@ COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_c
 # tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
 # "le falta el case", etc. — lo que el bot lee para describirle el estado
 # real al cliente). Se renombra para que sea explícito.
-EJEMPLO_CSV_VIDEOJUEGOS = ["", "", "Batman Arkham Knight", "PS4", "1", "300", "550", "500", "450", "400", "Completo", "Disco con rayones leves, funciona perfecto", "Acción", "Videojuegos"]
+EJEMPLO_CSV_VIDEOJUEGOS = ["", "", "Batman Arkham Knight", "PS4", "1", "300", "550", "20", "", "NO", "Completo", "Disco con rayones leves, funciona perfecto", "Acción", "Videojuegos"]
 EJEMPLO_CSV_GENERICO = ["", "Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
 INSTRUCCIONES_CSV_VIDEOJUEGOS = [
@@ -2366,9 +2386,9 @@ INSTRUCCIONES_CSV_VIDEOJUEGOS = [
     "Cantidad en stock — número entero. CERO está bien (queda guardado pero oculto hasta que le pongas stock)",
     "Costo de compra — número, sin signo de pesos",
     "Precio de venta — OBLIGATORIO, número mayor a cero",
-    "Precio mínimo autorizado de inmediato — opcional, déjalo vacío si no aplica",
-    "Precio mínimo autorizado a 24h — opcional",
-    "Precio mínimo autorizado a 72h — opcional",
+    "% máximo que el bot puede regatear en conversación normal — ej. 20. Déjalo vacío para no permitir regateo en este producto",
+    "Precio mínimo al que quieres llegar si NO se vende en 90 días (baja poco a poco, nunca de golpe) — déjalo VACÍO para que este producto nunca baje de precio solo, sin importar cuánto tarde en venderse",
+    "SI o NO — si pones SI, el destino de la baja de precio es el último precio de mercado que consultaste en el Visor, en vez del número de la columna anterior",
     "Estado físico: Nuevo/Sellado, Completo CIB, Solo Disco, etc.",
     "Notas o defectos visibles — texto libre, ej. 'rayón leve en el disco'",
     "Género: Acción, Aventura, RPG, Deportes, etc.",
@@ -2579,9 +2599,10 @@ _MAPA_CSV_A_CAMPO_REAL = {
     "precio_venta": "precio",
     "cantidad": "stock",
     "codigo_barras": "codigo_barras",
-    "precio_min_inmediato": "precio_min_inmediato",
-    "precio_min_24h": "precio_min_24h",
-    "precio_min_72h": "precio_min_72h",
+    # 🆕 Sistema nuevo de descuentos — reemplaza precio_min_inmediato/24h/72h.
+    "descuento_max_pct": "descuento_max_porcentaje",
+    "precio_minimo_rotacion": "precio_minimo_rotacion",
+    "usar_precio_mercado": "usar_precio_mercado_como_destino",
 }
 
 @router.get("/api/exportar_inventario")
@@ -2613,6 +2634,11 @@ async def exportar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trac
             for col in columnas:
                 if col == "nombre":
                     fila.append(str(item.get("nombre", "") or ""))
+                    continue
+                # 🆕 El campo es booleano en la base — se exporta como
+                # SI/NO legible, no como "True"/"False" estilo Python.
+                if col == "usar_precio_mercado":
+                    fila.append("SI" if item.get("usar_precio_mercado_como_destino") else "NO")
                     continue
                 campo_real = _MAPA_CSV_A_CAMPO_REAL.get(col, col)
                 valor = item.get(campo_real)
@@ -2679,6 +2705,20 @@ def _safe_float_opcional(valor) -> Optional[float]:
     if valor is None or str(valor).strip() == "": return None
     resultado = _safe_float_importacion(valor)
     return resultado if resultado > 0 else None
+
+def _safe_float_opcional_con_cero(valor) -> Optional[float]:
+    """
+    Igual que _safe_float_opcional, pero preserva un 0 explícito como valor
+    válido — necesario para 'descuento_max_porcentaje': poner 0 a propósito
+    significa "este producto no admite regateo", algo distinto de dejarlo en
+    blanco (que cae al % general del negocio). Solo texto vacío = None.
+    """
+    if valor is None or str(valor).strip() == "": return None
+    return _safe_float_importacion(valor)
+
+def _safe_bool_si_no(valor) -> bool:
+    """SI/Sí/true/1 (sin importar mayúsculas) = True; cualquier otra cosa = False."""
+    return str(valor or "").strip().lower() in ("si", "sí", "true", "1")
 
 @router.post("/api/importar_inventario")
 async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
@@ -2798,9 +2838,9 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
                 "costo": _safe_float_importacion(item.get("costo")),
                 "stock": max(0, int(_safe_float_importacion(item.get("stock")))),
                 "codigo_barras": codigo,
-                "precio_min_inmediato": _safe_float_opcional(item.get("precio_min_inmediato")),
-                "precio_min_24h": _safe_float_opcional(item.get("precio_min_24h")),
-                "precio_min_72h": _safe_float_opcional(item.get("precio_min_72h")),
+                "descuento_max_porcentaje": _safe_float_opcional_con_cero(item.get("descuento_max_pct")),
+                "precio_minimo_rotacion": _safe_float_opcional(item.get("precio_minimo_rotacion")),
+                "usar_precio_mercado_como_destino": _safe_bool_si_no(item.get("usar_precio_mercado")),
                 "atributos_extra": item.get("atributos_extra", {}) or {},
             }
 
