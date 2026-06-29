@@ -2338,12 +2338,16 @@ async def borrar_alerta(datos: BorrarAlertaRequest, _sesion: str = Depends(verif
 # otro giro cae en un set genérico hasta que se definan sus columnas reales.
 # ==========================================================
 COLUMNAS_CSV_VIDEOJUEGOS = [
-    # 🆕 "id": vacío para productos nuevos (el Alta de siempre); si tiene un
-    # número (viene de exportar tu inventario real), la importación lo
-    # toma como "actualiza este producto" en vez de crear uno duplicado.
-    "id", "nombre", "tipo_producto", "plataforma", "genero", "estado_general", "descripcion_detallada",
-    "precio_compra", "precio_venta", "cantidad", "codigo_barras",
-    "precio_min_inmediato", "precio_min_24h", "precio_min_72h"
+    # 🆕 FIX: reordenado a sugerencia del cliente — identificadores primero
+    # (id, código de barras), luego lo esencial del producto, luego dinero
+    # agrupado completo, y al final lo descriptivo/clasificación. "id":
+    # vacío para productos nuevos (el Alta de siempre); si tiene un número
+    # (viene de exportar tu inventario real), la importación lo toma como
+    # "actualiza este producto" en vez de crear uno duplicado.
+    "id", "codigo_barras", "nombre", "plataforma", "cantidad",
+    "precio_compra", "precio_venta",
+    "precio_min_inmediato", "precio_min_24h", "precio_min_72h",
+    "estado_general", "descripcion_detallada", "genero", "tipo_producto"
 ]
 COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
 
@@ -2351,24 +2355,24 @@ COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_c
 # tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
 # "le falta el case", etc. — lo que el bot lee para describirle el estado
 # real al cliente). Se renombra para que sea explícito.
-EJEMPLO_CSV_VIDEOJUEGOS = ["", "Batman Arkham Knight", "Videojuegos", "PS4", "Acción", "Completo", "Disco con rayones leves, funciona perfecto", "300", "550", "1", "", "500", "450", "400"]
+EJEMPLO_CSV_VIDEOJUEGOS = ["", "", "Batman Arkham Knight", "PS4", "1", "300", "550", "500", "450", "400", "Completo", "Disco con rayones leves, funciona perfecto", "Acción", "Videojuegos"]
 EJEMPLO_CSV_GENERICO = ["", "Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
 INSTRUCCIONES_CSV_VIDEOJUEGOS = [
     "DÉJALO VACÍO si es alta nueva. Con un número = actualiza ESE producto (viene de exportar tu inventario)",
+    "Código de barras si tiene uno — déjalo vacío si no",
     "Nombre del producto — OBLIGATORIO",
-    "Tipo: Videojuegos, Accesorios, Reparaciones, etc. — tú decides las categorías de tu negocio",
     "Plataforma: PS5, PS4, Xbox, Switch, etc.",
-    "Género: Acción, Aventura, RPG, Deportes, etc.",
-    "Estado físico: Nuevo/Sellado, Completo CIB, Solo Disco, etc.",
-    "Notas o defectos visibles — texto libre, ej. 'rayón leve en el disco'",
+    "Cantidad en stock — número entero. CERO está bien (queda guardado pero oculto hasta que le pongas stock)",
     "Costo de compra — número, sin signo de pesos",
     "Precio de venta — OBLIGATORIO, número mayor a cero",
-    "Cantidad en stock — número entero. CERO está bien (queda guardado pero oculto hasta que le pongas stock)",
-    "Código de barras si tiene uno — déjalo vacío si no",
     "Precio mínimo autorizado de inmediato — opcional, déjalo vacío si no aplica",
     "Precio mínimo autorizado a 24h — opcional",
     "Precio mínimo autorizado a 72h — opcional",
+    "Estado físico: Nuevo/Sellado, Completo CIB, Solo Disco, etc.",
+    "Notas o defectos visibles — texto libre, ej. 'rayón leve en el disco'",
+    "Género: Acción, Aventura, RPG, Deportes, etc.",
+    "Tipo: Videojuegos, Accesorios, Reparaciones, etc. — tú decides las categorías de tu negocio",
 ]
 INSTRUCCIONES_CSV_GENERICO = [
     "DÉJALO VACÍO si es alta nueva. Con un número = actualiza ESE producto (viene de exportar tu inventario)",
@@ -2498,21 +2502,20 @@ async def cargar_catalogo_prellenado(_sesion: str = Depends(verificar_sesion_b2b
         res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
         giro_crudo = res_conf.data[0].get('giro') if res_conf.data else None
         giro = str(giro_crudo or '').lower()
-        es_videojuegos = "videojueg" in giro or giro == ""
 
-        res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
-        vendedores_mismo_giro = []
-        for r in (res_giros.data or []):
-            g = str(r.get('giro') or '').lower()
-            es_vj_otro = "videojueg" in g or g == ""
-            if es_vj_otro == es_videojuegos:
-                vendedores_mismo_giro.append(r['vendedor_id'])
-
-        if not vendedores_mismo_giro:
-            return {"status": "ok", "importados": 0, "msg": "Todavía no hay catálogo compartido de tu giro disponible."}
+        # 🛡️ FIX REAL (encontrado en pruebas): antes esto leía 'inventario' de
+        # OTROS vendedores del mismo giro — frágil de verdad, porque si ese
+        # otro vendedor borraba su inventario (ej. con un reset de pruebas),
+        # el catálogo "compartido" se vaciaba con él. 'catalogo_maestro' es
+        # la tabla diseñada exactamente para esto: permanente, sin
+        # vendedor_id, no depende de que nadie más conserve su inventario.
+        # Solo existe para videojuegos por ahora (sus columnas son
+        # específicas de ese giro — consola, rareza, etc.).
+        if "videojueg" not in giro and giro != "":
+            return {"status": "ok", "importados": 0, "msg": "Todavía no hay catálogo compartido para tu giro — por ahora solo existe para videojuegos."}
 
         res_catalogo = await asyncio.wait_for(
-            async_db_execute(supabase.table('inventario').select('nombre, categoria, tipo_producto, genero, estado_general').in_('vendedor_id', vendedores_mismo_giro).limit(5000)),
+            async_db_execute(supabase.table('catalogo_maestro').select('nombre, consola, genero').limit(5000)),
             timeout=20.0
         )
 
@@ -2525,24 +2528,20 @@ async def cargar_catalogo_prellenado(_sesion: str = Depends(verificar_sesion_b2b
         vistos = set()
         filas_nuevas = []
         for item in (res_catalogo.data or []):
-            nombre_c = str(item.get('nombre', '')).strip()
-            cat_c = str(item.get('categoria', '') or '').strip()
+            nombre_c = str(item.get('nombre', '') or '').strip()
+            cat_c = str(item.get('consola', '') or '').strip()
             if not nombre_c: continue
             llave = (nombre_c.lower(), cat_c.lower())
             if llave in vistos or llave in ya_tiene: continue
             vistos.add(llave)
-            fila = {
+            filas_nuevas.append({
                 "vendedor_id": vendedor_id, "nombre": nombre_c, "categoria": cat_c,
-                "tipo_producto": str(item.get('tipo_producto', '') or ''),
-                "estado_general": str(item.get('estado_general', '') or ''),
-                "precio": 0, "costo": 0, "stock": 0,
-            }
-            if es_videojuegos:
-                fila["genero"] = str(item.get('genero', '') or '')
-            filas_nuevas.append(fila)
+                "tipo_producto": "Videojuegos", "genero": str(item.get('genero', '') or ''),
+                "estado_general": "", "precio": 0, "costo": 0, "stock": 0,
+            })
 
         if not filas_nuevas:
-            return {"status": "ok", "importados": 0, "msg": "Ya tienes todo el catálogo disponible cargado — no hay nada nuevo que agregar."}
+            return {"status": "ok", "importados": 0, "msg": "El catálogo compartido todavía está vacío, o ya tienes todo lo disponible cargado."}
 
         # Inserción por lotes — no es por un límite real (esto no es un
         # payload externo), es solo prudencia para no mandar una sola
@@ -2699,7 +2698,7 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         # en vez de crear un duplicado.
         vid_str = str(_sesion)
         res_existente = await asyncio.wait_for(
-            async_db_execute(supabase.table('inventario').select('id, nombre, codigo_barras').eq('vendedor_id', vid_str)),
+            async_db_execute(supabase.table('inventario').select('id, nombre, codigo_barras, estado_general').eq('vendedor_id', vid_str)),
             timeout=15.0
         )
         existentes_por_id = {}
@@ -2711,7 +2710,12 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         # dos filas DEL MISMO CSV (ej. "SIREN" y "siren") nunca se comparaban
         # entre sí, solo contra lo que ya estaba en la base. Ahora compara
         # contra TODO lo visto hasta ese punto, sea de la base o del mismo lote.
-        nombres_acumulados = [str(r.get('nombre', '')) for r in (res_existente.data or []) if r.get('nombre')]
+        # 🆕 FIX (pedido del cliente): antes solo se comparaba el nombre — el
+        # mismo juego en "Nuevo/Sellado" y en "Solo Disco" se marcaba como
+        # posible duplicado aunque sean SKUs legítimamente distintos con
+        # precios distintos. Ahora se guarda también la condición de cada
+        # uno, para solo advertir cuando de verdad coincide nombre Y condición.
+        items_acumulados = [{"nombre": str(r.get('nombre', '')), "estado": str(r.get('estado_general', '') or '')} for r in (res_existente.data or []) if r.get('nombre')]
         codigos_existentes_global = {str(r['codigo_barras']).strip() for r in (res_existente.data or []) if r.get('codigo_barras')}
 
         filas_para_insertar = []
@@ -2764,11 +2768,24 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
             # actualizando lógicamente "se parece" a sí mismo, eso no aporta
             # nada como advertencia.
             if not es_actualizacion:
-                if nombres_acumulados:
-                    match = process.extractOne(nombre, nombres_acumulados, scorer=fuzz.WRatio)
+                estado_actual_item = str(item.get("estado_general", "")).strip()
+                if items_acumulados:
+                    nombres_solo = [it["nombre"] for it in items_acumulados]
+                    match = process.extractOne(nombre, nombres_solo, scorer=fuzz.WRatio)
                     if match and match[1] >= 80:
-                        advertencias_similares.append({"fila": fila_num, "nombre_importado": nombre, "parecido_a_existente": match[0], "similitud": round(match[1], 1)})
-                nombres_acumulados.append(nombre)
+                        indice_match = nombres_solo.index(match[0])
+                        estado_existente = items_acumulados[indice_match]["estado"]
+                        # 🆕 Solo se advierte si la condición TAMBIÉN coincide
+                        # (o si a alguno de los dos le falta especificarla, ya
+                        # que ahí no hay forma de saber si es la misma copia
+                        # o no — se prefiere advertir de más a quedarse calladdo
+                        # cuando sí hacía falta). Si las condiciones son
+                        # claramente distintas, es un SKU legítimo, no un
+                        # duplicado accidental.
+                        mismo_estado = (not estado_existente.strip()) or (not estado_actual_item) or (estado_existente.strip().lower() == estado_actual_item.lower())
+                        if mismo_estado:
+                            advertencias_similares.append({"fila": fila_num, "nombre_importado": nombre, "parecido_a_existente": match[0], "similitud": round(match[1], 1)})
+                items_acumulados.append({"nombre": nombre, "estado": estado_actual_item})
 
             campos = {
                 "nombre": nombre,
