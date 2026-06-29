@@ -2093,6 +2093,50 @@ async def obtener_metricas_financieras(_sesion: str = Depends(verificar_sesion_b
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo calculando métricas: {e}")
         raise HTTPException(status_code=500, detail="Error al calcular métricas financieras.")
 
+async def _cosechar_portadas_antes_de_borrar(vendedor_id: str, trace_id: str) -> None:
+    """
+    🆕 Antes de borrar el inventario de un vendedor (sea por reset completo o
+    por vaciar solo el inventario), se rescata cualquier portada que ya haya
+    guardado hacia el catálogo maestro COMPARTIDO. Sin esto, un vendedor que
+    le puso portada a "MLB Baseball" la perdería para siempre — ahora
+    sobrevive ahí, disponible para cualquier vendedor que vuelva a tener ese
+    mismo producto (incluyendo este mismo, si lo vuelve a dar de alta).
+
+    Esto es ADEMÁS de la contribución automática que ya pasa al guardar cada
+    producto (ver guardar_inventario) — esta cosecha es la red de seguridad
+    para todo lo que se guardó ANTES de que esa conexión existiera.
+    """
+    try:
+        res_giro = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
+        giro_vendedor = str((res_giro.data[0].get('giro') if res_giro.data else '') or '').lower()
+    except Exception:
+        giro_vendedor = ""
+
+    if 'videojueg' not in giro_vendedor:
+        return
+
+    try:
+        from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
+        res_items = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('inventario').select('nombre, categoria, genero, url_portada')
+                .eq('vendedor_id', vendedor_id)
+            ),
+            timeout=20.0
+        )
+        items_con_portada = [it for it in (res_items.data or []) if str(it.get('url_portada') or '').strip()]
+        logger.warning(f"📚 [TRACE:{trace_id}] Cosechando {len(items_con_portada)} portada(s) hacia el catálogo maestro antes de borrar...")
+        for item in items_con_portada:
+            await contribuir_catalogo_maestro_en_segundo_plano(
+                vendedor_id, item.get('nombre'), item.get('categoria'), item.get('genero'), item.get('url_portada')
+            )
+        logger.warning(f"📚 [TRACE:{trace_id}] Cosecha completada — {len(items_con_portada)} producto(s) revisado(s).")
+    except Exception as e:
+        # 🛡️ No bloquea el borrado si la cosecha falla — es una protección
+        # extra, no el propósito principal de quien llama a esta función.
+        logger.warning(f"⚠️ [TRACE:{trace_id}] La cosecha hacia catálogo maestro falló (el borrado continúa igual): {e}")
+
+
 # ==========================================================
 # 💀 16D. RESET COMPLETO (DESTRUCTIVO — exclusivo para Administrador)
 # Tampoco existía. Borra TODO el inventario, prospectos y mensajes del
@@ -2107,55 +2151,7 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
             logger.warning(f"🚨 [TRACE:{trace_id}] Intento de reset completo bloqueado. Requiere privilegios de Administrador.")
             raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
 
-        # ==========================================================
-        # 🆕 COSECHA DE SEGURIDAD — antes de borrar nada, se rescata
-        # cualquier portada que este vendedor ya haya guardado hacia el
-        # catálogo maestro COMPARTIDO. Sin esto, un vendedor que le puso
-        # portada a "MLB Baseball" la perdería para siempre con el reset —
-        # ahora sobrevive ahí, disponible para cualquier vendedor que
-        # vuelva a tener ese mismo producto (incluyendo este mismo, si lo
-        # vuelve a dar de alta después).
-        #
-        # Esto es ADEMÁS de la contribución automática que ya pasa al
-        # guardar cada producto (ver guardar_inventario) — esta cosecha es
-        # la red de seguridad para todo lo que se guardó ANTES de que esa
-        # conexión existiera.
-        #
-        # 🛡️ FIX (causa real del Código 422): 'giro' vive en
-        # 'configuracion_bot', NO en 'usuarios_veltrix' — pedirlo de la
-        # tabla equivocada rompía la consulta completa.
-        # ==========================================================
-        try:
-            res_giro = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
-            giro_vendedor = str((res_giro.data[0].get('giro') if res_giro.data else '') or '').lower()
-        except Exception:
-            giro_vendedor = ""
-
-        if 'videojueg' in giro_vendedor:
-            try:
-                from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
-                # 🛡️ FIX: se quita el filtro .not_.is_('url_portada', 'null')
-                # que no se pudo verificar en este entorno — se trae todo y
-                # se filtra del lado de Python, sin depender de una sintaxis
-                # de PostgREST que no se podía probar en vivo.
-                res_items = await asyncio.wait_for(
-                    async_db_execute(
-                        supabase.table('inventario').select('nombre, categoria, genero, url_portada')
-                        .eq('vendedor_id', str(_sesion))
-                    ),
-                    timeout=20.0
-                )
-                items_con_portada = [it for it in (res_items.data or []) if str(it.get('url_portada') or '').strip()]
-                logger.warning(f"📚 [TRACE:{trace_id}] Cosechando {len(items_con_portada)} portada(s) hacia el catálogo maestro antes de borrar...")
-                for item in items_con_portada:
-                    await contribuir_catalogo_maestro_en_segundo_plano(
-                        str(_sesion), item.get('nombre'), item.get('categoria'), item.get('genero'), item.get('url_portada')
-                    )
-                logger.warning(f"📚 [TRACE:{trace_id}] Cosecha completada — {len(items_con_portada)} producto(s) revisado(s).")
-            except Exception as e:
-                # 🛡️ No bloquea el reset si la cosecha falla — es una
-                # protección extra, no el propósito principal de este botón.
-                logger.warning(f"⚠️ [TRACE:{trace_id}] La cosecha hacia catálogo maestro falló (el reset continúa igual): {e}")
+        await _cosechar_portadas_antes_de_borrar(str(_sesion), trace_id)
 
         # FIX FASE 1: allow_retry=False — destrucción masiva e irreversible (DELETE)
         await asyncio.wait_for(async_db_execute(supabase.table('inventario').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
@@ -2180,6 +2176,33 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en reset_limpio: {e}")
         raise HTTPException(status_code=500, detail="Error al ejecutar el reset.")
+
+
+# ==========================================================
+# 🆕 VACIAR SOLO INVENTARIO (sin tocar chats, prospectos, ventas ni
+# aprendizaje) — para cuando alguien quiere empezar de cero con productos
+# (ej. dejó de usar el catálogo prellenado y prefiere subir todo a mano o
+# por CSV propio) sin perder su historial de clientes. A diferencia de
+# /api/reset_limpio, este es mucho más angosto a propósito.
+# ==========================================================
+@router.post("/api/vaciar_inventario")
+async def vaciar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.warning(f"🗑️ [TRACE:{trace_id}] Vaciado de SOLO inventario solicitado para {_sesion}")
+    try:
+        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        if not res_admin.data or str(res_admin.data[0].get('rol', '')).lower() != 'admin':
+            logger.warning(f"🚨 [TRACE:{trace_id}] Intento de vaciar inventario bloqueado. Requiere privilegios de Administrador.")
+            raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
+
+        await _cosechar_portadas_antes_de_borrar(str(_sesion), trace_id)
+
+        await asyncio.wait_for(async_db_execute(supabase.table('inventario').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+        logger.warning(f"🗑️ [TRACE:{trace_id}] Inventario vaciado para {_sesion} — chats, prospectos, ventas y aprendizaje quedaron intactos.")
+        return {"status": "ok"}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo vaciando inventario: {e}")
+        raise HTTPException(status_code=500, detail="Error al vaciar el inventario.")
 
 
 # ==============================================================================
@@ -2448,6 +2471,94 @@ async def descargar_plantilla(prellenada: bool = False, _sesion: str = Depends(v
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo generando plantilla CSV: {e}")
         raise HTTPException(status_code=500, detail="Error al generar la plantilla.")
+
+
+# ==========================================================
+# 🆕 CARGAR CATÁLOGO PRELLENADO DIRECTO AL INVENTARIO
+# Reemplaza la idea de "descargar plantilla con 3000 filas" (que chocaba
+# de frente con el límite de 1000 por lote de /api/importar_inventario) —
+# en vez de eso, esto lee el catálogo compartido y lo escribe DIRECTO al
+# inventario del vendedor del lado del servidor. No hay payload externo
+# que limitar: la lectura y la escritura pasan completas aquí mismo.
+#
+# Todo se crea con precio=0 y stock=0 — es un catálogo para EXPLORAR, no
+# inventario real todavía. El vendedor entra al Visor después y ajusta
+# precio/cantidad uno por uno, solo para lo que de verdad va a vender.
+# 🛡️ DECISIÓN DE PRODUCTO: esto NO cuenta contra el límite de productos
+# del plan (_verificar_cupo_inventario) a propósito — mientras el stock
+# siga en 0, no es inventario real que el negocio esté vendiendo, así que
+# no debería "gastar" cupo del plan. Si esto no es lo que se espera,
+# avísame y lo ajustamos.
+# ==========================================================
+@router.post("/api/cargar_catalogo_prellenado")
+async def cargar_catalogo_prellenado(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"📚 [TRACE:{trace_id}] Carga de catálogo prellenado solicitada por {_sesion}")
+    try:
+        vendedor_id = str(_sesion)
+        res_conf = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1)), timeout=5.0)
+        giro_crudo = res_conf.data[0].get('giro') if res_conf.data else None
+        giro = str(giro_crudo or '').lower()
+        es_videojuegos = "videojueg" in giro or giro == ""
+
+        res_giros = await asyncio.wait_for(async_db_execute(supabase.table('configuracion_bot').select('vendedor_id, giro')), timeout=10.0)
+        vendedores_mismo_giro = []
+        for r in (res_giros.data or []):
+            g = str(r.get('giro') or '').lower()
+            es_vj_otro = "videojueg" in g or g == ""
+            if es_vj_otro == es_videojuegos:
+                vendedores_mismo_giro.append(r['vendedor_id'])
+
+        if not vendedores_mismo_giro:
+            return {"status": "ok", "importados": 0, "msg": "Todavía no hay catálogo compartido de tu giro disponible."}
+
+        res_catalogo = await asyncio.wait_for(
+            async_db_execute(supabase.table('inventario').select('nombre, categoria, tipo_producto, genero, estado_general').in_('vendedor_id', vendedores_mismo_giro).limit(5000)),
+            timeout=20.0
+        )
+
+        # 🛡️ Anti-duplicado: lo que YA tiene este vendedor no se vuelve a
+        # insertar — así no truena ni duplica si lo corre dos veces, o si ya
+        # había dado de alta algunos productos antes de usar esto.
+        res_existente = await asyncio.wait_for(async_db_execute(supabase.table('inventario').select('nombre, categoria').eq('vendedor_id', vendedor_id)), timeout=15.0)
+        ya_tiene = {(str(r.get('nombre', '')).strip().lower(), str(r.get('categoria', '') or '').strip().lower()) for r in (res_existente.data or [])}
+
+        vistos = set()
+        filas_nuevas = []
+        for item in (res_catalogo.data or []):
+            nombre_c = str(item.get('nombre', '')).strip()
+            cat_c = str(item.get('categoria', '') or '').strip()
+            if not nombre_c: continue
+            llave = (nombre_c.lower(), cat_c.lower())
+            if llave in vistos or llave in ya_tiene: continue
+            vistos.add(llave)
+            fila = {
+                "vendedor_id": vendedor_id, "nombre": nombre_c, "categoria": cat_c,
+                "tipo_producto": str(item.get('tipo_producto', '') or ''),
+                "estado_general": str(item.get('estado_general', '') or ''),
+                "precio": 0, "costo": 0, "stock": 0,
+            }
+            if es_videojuegos:
+                fila["genero"] = str(item.get('genero', '') or '')
+            filas_nuevas.append(fila)
+
+        if not filas_nuevas:
+            return {"status": "ok", "importados": 0, "msg": "Ya tienes todo el catálogo disponible cargado — no hay nada nuevo que agregar."}
+
+        # Inserción por lotes — no es por un límite real (esto no es un
+        # payload externo), es solo prudencia para no mandar una sola
+        # petición gigante a Supabase.
+        TAMANO_LOTE = 500
+        total_insertados = 0
+        for i in range(0, len(filas_nuevas), TAMANO_LOTE):
+            lote = filas_nuevas[i:i + TAMANO_LOTE]
+            await asyncio.wait_for(async_db_execute(supabase.table('inventario').insert(lote), allow_retry=False), timeout=25.0)
+            total_insertados += len(lote)
+
+        logger.info(f"📚 [TRACE:{trace_id}] Catálogo prellenado cargado para {vendedor_id}: {total_insertados} producto(s) nuevo(s) (precio/stock en 0).")
+        return {"status": "ok", "importados": total_insertados, "msg": f"{total_insertados} productos cargados con precio y stock en $0 — ajusta cada uno desde el Visor."}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo cargando catálogo prellenado: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar el catálogo prellenado.")
 
 # ==========================================================
 # 📦 16B. EXPORTAR INVENTARIO REAL A CSV
