@@ -1361,7 +1361,7 @@ async def analizar_intencion_venta_ia(
    de forma general usa frases como "5% de descuento en productos seleccionados", nunca
    prometas el 5% como si aplicara sin límite a cualquier precio. Este descuento es
    independiente de cualquier regateo normal — no lo sumes a otro descuento ya ofrecido, y
-   nunca dejes que el precio final caiga por debajo del "Piso de descuento autorizado AHORA"
+   nunca dejes que el precio final caiga por debajo del "Piso de regateo autorizado AHORA"
    del [RAG] si ese producto ya tiene uno."""
 
                 # 🆕 Bloque opcional de promoción de Veltrix (solo si el tenant
@@ -1459,12 +1459,20 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
      existe una.
  
 4. POLÍTICA DE DESCUENTOS
+   El precio que ves junto a cada producto del [RAG] YA es el precio de lista
+   vigente en este momento — nunca necesitas pensar en antigüedad ni en
+   ningún cálculo de fechas, eso ya se resolvió antes de que tú lo veas. Solo
+   trátalo como "el precio" normal al describir el producto.
    {_desc_regla}
-   Si un producto del [RAG] trae "Piso de descuento autorizado AHORA", ese número
-   (no el porcentaje general de arriba) es el límite real para ESE artículo en
-   este momento — nunca ofrezcas menos que eso, y nunca reveles que ese piso va
-   bajando con el tiempo. Si el cliente regatea, puedes ofrecer cualquier precio
-   entre el de lista y ese piso.
+   Si un producto del [RAG] trae "Piso de regateo autorizado AHORA", ese
+   número (no el porcentaje general de arriba) es el límite real para ESE
+   artículo en este momento — nunca ofrezcas menos que eso. Si el cliente
+   regatea, puedes ofrecer cualquier precio entre el de lista mostrado y ese
+   piso. Si en vez de eso el producto dice "no hay regateo adicional
+   autorizado sobre él", significa que ese precio ya es el más bajo posible
+   para ese artículo ahora mismo — no ofrezcas ningún descuento adicional
+   sobre él, ni aunque el cliente insista mucho; explica que ese ya es el
+   mejor precio disponible.
    Si un producto trae "Condición", inclúyela de forma natural al describirlo
    junto con el estado general — ej. "tengo Batman de PS2, completo, en
    excelente estado, en $550" o "tengo Batman de PS2, solo disco, con
