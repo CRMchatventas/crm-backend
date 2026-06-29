@@ -480,11 +480,15 @@ class NuevoArticulo(BaseSchema):
     costo: float = Field(default=0.0, ge=0)
     precio: float = Field(default=0.0, ge=0)
     precio_minimo_bot: float = Field(default=0.0, ge=0)
-    # 🆕 Faltaban en este esquema — ya existían en EditarItemVisorRequest y
-    # en la tabla real, pero nunca se podían capturar desde el alta misma.
-    precio_min_inmediato: Optional[float] = None
-    precio_min_24h: Optional[float] = None
-    precio_min_72h: Optional[float] = None
+    # 🆕 SISTEMA NUEVO DE DESCUENTOS — reemplaza precio_min_inmediato/24h/72h
+    # (que generaban confusión sobre si se sumaban o se reemplazaban entre
+    # sí). Ahora son 2 controles independientes: % de regateo en
+    # conversación normal, y a dónde quieres que llegue el precio si el
+    # producto no se vende en 90 días.
+    descuento_max_porcentaje: Optional[float] = Field(default=None, ge=0, le=100)
+    precio_minimo_rotacion: Optional[float] = Field(default=None, ge=0)
+    usar_precio_mercado_como_destino: bool = False
+    precio_mercado_referencia: Optional[float] = Field(default=None, ge=0)
     stock: int = Field(default=1, ge=0)
     codigo_barras: str = ""
     url_portada: str = ""
