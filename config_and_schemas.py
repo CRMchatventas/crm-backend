@@ -167,7 +167,14 @@ RESERVAS_TEMPORALES_ULTIMA_UNIDAD: TTLCache = TTLCache(maxsize=5000, ttl=3600)
 rate_limit_tenant: TTLCache = TTLCache(maxsize=50000, ttl=120)
 rate_limit_phone: TTLCache = TTLCache(maxsize=100000, ttl=120)
 LOGIN_RATE_LIMIT: TTLCache = TTLCache(maxsize=10000, ttl=300)
-RATE_LIMIT_MOBILE_OUTBOUND: TTLCache = TTLCache(maxsize=10000, ttl=60)
+# 🛡️ FIX: antes un solo diccionario servía para dos cosas completamente
+# distintas (detectar mensajes duplicados Y contar el límite de envíos por
+# minuto) — no causaba una colisión real porque las llaves nunca coincidían
+# por casualidad, pero era frágil: cualquier cambio futuro a uno de los dos
+# usos podía romper el otro sin que nadie lo notara. Se separan en dos
+# cachés con su propio propósito, cada uno con su nombre.
+RATE_LIMIT_MOBILE_OUTBOUND_DEDUPE: TTLCache = TTLCache(maxsize=10000, ttl=30)
+RATE_LIMIT_MOBILE_OUTBOUND_FLOOD: TTLCache = TTLCache(maxsize=10000, ttl=60)
 RATE_LIMIT_CLIENTES: TTLCache = TTLCache(maxsize=10000, ttl=10)
 WEBHOOK_REPLAY_CACHE: TTLCache = TTLCache(maxsize=50000, ttl=900)
 
