@@ -1455,6 +1455,15 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
                 async_db_execute(supabase.table('inventario').update(campos).eq('id', existente['id']).eq('vendedor_id', str(_sesion)), allow_retry=False),
                 timeout=10.0
             )
+            # 🆕 Contribución al catálogo compartido — en segundo plano, sin
+            # retrasar ni poner en riesgo esta respuesta. Ver
+            # db_rag_scraper.contribuir_catalogo_maestro_en_segundo_plano
+            # para el porqué: así una portada que este vendedor guarda hoy
+            # sobrevive aunque su inventario se borre después.
+            from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
+            asyncio.create_task(contribuir_catalogo_maestro_en_segundo_plano(
+                str(_sesion), campos["nombre"], campos["categoria"], campos.get("genero"), campos.get("url_portada")
+            ))
             return {"status": "ok", "accion": "actualizado", "id": existente['id']}
         else:
             await _verificar_cupo_inventario(str(_sesion), 1, trace_id)
@@ -1464,6 +1473,10 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
                 timeout=10.0
             )
             nuevo_id = resultado.data[0]['id'] if resultado.data else None
+            from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
+            asyncio.create_task(contribuir_catalogo_maestro_en_segundo_plano(
+                str(_sesion), campos["nombre"], campos["categoria"], campos.get("genero"), campos.get("url_portada")
+            ))
             return {"status": "ok", "accion": "creado", "id": nuevo_id}
     except HTTPException: raise
     except Exception as e:
@@ -1956,10 +1969,47 @@ async def obtener_metricas_financieras(_sesion: str = Depends(verificar_sesion_b
 async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
     logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO solicitado para {_sesion}")
     try:
-        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
+        res_admin = await asyncio.wait_for(async_db_execute(supabase.table('usuarios_veltrix').select('rol, giro').eq('vendedor_id', str(_sesion)).limit(1)), timeout=5.0)
         if not res_admin.data or str(res_admin.data[0].get('rol', '')).lower() != 'admin':
             logger.warning(f"🚨 [TRACE:{trace_id}] Intento de reset completo bloqueado. Requiere privilegios de Administrador.")
             raise HTTPException(status_code=403, detail="Operación denegada. Se requieren privilegios de Administrador.")
+
+        # ==========================================================
+        # 🆕 COSECHA DE SEGURIDAD — antes de borrar nada, se rescata
+        # cualquier portada que este vendedor ya haya guardado hacia el
+        # catálogo maestro COMPARTIDO. Sin esto, un vendedor que le puso
+        # portada a "MLB Baseball" la perdería para siempre con el reset —
+        # ahora sobrevive ahí, disponible para cualquier vendedor que
+        # vuelva a tener ese mismo producto (incluyendo este mismo, si lo
+        # vuelve a dar de alta después).
+        #
+        # Esto es ADEMÁS de la contribución automática que ya pasa al
+        # guardar cada producto (ver guardar_inventario) — esta cosecha es
+        # la red de seguridad para todo lo que se guardó ANTES de que esa
+        # conexión existiera.
+        # ==========================================================
+        giro_vendedor = str((res_admin.data[0].get('giro') if res_admin.data else '') or '').lower()
+        if 'videojueg' in giro_vendedor:
+            try:
+                from db_rag_scraper import contribuir_catalogo_maestro_en_segundo_plano
+                res_items = await asyncio.wait_for(
+                    async_db_execute(
+                        supabase.table('inventario').select('nombre, categoria, genero, url_portada')
+                        .eq('vendedor_id', str(_sesion)).not_.is_('url_portada', 'null')
+                    ),
+                    timeout=20.0
+                )
+                items_con_portada = res_items.data or []
+                logger.warning(f"📚 [TRACE:{trace_id}] Cosechando {len(items_con_portada)} portada(s) hacia el catálogo maestro antes de borrar...")
+                for item in items_con_portada:
+                    await contribuir_catalogo_maestro_en_segundo_plano(
+                        str(_sesion), item.get('nombre'), item.get('categoria'), item.get('genero'), item.get('url_portada')
+                    )
+                logger.warning(f"📚 [TRACE:{trace_id}] Cosecha completada — {len(items_con_portada)} producto(s) revisado(s).")
+            except Exception as e:
+                # 🛡️ No bloquea el reset si la cosecha falla — es una
+                # protección extra, no el propósito principal de este botón.
+                logger.warning(f"⚠️ [TRACE:{trace_id}] La cosecha hacia catálogo maestro falló (el reset continúa igual): {e}")
 
         # FIX FASE 1: allow_retry=False — destrucción masiva e irreversible (DELETE)
         await asyncio.wait_for(async_db_execute(supabase.table('inventario').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
@@ -1969,8 +2019,16 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
         # de esta tabla) seguirían mostrando ventas históricas después de un
         # "reset completo", contradiciendo la expectativa de "cero métricas".
         await asyncio.wait_for(async_db_execute(supabase.table('ventas').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
+        # 🆕 FIX: 'ventas_aprendizaje' tampoco se borraba — es el registro
+        # de cada interacción de PRUEBA con el bot. Sin esto, esos mensajes
+        # de prueba se quedarían mezclados con las interacciones reales
+        # después del lanzamiento. A diferencia de catalogo_maestro/
+        # aprendizaje_global (conocimiento agregado/compartido, que nunca
+        # se toca aquí), esto es la bitácora cruda de ESTE ciclo de
+        # pruebas — sí debe limpiarse.
+        await asyncio.wait_for(async_db_execute(supabase.table('ventas_aprendizaje').delete().eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=15.0)
 
-        logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO ejecutado para {_sesion} — inventario, prospectos y mensajes borrados permanentemente.")
+        logger.warning(f"💀 [TRACE:{trace_id}] RESET COMPLETO ejecutado para {_sesion} — inventario, prospectos, mensajes y aprendizaje de prueba borrados permanentemente. catalogo_maestro y aprendizaje_global NUNCA se tocan aquí.")
         return {"status": "ok"}
     except HTTPException: raise
     except Exception as e:
