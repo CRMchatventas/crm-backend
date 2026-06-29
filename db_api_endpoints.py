@@ -201,7 +201,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
     from ai_gemini_core import analizar_intencion_venta_ia, validar_respuesta_ia, generar_resumen_handoff_ia
     from ai_security_utils import detectar_prompt_injection
     from ai_auditor_scraper import auditar_comprobante_ia
-    from db_rag_scraper import obtener_contexto_inventario_rag
+    from db_rag_scraper import obtener_contexto_inventario_rag, intentar_completar_portada_en_segundo_plano
     from ai_whatsapp_media import disparar_whatsapp_dinamico_async, disparar_whatsapp_imagen_async, enviar_alerta_whatsapp_admin
 
     trace_id = obtener_trace_id()
@@ -390,15 +390,27 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                     producto_normalizado = re.sub(r'[:\-,.]', ' ', producto_detectado)
                     producto_normalizado = re.sub(r'\s+', ' ', producto_normalizado).strip()
                     res_juego = await async_db_execute(
-                        supabase.table('inventario').select('nombre, url_portada').ilike('nombre', f'%{producto_normalizado}%')
+                        supabase.table('inventario').select('id, nombre, url_portada').ilike('nombre', f'%{producto_normalizado}%')
                         .eq('vendedor_id', vendedor_id).order('stock', desc=True).limit(1)
                     )
-                    if res_juego.data and res_juego.data[0].get('url_portada'):
-                        url_imagen = res_juego.data[0]['url_portada']
+                    item_match = res_juego.data[0] if res_juego.data else None
+                    if item_match and item_match.get('url_portada'):
+                        url_imagen = item_match['url_portada']
+                    elif item_match and not item_match.get('url_portada'):
+                        # 🆕 RECONEXIÓN: esta es la pieza que existía en el monolito y se
+                        # perdió en la migración — el producto SÍ existe en inventario,
+                        # pero todavía no tiene portada guardada. Se dispara la búsqueda
+                        # y descarga en RAWG EN SEGUNDO PLANO (sin esperar, sin bloquear
+                        # ni retrasar la respuesta que este cliente ya va a recibir). El
+                        # cliente actual no ve la foto en este mensaje; el SIGUIENTE que
+                        # pregunte por lo mismo, sí — exactamente como funcionaba antes.
+                        asyncio.create_task(
+                            intentar_completar_portada_en_segundo_plano(vendedor_id, item_match['id'], item_match.get('nombre', producto_detectado))
+                        )
                     # 🆕 FIX: log de diagnóstico — antes, si esto fallaba, no había
                     # ninguna forma de saber por qué sin adivinar. Ahora queda visible
                     # en los logs de Render exactamente qué se buscó y qué se encontró.
-                    logger.info(f"🖼️ [TRACE:{trace_id}] Búsqueda de portada — detectado='{producto_detectado}' normalizado='{producto_normalizado}' encontrado={'sí' if url_imagen else 'NO'}")
+                    logger.info(f"🖼️ [TRACE:{trace_id}] Búsqueda de portada — detectado='{producto_detectado}' normalizado='{producto_normalizado}' encontrado={'sí' if url_imagen else 'NO'}" + (" (descarga en segundo plano lanzada)" if (item_match and not url_imagen) else ""))
                 except Exception as e:
                     logger.warning(f"⚠️ [TRACE:{trace_id}] Fallo al buscar portada: {e}")
 
