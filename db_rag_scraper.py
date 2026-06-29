@@ -93,22 +93,28 @@ TITULOS_COMPUESTOS = {
 # ==========================================================
 # 💸 PISO DE DESCUENTO VIGENTE (descuento escalonado por tiempo)
 # ==========================================================
-def _calcular_piso_descuento_vigente(item: dict) -> Optional[float]:
+def _calcular_precio_vigente_con_rampa(item: dict) -> dict:
     """
-    Resuelve cuál es el precio MÁS BAJO que el bot puede ofrecer EN ESTE
-    MOMENTO para este artículo, según cuánto tiempo lleva publicado:
-    - Menos de 24h: precio_min_inmediato (lo que se puede dar si piden descuento ya).
-    - 24h o más: precio_min_24h.
-    - 72h (3 días) o más: precio_min_72h (el piso más bajo).
-    Se calcula aquí, en Python, y NUNCA se le pide al modelo que haga la
-    cuenta de fechas — eso es exactamente el tipo de aritmética en la que un
-    LLM se equivoca con facilidad. Al prompt solo le llega el número final.
-    Si un nivel no está configurado (columna en null), se usa el nivel
-    anterior disponible; si no hay ninguno, no hay piso de descuento.
+    🆕 SISTEMA NUEVO — reemplaza el de 3 fechas fijas (precio_min_inmediato/
+    24h/72h) por una rampa suave de 90 días hacia un destino configurable,
+    más un % de regateo independiente aplicado sobre el precio vigente del
+    momento (no sobre el precio de lista original).
+
+    Devuelve:
+      - precio_vigente: el precio de lista EFECTIVO ahora (antes de regateo)
+      - piso_regateo: lo más bajo que el bot puede ofrecer si el cliente regatea (None si no hay % configurado)
+      - rotacion_activa: si hay una rampa configurada para este producto
+      - dias_publicado: para diagnóstico/logs
+
+    🛡️ CANDADO DE SEGURIDAD — esto es código, no configuración: sin importar
+    qué tan mal se configure algo (un mínimo de rotación por accidente por
+    debajo del costo, un % de descuento mal puesto), el precio vigente y el
+    piso de regateo NUNCA pueden caer por debajo de 'costo'. Si confiamos la
+    venta de un producto a un bot, no puede haber forma de perder dinero por
+    un error de captura.
     """
-    inmediato = item.get('precio_min_inmediato')
-    d24 = item.get('precio_min_24h')
-    d72 = item.get('precio_min_72h')
+    precio_lista = float(item.get('precio') or 0)
+    costo = float(item.get('costo') or 0)
     fecha_alta_raw = item.get('fecha_alta')
 
     dias_publicado = 0
@@ -123,16 +129,52 @@ def _calcular_piso_descuento_vigente(item: dict) -> Optional[float]:
             logger.warning(f"⚠️ [DESCUENTO] No se pudo parsear fecha_alta='{fecha_alta_raw}': {e}")
             dias_publicado = 0
 
-    if dias_publicado >= 3 and d72 is not None:
-        return float(d72)
-    if dias_publicado >= 1 and d24 is not None:
-        return float(d24)
-    if inmediato is not None:
-        return float(inmediato)
-    # Sin niveles configurados para este artículo — fallback al último disponible.
-    if d24 is not None: return float(d24)
-    if d72 is not None: return float(d72)
-    return None
+    # --- 1) Rampa de rotación: ¿hay un destino configurado? ---
+    # Si 'usar_precio_mercado_como_destino' está activo, la rampa apunta al
+    # último precio de PriceCharting/heurístico GUARDADO (nunca se consulta
+    # en vivo aquí) en vez del mínimo manual.
+    usar_mercado = bool(item.get('usar_precio_mercado_como_destino', False))
+    destino_raw = item.get('precio_mercado_referencia') if usar_mercado else item.get('precio_minimo_rotacion')
+    rotacion_activa = destino_raw is not None
+    precio_vigente = precio_lista
+
+    if rotacion_activa:
+        try:
+            destino = max(float(destino_raw), costo)  # 🛡️ candado: el destino nunca puede ir bajo el costo
+        except (TypeError, ValueError):
+            destino = precio_lista
+            rotacion_activa = False
+
+        DIAS_TOPE = 90
+        if dias_publicado <= 0:
+            precio_vigente = precio_lista
+        elif dias_publicado >= DIAS_TOPE:
+            precio_vigente = destino
+        else:
+            # Interpolación lineal simple entre precio_lista (día 0) y destino
+            # (día 90) — pasa naturalmente por los días 30/60 sin necesidad de
+            # definir esos puntos intermedios a mano.
+            progreso = dias_publicado / DIAS_TOPE
+            precio_vigente = precio_lista - (precio_lista - destino) * progreso
+
+    precio_vigente = max(precio_vigente, costo)  # 🛡️ candado final
+
+    # --- 2) % de regateo normal, aplicado SOBRE el precio vigente de este momento ---
+    try:
+        porcentaje_max = float(item.get('descuento_max_porcentaje') or 0.0)
+    except (TypeError, ValueError):
+        porcentaje_max = 0.0
+
+    piso_regateo = None
+    if porcentaje_max > 0:
+        piso_regateo = max(precio_vigente * (1 - (porcentaje_max / 100.0)), costo)  # 🛡️ candado
+
+    return {
+        "precio_vigente": round(precio_vigente, 2),
+        "piso_regateo": round(piso_regateo, 2) if piso_regateo is not None else None,
+        "rotacion_activa": rotacion_activa,
+        "dias_publicado": dias_publicado,
+    }
 
 
 def _filtrar_items_reservados(vendedor_id: str, items: list) -> list:
@@ -195,7 +237,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             query = (
                 supabase.table('inventario')
-                .select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta')
+                .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia')
                 .eq('vendedor_id', vendedor_id)
                 .ilike('nombre', f"%{termino_fuerte}%")
                 .gt('stock', 0)
@@ -215,7 +257,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
                 try:
                     query_genero = (
                         supabase.table('inventario')
-                        .select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta')
+                        .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia')
                         .eq('vendedor_id', vendedor_id)
                         .ilike('genero', f"%{termino_fuerte}%")
                         .gt('stock', 0)
@@ -231,7 +273,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
             if not inventario:
-                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, stock, estado_general, descripcion_detallada, precio_min_inmediato, precio_min_24h, precio_min_72h, fecha_alta').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
                 res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
                 inventario = res_inv.data or []
 
@@ -307,13 +349,23 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
         lineas_contexto.append("(Sin productos disponibles que coincidan con la búsqueda — todo lo encontrado está agotado o reservado temporalmente)")
     else:
         for item in items_disponibles:
-            precio = float(item.get('precio') or 0.0)
+            calculo_precio = _calcular_precio_vigente_con_rampa(item)
+            precio = calculo_precio["precio_vigente"]
             genero_txt = str(item.get('genero') or '').strip()
             sufijo_genero = f" | Género: {genero_txt}" if genero_txt else ""
             condicion_txt = str(item.get('descripcion_detallada') or '').strip()
             sufijo_condicion = f" | Condición: {condicion_txt}" if condicion_txt else ""
-            piso_descuento = _calcular_piso_descuento_vigente(item)
-            sufijo_descuento = f" | Piso de descuento autorizado AHORA: ${piso_descuento:.2f} MXN" if piso_descuento is not None else ""
+            # 🆕 FIX: ya no es "Piso de descuento autorizado AHORA" basado en 3
+            # fechas fijas — ahora es el resultado de la rampa de rotación (si
+            # está activa) + el % de regateo configurado para este producto,
+            # ya combinados en un solo número final. Nunca se le pide a la IA
+            # que haga la cuenta de fechas/porcentajes — eso ya pasó aquí, en
+            # Python, antes de que el texto llegue al prompt.
+            sufijo_descuento = ""
+            if calculo_precio["piso_regateo"] is not None:
+                sufijo_descuento = f" | Piso de regateo autorizado AHORA: ${calculo_precio['piso_regateo']:.2f} MXN"
+            elif calculo_precio["rotacion_activa"]:
+                sufijo_descuento = " | Este precio ya refleja la rotación por antigüedad — no hay regateo adicional autorizado sobre él"
             lineas_contexto.append(
                 f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
                 f"${precio:.2f} MXN | Stock: {item.get('stock', 0)} | "
