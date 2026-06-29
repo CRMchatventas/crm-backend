@@ -357,7 +357,7 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 nueva_columna, iluminacion = "Por Entregar", "verde_exito"
 
             resultados_gather = await asyncio.gather(
-                actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado, nombre=cliente),
+                actualizar_estado_crm(telefono, vendedor_id, nueva_columna, iluminacion, producto_detectado, perfil_ia=perfil_actualizado, nombre=cliente, mensaje=respuesta_final),
                 guardar_mensaje_chat(telefono, vendedor_id, 'BOT', respuesta_final),
                 return_exceptions=True
             )
@@ -855,7 +855,7 @@ async def send_mobile_message(data: MobileMessageRequest, vendedor_id: str = Dep
         # a Mobile el mismo client_msg_id que mandó, para que reconozca su
         # propia burbuja optimista y no la duplique.
         await guardar_mensaje_chat(tel_norm, str(vendedor_id), 'ASESOR', mensaje_limpio, wamid=data.client_msg_id)
-        await actualizar_estado_crm(tel_norm, str(vendedor_id), "En Conversacion", "azul", "")
+        await actualizar_estado_crm(tel_norm, str(vendedor_id), "En Conversacion", "azul", "", mensaje=mensaje_limpio)
 
         # Efecto secundario (Llamada HTTP externa a la API de Meta)
         await disparar_whatsapp_dinamico_async(tel_norm, mensaje_limpio, config.get('meta_token'), config.get('meta_phone_id'))
