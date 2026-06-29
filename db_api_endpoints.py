@@ -361,6 +361,21 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
                 resumen = await generar_resumen_handoff_ia(cliente, intencion_ia, historial)
                 await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, resumen, config)
+            elif intencion_ia == "ENCARGO":
+                # 🆕 RECONEXIÓN: antes el bot prometía "te aviso cuando llegue" sin que
+                # esa promesa quedara guardada en ningún lado accionable — el dueño
+                # nunca se enteraba de qué producto ni con qué presupuesto, así que la
+                # promesa no se podía cumplir de verdad. Reusa la misma columna/color
+                # que ya funciona para HUMANO/POSTVENTA — encabezado propio para que
+                # se distinga de un vistazo entre las demás alertas.
+                nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
+                resumen = await generar_resumen_handoff_ia(cliente, "ENCARGO", historial)
+                aviso_admin = (
+                    f"📦 ENCARGO — {cliente} quiere que le consigas "
+                    f"{producto_detectado or 'un producto'}. Avísale cuando tengas uno "
+                    f"dentro de su presupuesto.\n\n{resumen}"
+                )
+                await enviar_alerta_whatsapp_admin(cliente, telefono, intencion_ia, aviso_admin, config)
             elif intencion_ia == "COMPRA":
                 nueva_columna, iluminacion = "Por Entregar", "verde_exito"
 
