@@ -197,6 +197,52 @@ async def evaluar_reserva_ultima_unidad(vendedor_id: str, nombre_producto: str, 
 # ==========================================================
 # 🤖 0. ORQUESTADOR MAESTRO IA (FLATTENED & HARDENED)
 # ==========================================================
+async def _sincronizar_encargo_en_perfil_cliente(vendedor_id: str, telefono: str, producto: str, presupuesto: float, trace_id: str) -> None:
+    """
+    🆕 Refleja el pedido en el perfil del cliente (notas + etiquetas) — para
+    eso son esos campos, llevar control de cada cliente. De paso, la
+    búsqueda general del dashboard ("Buscar cliente o notas...") ya revisa
+    ambos campos, así que escribir aquí hace que el cliente aparezca solo
+    al buscar el nombre del producto, sin tocar nada del lado de Godot.
+    """
+    try:
+        res = await async_db_execute(
+            supabase.table('prospectos').select('notas, etiquetas').eq('telefono', telefono).eq('vendedor_id', vendedor_id).limit(1),
+            timeout_seg=8.0
+        )
+        if not res.data:
+            return
+
+        notas_actuales = str(res.data[0].get('notas') or '')
+        etiquetas_actuales = str(res.data[0].get('etiquetas') or '')
+
+        fecha_hoy = datetime.now(timezone.utc).strftime('%d/%m/%Y')
+        linea_nota = f"📦 Pedido ({fecha_hoy}): {producto}" + (f" — presupuesto ${presupuesto:.0f}" if presupuesto > 0 else "")
+        # No repetir la misma línea si el cliente vuelve a mencionar el mismo pedido
+        if linea_nota not in notas_actuales:
+            notas_nuevas = (notas_actuales.rstrip() + "\n" + linea_nota).strip()[:5000] if notas_actuales.strip() else linea_nota[:5000]
+        else:
+            notas_nuevas = notas_actuales
+
+        etiqueta_nueva = f"Encargo:{producto}"[:100]
+        etiquetas_lista = [e.strip() for e in etiquetas_actuales.split(',') if e.strip()]
+        if etiqueta_nueva not in etiquetas_lista:
+            etiquetas_lista.append(etiqueta_nueva)
+        etiquetas_nuevas = ", ".join(etiquetas_lista)[:5000]
+
+        if notas_nuevas != notas_actuales or etiquetas_nuevas != etiquetas_actuales:
+            await async_db_execute(
+                supabase.table('prospectos').update({"notas": notas_nuevas, "etiquetas": etiquetas_nuevas})
+                .eq('telefono', telefono).eq('vendedor_id', vendedor_id),
+                timeout_seg=8.0, allow_retry=False
+            )
+    except Exception as e:
+        # 🛡️ No-crítico: el encargo ya quedó guardado en su propia tabla y el
+        # aviso por WhatsApp ya salió — esto es un reflejo adicional, no la
+        # única fuente de verdad.
+        logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo reflejar el encargo en notas/etiquetas del cliente (no crítico): {e}")
+
+
 async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: str, columna_actual: str, config: dict, media_dict: dict = None, id_mensaje_meta: str = None):
     from ai_gemini_core import analizar_intencion_venta_ia, validar_respuesta_ia, generar_resumen_handoff_ia
     from ai_security_utils import detectar_prompt_injection
@@ -414,6 +460,10 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                     # aunque esto falle — esto solo alimenta la lista de "Pedidos"
                     # en el Radar B2B, no es el único lugar donde se ve el encargo.
                     logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo guardar el encargo en la tabla dedicada (el aviso por WhatsApp sigue llegando igual): {e}")
+
+                # 🆕 Reflejo en el perfil del cliente (notas + etiquetas) — ver
+                # _sincronizar_encargo_en_perfil_cliente para el porqué.
+                await _sincronizar_encargo_en_perfil_cliente(vendedor_id, telefono, producto_encargo, presupuesto_encargo, trace_id)
 
                 aviso_admin = (
                     f"📦 ENCARGO — {cliente} quiere que le consigas "
