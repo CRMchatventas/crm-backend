@@ -22,7 +22,7 @@ from config_and_schemas import (
     BorrarRequest, NotasUpdate, NuevoArticulo, VentaItem,
     MobileMessageRequest, sanitizar_nombre_columna, ReordenarColumnasAction,
     ColumnaAction, RenombrarColumnaAction, BorrarColumnaAction, BotConfigUpdate, RESERVAS_TEMPORALES_ULTIMA_UNIDAD,
-    RAWG_API_KEY, CambiarPasswordRequest
+    RAWG_API_KEY, CambiarPasswordRequest, CrearAlertaRequest, BorrarAlertaRequest
 )
 from ai_security_utils import verificar_sesion_b2b, get_http_client
 from db_core_wrapper import async_db_execute, supabase
@@ -370,6 +370,51 @@ async def procesar_respuesta_bot(cliente: str, telefono: str, texto_entrante: st
                 # se distinga de un vistazo entre las demás alertas.
                 nueva_columna, iluminacion = "Requiere Asistencia", "verde_alerta"
                 resumen = await generar_resumen_handoff_ia(cliente, "ENCARGO", historial)
+
+                try:
+                    presupuesto_encargo = max(0.0, float(decision.get("presupuesto_encargo", 0) or 0))
+                except (TypeError, ValueError):
+                    presupuesto_encargo = 0.0
+                producto_encargo = (producto_detectado or "").strip()[:200] or "producto sin especificar"
+
+                # 🛡️ Anti-duplicado: si ya hay un pedido PENDIENTE para este mismo
+                # cliente y producto, se actualiza en vez de crear uno nuevo cada
+                # vez que lo vuelve a mencionar en la conversación.
+                try:
+                    existente = await asyncio.wait_for(
+                        async_db_execute(
+                            supabase.table('encargos').select('id')
+                            .eq('vendedor_id', vendedor_id).eq('cliente_telefono', telefono)
+                            .eq('producto', producto_encargo).eq('estado', 'pendiente').limit(1)
+                        ),
+                        timeout=8.0
+                    )
+                    if existente.data:
+                        await asyncio.wait_for(
+                            async_db_execute(
+                                supabase.table('encargos').update({"presupuesto": presupuesto_encargo, "actualizado_en": datetime.now(timezone.utc).isoformat()})
+                                .eq('id', existente.data[0]['id']),
+                                allow_retry=False
+                            ),
+                            timeout=8.0
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            async_db_execute(
+                                supabase.table('encargos').insert({
+                                    "vendedor_id": vendedor_id, "cliente_nombre": cliente, "cliente_telefono": telefono,
+                                    "producto": producto_encargo, "presupuesto": presupuesto_encargo, "estado": "pendiente"
+                                }),
+                                allow_retry=False
+                            ),
+                            timeout=8.0
+                        )
+                except Exception as e:
+                    # 🛡️ No-crítico: el aviso por WhatsApp de abajo sigue llegando
+                    # aunque esto falle — esto solo alimenta la lista de "Pedidos"
+                    # en el Radar B2B, no es el único lugar donde se ve el encargo.
+                    logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo guardar el encargo en la tabla dedicada (el aviso por WhatsApp sigue llegando igual): {e}")
+
                 aviso_admin = (
                     f"📦 ENCARGO — {cliente} quiere que le consigas "
                     f"{producto_detectado or 'un producto'}. Avísale cuando tengas uno "
@@ -2062,6 +2107,131 @@ async def reset_limpio(_sesion: str = Depends(verificar_sesion_b2b), trace_id: s
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en reset_limpio: {e}")
         raise HTTPException(status_code=500, detail="Error al ejecutar el reset.")
+
+
+# ==============================================================================
+# 🆕 SISTEMA DE ENCARGOS + RADAR B2B
+# ==============================================================================
+# Construcción completa — se confirmó revisando TODAS las sesiones anteriores
+# (incluyendo el monolito original) que /api/crear_alerta, /api/mis_alertas y
+# /api/borrar_alerta NUNCA existieron del lado del servidor. El botón "Activar
+# Radar B2B" en la PC llevaba tiempo llamando a rutas que no existían — el
+# mensaje "¡Radar Activado!" aparecía sin importar la respuesta real, así que
+# nunca se notó. "Mis Alarmas Activas" probablemente siempre se vio vacía.
+# ==============================================================================
+
+@router.get("/api/encargos/pendientes")
+async def listar_encargos_pendientes(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    Lista los pedidos de clientes que todavía no se han convertido en una
+    alarma de Radar — esto es lo que llena la sección "Pedidos:" arriba del
+    formulario de "¿Qué juego buscas?" en la PC.
+    """
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('encargos').select('id, cliente_nombre, cliente_telefono, producto, presupuesto, creado_en')
+                .eq('vendedor_id', str(_sesion)).eq('estado', 'pendiente').order('creado_en', desc=True).limit(50)
+            ),
+            timeout=10.0
+        )
+        return {"status": "ok", "encargos": res.data or []}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo listando encargos pendientes: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar los encargos.")
+
+
+@router.post("/api/crear_alerta")
+async def crear_alerta(datos: CrearAlertaRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    Crea una alarma de Radar B2B. Si viene 'encargo_id', se vincula con el
+    pedido del cliente que la originó — así "Mis Alarmas Activas" puede
+    mostrar para quién es, y el encargo pasa de 'pendiente' a 'en_radar'.
+    """
+    try:
+        cliente_nombre, cliente_telefono = None, None
+
+        if datos.encargo_id is not None:
+            res_encargo = await asyncio.wait_for(
+                async_db_execute(
+                    supabase.table('encargos').select('cliente_nombre, cliente_telefono')
+                    .eq('id', datos.encargo_id).eq('vendedor_id', str(_sesion)).limit(1)
+                ),
+                timeout=8.0
+            )
+            if res_encargo.data:
+                cliente_nombre = res_encargo.data[0].get('cliente_nombre')
+                cliente_telefono = res_encargo.data[0].get('cliente_telefono')
+
+        payload = {
+            "vendedor_id": str(_sesion),
+            "nombre_juego": datos.nombre_juego.strip()[:200],
+            "consola": datos.consola.strip()[:100],
+            "precio_maximo": datos.precio_max,
+            "cliente_nombre": cliente_nombre,
+            "cliente_telefono": cliente_telefono,
+            "encargo_id": datos.encargo_id,
+        }
+        resultado = await asyncio.wait_for(
+            async_db_execute(supabase.table('alertas_radar').insert(payload), allow_retry=False),
+            timeout=10.0
+        )
+        nueva_alerta_id = resultado.data[0]['id'] if resultado.data else None
+
+        if datos.encargo_id is not None and nueva_alerta_id is not None:
+            await asyncio.wait_for(
+                async_db_execute(
+                    supabase.table('encargos').update({"estado": "en_radar", "alerta_radar_id": nueva_alerta_id, "actualizado_en": datetime.now(timezone.utc).isoformat()})
+                    .eq('id', datos.encargo_id).eq('vendedor_id', str(_sesion)),
+                    allow_retry=False
+                ),
+                timeout=10.0
+            )
+
+        return {"status": "ok", "id": nueva_alerta_id}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo creando alerta de radar: {e}")
+        raise HTTPException(status_code=500, detail="Error al crear la alerta.")
+
+
+@router.get("/api/mis_alertas")
+async def mis_alertas(_sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    try:
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('alertas_radar').select('id, nombre_juego, consola, precio_maximo, cliente_nombre, cliente_telefono')
+                .eq('vendedor_id', str(_sesion)).order('creado_en', desc=True)
+            ),
+            timeout=10.0
+        )
+        alertas = [
+            {
+                "id": a.get("id"), "juego": a.get("nombre_juego"), "consola": a.get("consola"),
+                "precio_maximo": a.get("precio_maximo"),
+                "cliente_nombre": a.get("cliente_nombre"), "cliente_telefono": a.get("cliente_telefono"),
+            }
+            for a in (res.data or [])
+        ]
+        return {"status": "ok", "alertas": alertas}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo listando alertas de radar: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar las alertas.")
+
+
+@router.post("/api/borrar_alerta")
+async def borrar_alerta(datos: BorrarAlertaRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    try:
+        await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('alertas_radar').delete().eq('id', datos.id).eq('vendedor_id', str(_sesion)),
+                allow_retry=False
+            ),
+            timeout=10.0
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo borrando alerta de radar: {e}")
+        raise HTTPException(status_code=500, detail="Error al borrar la alerta.")
 
 # ==========================================================
 # 📄 16. PLANTILLA CSV DE INVENTARIO (IMPORTAR / EXPORTAR)
