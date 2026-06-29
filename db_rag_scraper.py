@@ -27,7 +27,7 @@ import httpx
 from datetime import datetime, timezone
 from PIL import Image
 from typing import Optional
-from rapidfuzz import process, fuzz
+from rapidfuzz import fuzz
 
 from config_and_schemas import (
     logger,
@@ -68,7 +68,18 @@ Image.MAX_IMAGE_PIXELS = 25_000_000
 # ==========================================================
 # 🧠 DICCIONARIOS DE INTELIGENCIA SEMÁNTICA
 # ==========================================================
-STOPWORDS = {"hola", "amigo", "buenos", "dias", "tienes", "algun", "para", "completo", "busco", "quiero", "nuevo", "usado", "buenas", "tardes"}
+STOPWORDS = {
+    "hola", "amigo", "buenos", "dias", "tienes", "algun", "para", "completo",
+    "busco", "quiero", "nuevo", "usado", "buenas", "tardes",
+    # 🛡️ FIX: faltaban los artículos/preposiciones más comunes — sin esto,
+    # una pregunta como "tienes el juego de borderland?" le mandaba al
+    # comparador de relevancia "el juego de borderland" completo en vez de
+    # solo "juego borderland", diluyendo el puntaje de coincidencia con
+    # ruido que no aporta nada para encontrar el producto.
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "en", "y", "o", "que", "con", "por",
+    "ese", "esa", "esos", "esas", "este", "esta", "estos", "estas",
+}
 
 TITULOS_COMPUESTOS = {
     "gow": "god of war", "re4": "resident evil 4", "rdr2": "red dead redemption",
@@ -245,8 +256,37 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
                 else:
                     diccionario_opciones[key] = item
 
-            matches = process.extract(palabras_clave, diccionario_opciones.keys(), scorer=fuzz.WRatio, limit=8)
-            items_a_mostrar = [diccionario_opciones[m[0]] for m in matches if m[1] > 55] or inventario[:5]
+            # 🛡️ FIX: antes la comparación de relevancia se hacía contra la llave
+            # completa ("Nombre | Categoria | Estado") — el texto de categoría y
+            # condición no aporta nada para saber si el producto coincide con lo
+            # que el cliente pidió, solo diluye el puntaje. Ahora se compara
+            # contra el nombre solo; la llave compuesta se sigue usando para no
+            # perder distintas condiciones/precios del mismo título (ver fix de
+            # arriba), pero ya no afecta qué tan bien "puntúa" como coincidencia.
+            #
+            # Se usa fuzz.WRatio() directo en vez de process.extract() con un
+            # diccionario — esto evita depender de la forma exacta en que esa
+            # función empaqueta sus resultados (varía si se le pasa una lista o
+            # un mapeo), que no se pudo verificar en este entorno. Con menos de
+            # un puñado de candidatos por mensaje, el costo de hacerlo uno por
+            # uno es insignificante.
+            candidatos_con_score = []
+            for key, item in diccionario_opciones.items():
+                score = fuzz.WRatio(palabras_clave, item.get("nombre", ""))
+                if score > 55:
+                    candidatos_con_score.append((score, item))
+            candidatos_con_score.sort(key=lambda x: x[0], reverse=True)
+            items_a_mostrar = [item for _, item in candidatos_con_score[:8]] or inventario[:5]
+
+            # 🆕 FIX: log de diagnóstico — antes, si el RAG no encontraba algo que
+            # sí estaba en inventario, no había forma de saber por qué (¿no lo
+            # encontró el prefiltro SQL? ¿lo encontró pero no pasó el umbral de
+            # similitud?) sin adivinar. Ahora queda visible en los logs de Render.
+            logger.info(
+                f"🔍 [RAG INVENTARIO] consulta='{consulta[:80]}' palabras_clave='{palabras_clave}' "
+                f"termino_fuerte='{termino_fuerte}' candidatos_sql={len(inventario)} "
+                f"mostrados={len(items_a_mostrar)} nombres={[i.get('nombre') for i in items_a_mostrar][:8]}"
+            )
 
             cache_respuestas_ia[cache_key] = {"data": items_a_mostrar, "ts": now_ts()}
 
