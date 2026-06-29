@@ -48,7 +48,17 @@ async def actualizar_estado_crm(
     iluminacion: str,
     juego: str,
     perfil_ia: dict = None,
-    nombre: str = None
+    nombre: str = None,
+    # 🛡️ FIX REAL (encontrado al diagnosticar la iluminación que se quedaba
+    # pegada en PC y en Mobile): esta función nunca actualizaba
+    # 'ultimo_msj' — el campo que la PC y Mobile usan para decidir "¿esto
+    # ya lo viste, o es genuinamente nuevo?". Como nunca cambiaba, esa
+    # comparación siempre comparaba un valor viejo contra sí mismo, así
+    # que el aviso de "nuevo mensaje" prácticamente nunca se disparaba de
+    # verdad. Es opcional (default "") para no afectar a quien llama a
+    # esta función sin tener un mensaje de por medio (ej. mover una
+    # tarjeta manualmente desde el tablero).
+    mensaje: str = ""
 ) -> bool:
     """
     ==============================================================================
@@ -140,6 +150,12 @@ async def actualizar_estado_crm(
             "ultimo_producto_interes": juego,
             "ultima_interaccion_ia": datetime.now(timezone.utc).isoformat()
         }
+        # 🛡️ Solo se toca 'ultimo_msj' si esta llamada de verdad trae un
+        # mensaje — así una acción manual (ej. mover una tarjeta a mano)
+        # nunca borra por accidente el último mensaje real de la conversación.
+        mensaje_limpio_crm = config.limpiar_texto(bleach.clean(str(mensaje or ""), tags=[], strip=True))[:2000]
+        if mensaje_limpio_crm:
+            payload["ultimo_msj"] = mensaje_limpio_crm
 
         if perfil_sanitizado:
             payload["perfil_psicologico"] = perfil_sanitizado
@@ -351,7 +367,7 @@ async def bucle_seguimiento_24h():
                             
                             if exito:
                                 # 4. Actualizaciones seguras y sincronizadas
-                                await actualizar_estado_crm(telefono_lead, vendedor_id, 'Con Descuento', 'oro', producto_interes)
+                                await actualizar_estado_crm(telefono_lead, vendedor_id, 'Con Descuento', 'oro', producto_interes, mensaje=mensaje)
                                 await guardar_mensaje_chat(telefono_lead, vendedor_id, 'BOT_REMARKETING', mensaje)
                                 
                                 METRICAS_CRM["remarketing_envios_exito"] += 1
