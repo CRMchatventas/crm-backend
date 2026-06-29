@@ -417,7 +417,7 @@ async def contribuir_catalogo_maestro_en_segundo_plano(vendedor_id: str, nombre:
             return
 
         res_giro = await async_db_execute(
-            supabase.table('usuarios_veltrix').select('giro').eq('vendedor_id', vendedor_id).limit(1),
+            supabase.table('configuracion_bot').select('giro').eq('vendedor_id', vendedor_id).limit(1),
             timeout_seg=5.0
         )
         giro = str((res_giro.data[0].get('giro') if res_giro.data else '') or '').lower()
