@@ -34,7 +34,8 @@ from config_and_schemas import (
     cache_respuestas_ia,
     now_ts,
     limpiar_texto,
-    RESERVAS_TEMPORALES_ULTIMA_UNIDAD
+    RESERVAS_TEMPORALES_ULTIMA_UNIDAD,
+    RAWG_API_KEY
 )
 # 🚀 FIX: Supabase debe importarse desde el core_wrapper, NO de config_and_schemas
 from db_core_wrapper import async_db_execute, supabase
@@ -286,16 +287,19 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 # ==============================================================================
 # 📦 SCRAPER RAWG Y GESTIÓN DE STORAGE
 # ==============================================================================
-async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: str) -> Optional[str]:
+async def _descargar_procesar_subir_portada(nombre_juego: str, url_imagen: str) -> Optional[str]:
     """
-    Descarga, optimiza y almacena la portada con blindaje total (SSRF, RAM limit, Zip Bomb).
+    Lógica común de descarga/validación/optimización/subida — blindaje total
+    (SSRF, RAM limit, Zip Bomb). Solo sube la imagen al bucket 'portadas' y
+    devuelve la URL pública; NO toca ninguna tabla — eso lo decide quien
+    llama a esta función (catalogo_maestro compartido, o inventario de un
+    vendedor específico).
     """
-    if not url_imagen or not es_dominio_seguro(url_imagen): 
+    if not url_imagen or not es_dominio_seguro(url_imagen):
         logger.error(f"❌ [SSRF BLOCK] Intento de descarga bloqueado. URL sospechosa o no autorizada: {url_imagen}")
         return None
 
     try:
-        int_id = int(id_juego)
         MAX_IMAGE_SIZE = 15 * 1024 * 1024 # 15 MB
         img_bytes_array = bytearray()
         
@@ -311,7 +315,6 @@ async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: st
             async for chunk in response.aiter_bytes():
                 img_bytes_array.extend(chunk)
                 if len(img_bytes_array) > MAX_IMAGE_SIZE:
-                    # 🚀 FIX AUDITORÍA: Promovido a error analítico para alertas tempranas de denegación de servicio.
                     logger.error(f"❌ [DOS BLOCK] Descarga abortada. La imagen excede el límite de 15MB: {nombre_juego}")
                     return None
                     
@@ -338,35 +341,101 @@ async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: st
         out_bytes = out_bytes_io.getvalue()
 
         nombre_archivo = f"portadas/{limpiar_texto(nombre_juego).replace(' ', '_').lower()}_{int(now_ts())}.jpg"
-        # 🛡️ FIX URGENTE: "inventario_media" nunca existió como bucket real
-        # en Supabase Storage — el bucket real es "portadas" (confirmado por
-        # captura). Toda subida hacia "inventario_media" fallaría con
-        # "Bucket not found" en producción.
+
         def _upload():
             return supabase.storage.from_("portadas").upload(
                 nombre_archivo, out_bytes, file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
 
         await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
-        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
+        return supabase.storage.from_("portadas").get_public_url(nombre_archivo)
 
-        # 🚀 Actualización validada y con verificación de existencia
+    except Exception as e:
+        logger.exception(f"❌ [STORAGE ERROR] Fallo descargando/procesando portada para {nombre_juego}: {e}")
+        return None
+
+
+async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: str) -> Optional[str]:
+    """
+    Descarga, optimiza y almacena la portada en el catálogo maestro
+    COMPARTIDO (no es de un vendedor específico). Se mantiene tal cual
+    funcionaba antes — nada de lo de abajo la modifica.
+    """
+    url_publica = await _descargar_procesar_subir_portada(nombre_juego, url_imagen)
+    if not url_publica:
+        return None
+    try:
+        int_id = int(id_juego)
         res_update = await async_db_execute(
-            supabase
-            .table('catalogo_maestro')
-            .update({"url_portada_oficial": url_publica})
-            .eq("id", int_id), 
+            supabase.table('catalogo_maestro').update({"url_portada_oficial": url_publica}).eq("id", int_id),
             timeout_seg=10.0
         )
-        
-        # 🚀 FIX AUDITORÍA: Promovido a error de consistencia. Si no impacta filas, la base de datos está desincronizada.
         if not res_update or not res_update.data:
             logger.error(f"❌ [STORAGE ERROR] Actualización fallida. El registro no existe en catalogo_maestro (ID: {int_id})")
             return None
-
         logger.info(f"🖼️ [STORAGE SUCCESS] Imagen optimizada y guardada para: {nombre_juego} -> URL: {url_publica}")
         return url_publica
-
     except Exception as e:
-        logger.exception(f"❌ [STORAGE ERROR] Fallo crítico procesando portada para {nombre_juego}: {e}")
+        logger.exception(f"❌ [STORAGE ERROR] Fallo guardando portada en catalogo_maestro para {nombre_juego}: {e}")
         return None
+
+
+async def completar_portada_inventario(vendedor_id: str, item_id, nombre_juego: str, url_imagen: str) -> Optional[str]:
+    """
+    🆕 RECONEXIÓN DE LA PIEZA QUE FALTABA: misma descarga/proceso/subida que
+    procesar_imagen_juego, pero actualiza el INVENTARIO REAL de un vendedor
+    específico (inventario.url_portada) — esto es lo que de verdad usa el
+    bot al decidir si manda foto en su respuesta. catalogo_maestro es un
+    catálogo de referencia compartido entre todos los vendedores; esto es
+    el stock real de UNO de ellos.
+    """
+    url_publica = await _descargar_procesar_subir_portada(nombre_juego, url_imagen)
+    if not url_publica:
+        return None
+    try:
+        res_update = await async_db_execute(
+            supabase.table('inventario').update({"url_portada": url_publica}).eq("id", item_id).eq("vendedor_id", vendedor_id),
+            timeout_seg=10.0
+        )
+        if not res_update or not res_update.data:
+            logger.error(f"❌ [STORAGE ERROR] No se pudo guardar portada en inventario (id={item_id}, vendedor={vendedor_id})")
+            return None
+        logger.info(f"🖼️ [STORAGE SUCCESS] Portada guardada en inventario para '{nombre_juego}' (vendedor={vendedor_id}) -> {url_publica}")
+        return url_publica
+    except Exception as e:
+        logger.exception(f"❌ [STORAGE ERROR] Fallo guardando portada en inventario para {nombre_juego}: {e}")
+        return None
+
+
+async def intentar_completar_portada_en_segundo_plano(vendedor_id: str, item_id, nombre_juego: str) -> None:
+    """
+    🆕 RECONEXIÓN DE LA FUNCIÓN QUE EXISTÍA EN EL MONOLITO: cuando un
+    cliente pregunta por algo que todavía no tiene portada, se busca en RAWG
+    y se guarda EN SEGUNDO PLANO (asyncio.create_task — fire-and-forget) —
+    nunca bloquea ni retrasa la respuesta que el cliente YA recibió. El
+    cliente actual no ve la foto en su mensaje; el SIGUIENTE que pregunte
+    por lo mismo, sí.
+    """
+    if not RAWG_API_KEY or not item_id or not nombre_juego:
+        return
+    try:
+        termino = limpiar_texto(nombre_juego)[:150]
+        if len(termino) < 2:
+            return
+        params = {"key": RAWG_API_KEY, "search": termino, "page_size": 5}
+        resp = await asyncio.wait_for(http_client_global.get("https://api.rawg.io/api/games", params=params), timeout=10.0)
+        if resp.status_code != 200:
+            logger.info(f"🖼️ [PORTADA BG] RAWG respondió {resp.status_code} para '{nombre_juego}' — se omite.")
+            return
+        resultados = resp.json().get("results", [])
+        if not resultados:
+            logger.info(f"🖼️ [PORTADA BG] RAWG no encontró nada para '{nombre_juego}'.")
+            return
+        url_imagen = str(resultados[0].get("background_image", "") or "")
+        if not url_imagen:
+            return
+        url_publica = await completar_portada_inventario(vendedor_id, item_id, nombre_juego, url_imagen)
+        if url_publica:
+            logger.info(f"🖼️ [PORTADA BG] Lista para el próximo cliente: '{nombre_juego}' (vendedor={vendedor_id}).")
+    except Exception as e:
+        logger.warning(f"⚠️ [PORTADA BG] No se pudo completar portada en segundo plano para '{nombre_juego}': {e}")
