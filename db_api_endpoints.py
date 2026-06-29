@@ -2430,6 +2430,14 @@ async def descargar_plantilla(prellenada: bool = False, _sesion: str = Depends(v
         for fila in filas_datos:
             writer.writerow(fila)
         contenido = buffer.getvalue()
+        # 🛡️ FIX (causa real de los acentos rotos en Excel): el contenido ya
+        # estaba en UTF-8 correcto del lado del servidor — el problema es que
+        # Excel en Windows, sin una marca BOM al inicio del archivo, asume la
+        # codificación antigua (Windows-1252) en vez de detectar UTF-8 solo.
+        # Eso convierte cada acento en una secuencia rota tipo "Ã©" en vez de
+        # "é". El BOM (\ufeff) le dice a Excel exactamente qué codificación
+        # usar, sin afectar a ningún otro programa que abra el mismo CSV.
+        contenido = "\ufeff" + contenido
 
         nombre_archivo = "Plantilla_Veltrix_Prellenada.csv" if (prellenada and len(filas_datos) > 1) else "Plantilla_Veltrix_Importar.csv"
         return Response(
@@ -2501,6 +2509,9 @@ async def exportar_inventario(_sesion: str = Depends(verificar_sesion_b2b), trac
                 fila.append("" if valor is None else str(valor))
             writer.writerow(fila)
         contenido = buffer.getvalue()
+        # 🛡️ FIX: mismo bug y misma causa que en /api/descargar_plantilla —
+        # ver esa ruta para la explicación completa del porqué.
+        contenido = "\ufeff" + contenido
 
         logger.info(f"✅ [TRACE:{trace_id}] Exportados {len(items)} productos para {_sesion}.")
         return Response(
