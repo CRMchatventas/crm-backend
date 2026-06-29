@@ -395,6 +395,74 @@ async def _descargar_procesar_subir_portada(nombre_juego: str, url_imagen: str) 
         return None
 
 
+async def contribuir_catalogo_maestro_en_segundo_plano(vendedor_id: str, nombre: str, consola: str, genero: str = None, url_portada: str = None) -> None:
+    """
+    🆕 Cuando un vendedor agrega un producto que el catálogo maestro
+    COMPARTIDO todavía no conoce (ej. un juego nuevo), o le pone portada a
+    algo que nadie había guardado antes, se contribuye automáticamente —
+    así ese conocimiento sobrevive aunque el inventario de ESTE vendedor se
+    borre después (ej. con un reset de fábrica), y beneficia a cualquier
+    otro vendedor que después tenga el mismo producto.
+
+    Solo aplica a negocios de videojuegos — catalogo_maestro tiene columnas
+    específicas de ese giro (consola, rareza, etc.) que no tendrían sentido
+    para otro tipo de negocio. Corre en segundo plano (fire-and-forget),
+    nunca afecta la velocidad de guardar el producto ni puede hacer fallar
+    ese guardado si algo aquí sale mal.
+    """
+    try:
+        nombre = str(nombre or "").strip()[:200]
+        consola = str(consola or "").strip()[:100]
+        if not nombre or not consola:
+            return
+
+        res_giro = await async_db_execute(
+            supabase.table('usuarios_veltrix').select('giro').eq('vendedor_id', vendedor_id).limit(1),
+            timeout_seg=5.0
+        )
+        giro = str((res_giro.data[0].get('giro') if res_giro.data else '') or '').lower()
+        if 'videojueg' not in giro:
+            return
+
+        genero = str(genero or "").strip()[:100] or None
+        url_portada = str(url_portada or "").strip()[:500] or None
+
+        existente = await async_db_execute(
+            supabase.table('catalogo_maestro').select('id, url_portada_oficial, genero')
+            .eq('nombre', nombre).eq('consola', consola).limit(1),
+            timeout_seg=5.0
+        )
+
+        if existente.data:
+            fila = existente.data[0]
+            actualizar = {}
+            if url_portada and not fila.get('url_portada_oficial'):
+                actualizar['url_portada_oficial'] = url_portada
+            if genero and not fila.get('genero'):
+                actualizar['genero'] = genero
+            if actualizar:
+                await async_db_execute(
+                    supabase.table('catalogo_maestro').update(actualizar).eq('id', fila['id']),
+                    timeout_seg=8.0, allow_retry=False
+                )
+                logger.info(f"📚 [CATALOGO MAESTRO] Completado '{nombre}' ({consola}) con datos de {vendedor_id}.")
+        else:
+            payload = {"nombre": nombre, "consola": consola}
+            if genero: payload["genero"] = genero
+            if url_portada: payload["url_portada_oficial"] = url_portada
+            await async_db_execute(
+                supabase.table('catalogo_maestro').insert(payload),
+                timeout_seg=8.0, allow_retry=False
+            )
+            logger.info(f"📚 [CATALOGO MAESTRO] Nuevo producto contribuido: '{nombre}' ({consola}) por {vendedor_id}.")
+
+    except Exception as e:
+        # 🛡️ No-crítico por diseño: el inventario del vendedor ya se guardó
+        # correctamente antes de que esto corra. Un fallo aquí nunca debe
+        # verse del otro lado, ni afectar su propio guardado.
+        logger.warning(f"⚠️ [CATALOGO MAESTRO] No se pudo contribuir '{nombre}' al catálogo compartido (no crítico): {e}")
+
+
 async def procesar_imagen_juego(id_juego: str, nombre_juego: str, url_imagen: str) -> Optional[str]:
     """
     Descarga, optimiza y almacena la portada en el catálogo maestro
