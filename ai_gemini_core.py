@@ -76,6 +76,10 @@ ENUMS_VALIDOS = {
         "PEDIDO_ESPECIAL", "GARANTIA", "SPAM", "MAYOREO", "SALUDO", "ENOJO",
         # 🆕 venta cruzada de Veltrix Engine (auto-venta del propio bot)
         "INTERES_VELTRIX",
+        # 🆕 FIX: faltaba aquí — sin esto, este mismo validador de seguridad
+        # borraba "ENCARGO" y lo regresaba a su valor por default ANTES de
+        # que llegara a la rama que de verdad lo usa en db_api_endpoints.py.
+        "ENCARGO",
     },
     "etapa_venta":        {"descubrimiento", "negociacion", "cierre"},
     "objecion_detectada": {"precio", "indecision", "autoridad", "ninguna"},
@@ -1411,6 +1415,10 @@ FRAMEWORK: 1.Descubrimiento → 2.Confianza → 3.Objeción → 4.Cierre
    real y no solo una frase bonita: el dueño del negocio recibe un aviso claro con el
    producto y presupuesto exactos para poder cumplirla. Si el cliente solo preguntó
    "¿me avisas?" sin dar presupuesto, sigue en COTIZACION hasta que sí lo dé.
+   Cuando uses intencion ENCARGO, llena también "presupuesto_encargo" con el número
+   exacto que el cliente dio (ej. si dijo "mi presupuesto es de 500 pesos", pon 500.0).
+   Si no dio un número exacto, pon tu mejor estimado según lo que platicaron — nunca lo
+   dejes en 0 si hubo algún presupuesto mencionado.
  
 2. PREGUNTAS ABIERTAS Y BÚSQUEDA POR CATEGORÍA
    Si el cliente pregunta alguna variante de "¿qué tienes?", "¿qué hay disponible?"
@@ -1495,6 +1503,7 @@ dentro del texto rompen la sintaxis del JSON aunque esté forzado el modo JSON.{
   "estrategia_venta":   "{estrategia}",
   "accion_tool":        "ninguna|aplicar_descuento",
   "precio_oferta":      0.0,
+  "presupuesto_encargo": 0.0,
   "cross_selling":      "producto complementario o vacío",
   "upselling":          "producto premium o vacío",
   "requiere_seguimiento":true,
