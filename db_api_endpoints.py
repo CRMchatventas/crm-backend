@@ -26,6 +26,22 @@ from config_and_schemas import (
 )
 from ai_security_utils import verificar_sesion_b2b, get_http_client
 from db_core_wrapper import async_db_execute, supabase
+
+# 🆕 SISTEMA DE FOTOS: verificador de sesión para endpoints de Admin.
+# Usa el header Authorization con el valor del secret de Admin (variable de
+# entorno ADMIN_SECRET en Render). Los vendedores usan verificar_sesion_b2b;
+# Admin usa esto — así los endpoints de moderación nunca son accesibles con
+# un token de vendedor normal, aunque alguien lo intente.
+_ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+
+async def verificar_sesion_admin(authorization: str = Header(...)) -> str:
+    """Verifica que el header Authorization sea exactamente el ADMIN_SECRET."""
+    token = authorization.replace("Bearer ", "").strip()
+    if not _ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Panel de admin no configurado en este entorno.")
+    if token != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Acceso no autorizado.")
+    return "admin"
 from db_chat import guardar_mensaje_chat, obtener_historial_chat
 from db_crm_logic import actualizar_estado_crm
 from db_aprendizaje import registrar_venta_aprendizaje
@@ -1102,65 +1118,241 @@ class SubirFotoProductoRequest(BaseModel):
     item_id: int
     image_base64: str = Field(min_length=1)
 
-@router.post("/api/subir_foto_producto")
-async def subir_foto_producto(data: SubirFotoProductoRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
-    import base64, io
+# 🆕 Sistema de 2 fotos: endpoint de ayuda reutilizable para procesar y subir
+# una imagen a Supabase Storage, sin lógica de negocio. Lo usan tanto
+# subir_foto_producto como aprobar_portada_candidata (admin).
+async def _procesar_y_subir_imagen(
+    img_base64: str, ruta_storage: str, trace_id: str
+) -> str:
+    """Decodifica, verifica, convierte a JPEG y sube a Storage. Devuelve la URL pública."""
+    import base64 as _b64, io
     from PIL import Image
 
-    logger.info(f"📷 [TRACE:{trace_id}] Subiendo foto manual para producto {data.item_id} de {_sesion}")
-
-    # 🛡️ Se valida que el producto exista Y pertenezca a este tenant ANTES
-    # de subir nada a Storage — evita gastar el upload si el item_id es
-    # inválido o de otro vendedor.
-    res_check = await asyncio.wait_for(async_db_execute(supabase.table('inventario').select('id').eq('id', data.item_id).eq('vendedor_id', str(_sesion)).limit(1)), timeout=10.0)
-    if not res_check.data:
-        raise HTTPException(status_code=404, detail="Producto no encontrado o no pertenece a tu cuenta.")
-
     try:
-        img_bytes = base64.b64decode(data.image_base64, validate=False)
+        img_bytes = _b64.b64decode(img_base64, validate=False)
     except Exception:
         raise HTTPException(status_code=400, detail="Imagen en base64 inválida.")
     if len(img_bytes) < 32 or len(img_bytes) > 8_000_000:
         raise HTTPException(status_code=413, detail="Imagen vacía o demasiado grande.")
-
     try:
-        img_verificar = Image.open(io.BytesIO(img_bytes))
-        img_verificar.verify()
-        img = Image.open(io.BytesIO(img_bytes))
-        img.load()
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        buffer_salida = io.BytesIO()
-        img.save(buffer_salida, format="JPEG", quality=80)
-        bytes_finales = buffer_salida.getvalue()
+        Image.open(io.BytesIO(img_bytes)).verify()
+        img = Image.open(io.BytesIO(img_bytes)); img.load()
+        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+        buf = io.BytesIO(); img.save(buf, format="JPEG", quality=80)
+        bytes_finales = buf.getvalue()
     except Exception as e:
-        logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen de producto corrupta o ilegible: {e}")
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Imagen corrupta o ilegible: {e}")
         raise HTTPException(status_code=400, detail="La imagen está corrupta o no se pudo procesar.")
-
     try:
-        nombre_archivo = f"portadas/producto_{_sesion}_{data.item_id}_{int(now_ts())}.jpg"
-        # 🛡️ FIX URGENTE: "inventario_media" nunca existió como bucket real —
-        # los buckets reales en Supabase Storage son "portadas" y
-        # "multimedia" (confirmado por captura). Toda subida hacia
-        # "inventario_media" fallaría con "Bucket not found" en producción.
         def _upload():
             return supabase.storage.from_("portadas").upload(
-                nombre_archivo, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
+                ruta_storage, bytes_finales, file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         await asyncio.wait_for(asyncio.to_thread(_upload), timeout=15.0)
-        url_publica = supabase.storage.from_("portadas").get_public_url(nombre_archivo)
+        return supabase.storage.from_("portadas").get_public_url(ruta_storage)
     except Exception as e:
-        logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo foto de producto a Storage: {e}")
-        raise HTTPException(status_code=500, detail="Error al guardar la imagen.")
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo subiendo imagen a Storage ({ruta_storage}): {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar la imagen en el servidor.")
 
-    try:
-        await asyncio.wait_for(async_db_execute(supabase.table('inventario').update({'url_portada': url_publica}).eq('id', data.item_id).eq('vendedor_id', str(_sesion)), allow_retry=False), timeout=10.0)
-    except Exception as e:
-        logger.exception(f"❌ [TRACE:{trace_id}] Foto subida pero no se pudo asociar al producto: {e}")
-        raise HTTPException(status_code=500, detail="La imagen se subió pero no se pudo guardar en el producto. Intenta de nuevo.")
 
-    logger.info(f"✅ [TRACE:{trace_id}] Foto de producto {data.item_id} actualizada con éxito.")
-    return {"status": "ok", "url_portada": url_publica}
+@router.post("/api/subir_foto_producto")
+async def subir_foto_producto(data: SubirFotoProductoRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    🆕 SISTEMA DE 2 FOTOS: la foto que el vendedor sube a mano ya NO va
+    directamente al catálogo maestro compartido. En cambio:
+      1. Se sube al Storage como siempre (bucket 'portadas').
+      2. Se guarda en inventario.url_portada_candidata (visible solo para
+         este vendedor, no como portada activa todavía).
+      3. Se registra en portadas_candidatas para que Admin la revise.
+      4. Admin decide: aprobar (va a catalogo_maestro.url_portada_real,
+         todos la pueden elegir) o rechazar (se queda solo aquí).
+
+    La portada RAWG (Slot 1) sigue siendo la activa por defecto. Esta foto
+    se activa solo si el vendedor cambia su preferencia a "real" Y Admin
+    la aprobó — o como portada personal del vendedor si nunca se aprueba.
+    """
+    logger.info(f"📷 [TRACE:{trace_id}] Subiendo foto candidata para producto {data.item_id} de {_sesion}")
+
+    # Valida que el producto exista y pertenezca a este vendedor, y trae los
+    # datos necesarios para registrar la candidata con nombre legible.
+    res_check = await asyncio.wait_for(
+        async_db_execute(supabase.table('inventario')
+            .select('id, nombre, categoria, genero')
+            .eq('id', data.item_id).eq('vendedor_id', str(_sesion)).limit(1)),
+        timeout=10.0
+    )
+    if not res_check.data:
+        raise HTTPException(status_code=404, detail="Producto no encontrado o no pertenece a tu cuenta.")
+    producto = res_check.data[0]
+
+    # Obtiene nombre del negocio para mostrarlo en el panel de Admin
+    res_nombre = await asyncio.wait_for(
+        async_db_execute(supabase.table('configuracion_bot')
+            .select('nombre_negocio').eq('vendedor_id', str(_sesion)).limit(1)),
+        timeout=8.0
+    )
+    nombre_vendedor = (res_nombre.data[0].get('nombre_negocio') or str(_sesion)) if res_nombre.data else str(_sesion)
+
+    ruta = f"portadas/candidata_{_sesion}_{data.item_id}_{int(now_ts())}.jpg"
+    url_candidata = await _procesar_y_subir_imagen(data.image_base64, ruta, trace_id)
+
+    ahora = datetime.now(timezone.utc).isoformat()
+
+    # Guarda la URL en inventario como candidata (no como portada activa)
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('inventario')
+            .update({'url_portada_candidata': url_candidata, 'candidata_subida_en': ahora})
+            .eq('id', data.item_id).eq('vendedor_id', str(_sesion)),
+            allow_retry=False),
+        timeout=10.0
+    )
+
+    # Registra en la cola de revisión de Admin
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('portadas_candidatas').insert({
+            'vendedor_id': str(_sesion),
+            'nombre_vendedor': nombre_vendedor,
+            'inventario_id': data.item_id,
+            'nombre_producto': str(producto.get('nombre', '')),
+            'consola': str(producto.get('categoria', '')),
+            'url_candidata': url_candidata,
+            'subida_en': ahora,
+            'estado': 'pendiente'
+        }), allow_retry=False),
+        timeout=10.0
+    )
+
+    logger.info(f"✅ [TRACE:{trace_id}] Foto candidata registrada para '{producto.get('nombre')}' ({_sesion}).")
+    return {
+        "status": "ok",
+        "url_candidata": url_candidata,
+        "mensaje": "Foto recibida — Admin la revisará pronto. Mientras tanto puedes activarla como tu portada personal desde el Visor."
+    }
+
+
+class CambiarPortadaRequest(BaseModel):
+    item_id: int
+    preferencia: str  # "oficial" | "real"
+
+@router.post("/api/cambiar_preferencia_portada")
+async def cambiar_preferencia_portada(data: CambiarPortadaRequest, _sesion: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    """
+    El vendedor elige qué slot de portada quiere mostrar en su Store:
+    'oficial' (RAWG, Slot 1) o 'real' (foto real aprobada, Slot 2).
+    Si elige 'real' pero no existe Slot 2 aprobado todavía, el backend
+    cae al Slot 1 automáticamente — nunca se muestra vacío.
+    """
+    if data.preferencia not in ('oficial', 'real'):
+        raise HTTPException(status_code=400, detail="Preferencia debe ser 'oficial' o 'real'.")
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('inventario')
+            .update({'portada_preferida': data.preferencia})
+            .eq('id', data.item_id).eq('vendedor_id', str(_sesion)),
+            allow_retry=False),
+        timeout=10.0
+    )
+    return {"status": "ok", "preferencia": data.preferencia}
+
+
+# ==============================================================================
+# 👑 ENDPOINTS DE ADMIN — GESTIÓN DE PORTADAS CANDIDATAS
+# Acceso restringido a admin (verifica via verificar_sesion_admin en vez de b2b)
+# ==============================================================================
+
+@router.get("/api/admin/portadas_candidatas")
+async def admin_listar_candidatas(_admin: str = Depends(verificar_sesion_admin), trace_id: str = Depends(obtener_trace_id)):
+    """Lista todas las fotos candidatas pendientes para revisar."""
+    res = await asyncio.wait_for(
+        async_db_execute(supabase.table('portadas_candidatas')
+            .select('*')
+            .eq('estado', 'pendiente')
+            .order('subida_en', desc=True)
+            .limit(200)),
+        timeout=10.0
+    )
+    return {"status": "ok", "candidatas": res.data or []}
+
+
+class AdminPortadaAccionRequest(BaseModel):
+    candidata_id: int
+
+@router.post("/api/admin/aprobar_portada")
+async def admin_aprobar_portada(data: AdminPortadaAccionRequest, _admin: str = Depends(verificar_sesion_admin), trace_id: str = Depends(obtener_trace_id)):
+    """
+    Admin aprueba una foto candidata:
+    1. La foto pasa a catalogo_maestro.url_portada_real (Slot 2 compartido).
+    2. La candidata se marca como 'aprobada' en la cola.
+    3. El inventario del vendedor que la subió activa automáticamente 'real'
+       como su preferencia (fue su foto, justo que la vea activa primero).
+    """
+    res_cand = await asyncio.wait_for(
+        async_db_execute(supabase.table('portadas_candidatas')
+            .select('*').eq('id', data.candidata_id).limit(1)),
+        timeout=8.0
+    )
+    if not res_cand.data:
+        raise HTTPException(status_code=404, detail="Candidata no encontrada.")
+    cand = res_cand.data[0]
+
+    ahora = datetime.now(timezone.utc).isoformat()
+
+    # 1. Buscar el producto en catalogo_maestro (nombre + consola)
+    res_maestro = await asyncio.wait_for(
+        async_db_execute(supabase.table('catalogo_maestro')
+            .select('id').eq('nombre', cand['nombre_producto'])
+            .eq('consola', cand['consola']).limit(1)),
+        timeout=8.0
+    )
+    if res_maestro.data:
+        # Actualizar url_portada_real en el catálogo maestro
+        await asyncio.wait_for(
+            async_db_execute(supabase.table('catalogo_maestro')
+                .update({'url_portada_real': cand['url_candidata']})
+                .eq('id', res_maestro.data[0]['id']),
+                allow_retry=False),
+            timeout=10.0
+        )
+    else:
+        logger.warning(f"⚠️ [TRACE:{trace_id}] Candidata aprobada pero no se encontró '{cand['nombre_producto']}' en catalogo_maestro — se actualiza solo el inventario.")
+
+    # 2. Marcar la candidata como aprobada
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('portadas_candidatas')
+            .update({'estado': 'aprobada', 'revisada_en': ahora})
+            .eq('id', data.candidata_id),
+            allow_retry=False),
+        timeout=10.0
+    )
+
+    # 3. Activar 'real' como preferencia del vendedor que la subió
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('inventario')
+            .update({'portada_preferida': 'real'})
+            .eq('id', cand['inventario_id']).eq('vendedor_id', cand['vendedor_id']),
+            allow_retry=False),
+        timeout=10.0
+    )
+
+    logger.info(f"✅ [TRACE:{trace_id}] Portada aprobada: '{cand['nombre_producto']}' de {cand['vendedor_id']}")
+    return {"status": "ok", "accion": "aprobada", "producto": cand['nombre_producto']}
+
+
+@router.post("/api/admin/rechazar_portada")
+async def admin_rechazar_portada(data: AdminPortadaAccionRequest, _admin: str = Depends(verificar_sesion_admin), trace_id: str = Depends(obtener_trace_id)):
+    """
+    Admin rechaza una foto candidata: se marca como 'rechazada' en la cola.
+    La foto sigue en Storage y en url_portada_candidata del vendedor por si
+    quiere seguir usándola como portada personal — solo no se comparte.
+    """
+    ahora = datetime.now(timezone.utc).isoformat()
+    await asyncio.wait_for(
+        async_db_execute(supabase.table('portadas_candidatas')
+            .update({'estado': 'rechazada', 'revisada_en': ahora})
+            .eq('id', data.candidata_id),
+            allow_retry=False),
+        timeout=10.0
+    )
+    return {"status": "ok", "accion": "rechazada"}
 
 @router.get("/api/mobile/dashboard")
 async def mobile_dashboard(vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
@@ -1660,6 +1852,39 @@ async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), tr
         except Exception as e:
             logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo calcular precios vigentes para el Visor (no crítico, se muestran sin esto): {e}")
 
+        # 🆕 SISTEMA DE 2 FOTOS: para cada producto, se adjuntan las 2 portadas
+        # disponibles en catalogo_maestro (oficial = RAWG, real = aprobada por
+        # Admin) para que el Visor pueda mostrar el selector de slot sin
+        # necesitar una segunda petición. Solo aplica si el producto tiene
+        # id_catalogo — sin eso no hay forma de buscarlo en el maestro.
+        ids_catalogo = [it.get('id_catalogo') for it in items if it.get('id_catalogo')]
+        portadas_maestro: dict = {}
+        if ids_catalogo:
+            try:
+                res_mc = await asyncio.wait_for(
+                    async_db_execute(supabase.table('catalogo_maestro')
+                        .select('id, url_portada_oficial, url_portada_real')
+                        .in_('id', ids_catalogo[:500])),
+                    timeout=8.0
+                )
+                for row in (res_mc.data or []):
+                    portadas_maestro[str(row['id'])] = {
+                        "url_portada_oficial": row.get('url_portada_oficial'),
+                        "url_portada_real": row.get('url_portada_real'),
+                    }
+            except Exception as e:
+                logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudieron cargar portadas del maestro (no crítico): {e}")
+        for it in items:
+            mc = portadas_maestro.get(str(it.get('id_catalogo', '')), {})
+            it['portada_slot1_oficial'] = mc.get('url_portada_oficial') or it.get('url_portada')
+            it['portada_slot2_real'] = mc.get('url_portada_real')
+            # La portada activa que Store/bot deben usar
+            preferencia = it.get('portada_preferida', 'oficial')
+            if preferencia == 'real' and it['portada_slot2_real']:
+                it['portada_activa'] = it['portada_slot2_real']
+            else:
+                it['portada_activa'] = it['portada_slot1_oficial']
+
         return {"status": "ok", "inventario": items}
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en cargar_inventario: {e}")
@@ -2010,7 +2235,7 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
         res_inv = await asyncio.wait_for(
             async_db_execute(
                 supabase.table('inventario')
-                .select('id, vendedor_id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, stock')
+                .select('id, vendedor_id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, portada_preferida, id_catalogo, stock')
                 .in_('vendedor_id', list(mapa_vendedores.keys()))
                 .gt('stock', 0)
                 .ilike('nombre', f'%{termino}%')
@@ -2032,18 +2257,40 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
 
         resultados = []
         from db_rag_scraper import calcular_precio_producto
+        # 🆕 SISTEMA DE 2 FOTOS: para el Store siempre mostramos la mejor portada
+        # disponible — Slot 1 (RAWG oficial) primero, Slot 2 (foto real aprobada)
+        # si el vendedor lo prefiere y existe, o la portada personal del vendedor
+        # como respaldo final.
+        ids_cat_store = [it.get('id_catalogo') for it in (res_inv.data or []) if it.get('id_catalogo')]
+        portadas_cat_store: dict = {}
+        if ids_cat_store:
+            try:
+                res_mc_s = await asyncio.wait_for(
+                    async_db_execute(supabase.table('catalogo_maestro')
+                        .select('id, url_portada_oficial, url_portada_real')
+                        .in_('id', ids_cat_store[:300])),
+                    timeout=8.0
+                )
+                for row in (res_mc_s.data or []):
+                    portadas_cat_store[str(row['id'])] = row
+            except Exception:
+                pass
         for item in (res_inv.data or []):
             vid = item.get('vendedor_id')
             v = mapa_vendedores.get(vid, {})
             precio = float(item.get('precio') or 0)
-            # 🛡️ FIX: antes usaba 'precio_min_inmediato' (sistema viejo de 3
-            # fechas fijas, ya retirado) como señal de "oferta especial" —
-            # ahora usa el precio REAL vigente del Motor de Precios, que de
-            # verdad refleja si este producto está más barato (o más caro,
-            # si el mercado subió) hoy.
             calculo = calcular_precio_producto(item)
             precio_especial = calculo["precio_vigente"]
             tiene_oferta = calculo["rotacion_activa"] and precio_especial < precio
+            # Resolver foto activa para el Store
+            mc = portadas_cat_store.get(str(item.get('id_catalogo', '')), {})
+            preferencia = item.get('portada_preferida', 'oficial')
+            if preferencia == 'real' and mc.get('url_portada_real'):
+                foto_store = mc['url_portada_real']
+            elif mc.get('url_portada_oficial'):
+                foto_store = mc['url_portada_oficial']
+            else:
+                foto_store = str(item.get('url_portada', '') or '')
             resultados.append({
                 "nombre": str(item.get('nombre', '')),
                 "categoria": str(item.get('categoria', '') or ''),
@@ -2051,7 +2298,7 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
                 "estado": str(item.get('estado_general', '') or ''),
                 "precio": precio,
                 "precio_especial": float(precio_especial) if tiene_oferta else None,
-                "foto": str(item.get('url_portada', '') or ''),
+                "foto": foto_store,
                 "vendedor_id": vid,
                 "vendedor_nombre": v.get('nombre', 'Tienda'),
                 "vendedor_ciudad": v.get('ciudad', ''),
@@ -2115,22 +2362,44 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         telefono_whatsapp = str((res_conf.data[0].get('numero_bot_whatsapp') if res_conf.data else None) or '')
 
         query = supabase.table('inventario').select(
-            'id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, stock'
+            'id, nombre, categoria, tipo_producto, genero, estado_general, precio, costo, fecha_alta, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, url_portada, portada_preferida, id_catalogo, stock'
         ).eq('vendedor_id', vendedor_id).gt('stock', 0)
         termino = limpiar_texto(q)[:100].strip()
         if termino:
             query = query.ilike('nombre', f'%{termino}%')
         res_inv = await asyncio.wait_for(async_db_execute(query.order('nombre').limit(1000)), timeout=15.0)
 
+        # 🆕 SISTEMA DE 2 FOTOS: resolver portada activa de catalogo_maestro
+        ids_cat_sv = [it.get('id_catalogo') for it in (res_inv.data or []) if it.get('id_catalogo')]
+        portadas_cat_sv: dict = {}
+        if ids_cat_sv:
+            try:
+                res_mc_sv = await asyncio.wait_for(
+                    async_db_execute(supabase.table('catalogo_maestro')
+                        .select('id, url_portada_oficial, url_portada_real')
+                        .in_('id', ids_cat_sv[:500])),
+                    timeout=8.0
+                )
+                for row in (res_mc_sv.data or []):
+                    portadas_cat_sv[str(row['id'])] = row
+            except Exception:
+                pass
+
         productos = []
         from db_rag_scraper import calcular_precio_producto
         for item in (res_inv.data or []):
             precio = float(item.get('precio') or 0)
-            # 🛡️ FIX: mismo cambio que en la búsqueda cruzada — precio real
-            # del Motor de Precios, no el campo viejo retirado.
             calculo = calcular_precio_producto(item)
             precio_especial = calculo["precio_vigente"]
             tiene_precio_especial = calculo["rotacion_activa"] and precio_especial < precio
+            mc = portadas_cat_sv.get(str(item.get('id_catalogo', '')), {})
+            preferencia = item.get('portada_preferida', 'oficial')
+            if preferencia == 'real' and mc.get('url_portada_real'):
+                foto_sv = mc['url_portada_real']
+            elif mc.get('url_portada_oficial'):
+                foto_sv = mc['url_portada_oficial']
+            else:
+                foto_sv = str(item.get('url_portada', '') or '')
             productos.append({
                 "id": item.get('id'),
                 "nombre": str(item.get('nombre', '')),
@@ -2140,8 +2409,7 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
                 "estado": str(item.get('estado_general', '') or ''),
                 "precio": precio,
                 "precio_especial": float(precio_especial) if tiene_precio_especial else None,
-                "foto": str(item.get('url_portada', '') or ''),
-                # Solo disponibilidad — nunca el conteo exacto.
+                "foto": foto_sv,
                 "disponible": True,
             })
 
