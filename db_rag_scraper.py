@@ -93,88 +93,169 @@ TITULOS_COMPUESTOS = {
 # ==========================================================
 # 💸 PISO DE DESCUENTO VIGENTE (descuento escalonado por tiempo)
 # ==========================================================
-def _calcular_precio_vigente_con_rampa(item: dict) -> dict:
+def calcular_precio_producto(item: dict, dias_rotacion_max: int = 90) -> dict:
     """
-    🆕 SISTEMA NUEVO — reemplaza el de 3 fechas fijas (precio_min_inmediato/
-    24h/72h) por una rampa suave de 90 días hacia un destino configurable,
-    más un % de regateo independiente aplicado sobre el precio vigente del
-    momento (no sobre el precio de lista original).
+    🆕 MOTOR DE PRECIOS (PRICING ENGINE) — fuente única de verdad para TODO
+    el sistema. Reemplaza a _calcular_precio_vigente_con_rampa. Nadie más en
+    el sistema (IA, Visor, CSV, Store, Dashboard) debe calcular un precio por
+    su cuenta — todos llaman a esta función.
 
-    Devuelve:
-      - precio_vigente: el precio de lista EFECTIVO ahora (antes de regateo)
-      - piso_regateo: lo más bajo que el bot puede ofrecer si el cliente regatea (None si no hay % configurado)
-      - rotacion_activa: si hay una rampa configurada para este producto
-      - dias_publicado: para diagnóstico/logs
+    DISEÑO FINAL (validado con casos reales de negocio):
 
-    🛡️ CANDADO DE SEGURIDAD — esto es código, no configuración: sin importar
-    qué tan mal se configure algo (un mínimo de rotación por accidente por
-    debajo del costo, un % de descuento mal puesto), el precio vigente y el
-    piso de regateo NUNCA pueden caer por debajo de 'costo'. Si confiamos la
-    venta de un producto a un bot, no puede haber forma de perder dinero por
-    un error de captura.
+      valor_protegido  = MAX(costo, mínimo_manual, valor_de_mercado)
+      piso_real        = MAX(costo, valor_protegido × % autorizado)
+      destino_rotación = MIN(precio_lista, piso_real)
+          ↑ nunca mayor a la lista — si no, "rotación" subiría el precio.
+      precio_curva     = interpola precio_lista → destino_rotación con una
+                          curva ease-in (lento al inicio, rápido al final —
+                          así un comerciante real piensa: "casi no bajo al
+                          principio, bajo fuerte cerca del final").
+      precio_vigente   = MAX(precio_curva, piso_real)
+          ↑ ESTO es lo que resuelve el caso real: si el valor de mercado
+          SUBE por encima del precio de lista, el precio vigente sube con
+          él automáticamente — sin importar si hay una rampa de rotación
+          corriendo o no. El piso protege en ambas direcciones, no solo
+          hacia abajo.
+      piso_regateo     = MAX(precio_vigente × (1 - % regateo), costo)
+          ↑ SOLO el costo frena la negociación del bot — el valor de
+          mercado define dónde EMPIEZA a cotizar, nunca hasta dónde puede
+          ceder regateando. Eso es intencional: el mercado es una
+          referencia de cuánto vale, no un límite de cuánta ganancia exigir.
+
+    🛡️ CANDADO DE SEGURIDAD ABSOLUTO — código, no configuración: precio_vigente
+    y piso_regateo NUNCA pueden caer por debajo de 'costo', sin importar qué
+    tan mal se configure cualquier campo. Si confiamos la venta de un
+    producto a un bot, no puede haber forma de perder dinero por un error
+    de captura.
+
+    🌐 MULTI-GIRO: esta función es genérica por diseño. 'valor_mercado' solo
+    participa si 'usar_precio_mercado_como_destino' está activo Y el
+    producto tiene un 'precio_mercado_referencia' guardado — en giros sin
+    un equivalente a PriceCharting (todo lo que no sea videojuegos hoy),
+    esos campos simplemente nunca se llenan, y la función sigue funcionando
+    igual de bien solo con costo + mínimo manual. No hace falta ninguna
+    rama especial por giro.
     """
     precio_lista = float(item.get('precio') or 0)
     costo = float(item.get('costo') or 0)
-    fecha_alta_raw = item.get('fecha_alta')
 
-    dias_publicado = 0
-    if fecha_alta_raw:
-        try:
-            texto_fecha = str(fecha_alta_raw).replace('Z', '+00:00')
-            dt_alta = datetime.fromisoformat(texto_fecha)
-            if dt_alta.tzinfo is None:
-                dt_alta = dt_alta.replace(tzinfo=timezone.utc)
-            dias_publicado = (datetime.now(timezone.utc) - dt_alta).days
-        except Exception as e:
-            logger.warning(f"⚠️ [DESCUENTO] No se pudo parsear fecha_alta='{fecha_alta_raw}': {e}")
-            dias_publicado = 0
+    # ── 1. VALOR PROTEGIDO: lo más alto entre lo que sabemos que vale de verdad ──
+    minimo_manual_raw = item.get('precio_minimo_rotacion')
+    minimo_manual = float(minimo_manual_raw) if minimo_manual_raw is not None else 0.0
 
-    # --- 1) Rampa de rotación: ¿hay un destino configurado? ---
-    # Si 'usar_precio_mercado_como_destino' está activo, la rampa apunta al
-    # último precio de PriceCharting/heurístico GUARDADO (nunca se consulta
-    # en vivo aquí) en vez del mínimo manual.
     usar_mercado = bool(item.get('usar_precio_mercado_como_destino', False))
-    destino_raw = item.get('precio_mercado_referencia') if usar_mercado else item.get('precio_minimo_rotacion')
-    rotacion_activa = destino_raw is not None
-    precio_vigente = precio_lista
+    valor_mercado = 0.0
+    if usar_mercado:
+        ref_raw = item.get('precio_mercado_referencia')
+        valor_mercado = float(ref_raw) if ref_raw is not None else 0.0
 
-    if rotacion_activa:
-        try:
-            destino = max(float(destino_raw), costo)  # 🛡️ candado: el destino nunca puede ir bajo el costo
-        except (TypeError, ValueError):
-            destino = precio_lista
-            rotacion_activa = False
+    valor_protegido = max(costo, minimo_manual, valor_mercado)
 
-        DIAS_TOPE = 90
-        if dias_publicado <= 0:
-            precio_vigente = precio_lista
-        elif dias_publicado >= DIAS_TOPE:
-            precio_vigente = destino
-        else:
-            # Interpolación lineal simple entre precio_lista (día 0) y destino
-            # (día 90) — pasa naturalmente por los días 30/60 sin necesidad de
-            # definir esos puntos intermedios a mano.
-            progreso = dias_publicado / DIAS_TOPE
-            precio_vigente = precio_lista - (precio_lista - destino) * progreso
-
-    precio_vigente = max(precio_vigente, costo)  # 🛡️ candado final
-
-    # --- 2) % de regateo normal, aplicado SOBRE el precio vigente de este momento ---
+    # ── 2. ¿Autorizó el vendedor vender por debajo del valor protegido? ──
+    # 100 (default) = nunca. Es una decisión EXPLÍCITA del vendedor, nunca
+    # algo que el sistema decida solo.
     try:
-        porcentaje_max = float(item.get('descuento_max_porcentaje') or 0.0)
+        pct_autorizado = float(item.get('permitir_bajo_valor_protegido_pct', 100) or 100)
     except (TypeError, ValueError):
-        porcentaje_max = 0.0
+        pct_autorizado = 100.0
+    pct_autorizado = max(0.0, min(100.0, pct_autorizado))
+    piso_real = max(costo, valor_protegido * (pct_autorizado / 100.0))  # 🛡️ candado: nunca bajo costo
 
+    # ── 3. DESTINO DE ROTACIÓN: nunca mayor al precio de lista ──
+    rotacion_configurada = (minimo_manual > 0) or (usar_mercado and valor_mercado > 0)
+    if rotacion_configurada:
+        destino_rotacion = min(precio_lista, piso_real)
+    else:
+        destino_rotacion = precio_lista  # sin rotación configurada, no hay a dónde bajar
+
+    # ── 4. DÍAS TRANSCURRIDOS (desde fecha_inicio_rotacion, NO fecha_alta) ──
+    fecha_inicio_raw = item.get('fecha_inicio_rotacion') or item.get('fecha_alta')
+    dias_transcurridos = 0
+    if fecha_inicio_raw:
+        try:
+            texto_fecha = str(fecha_inicio_raw).replace('Z', '+00:00')
+            dt_inicio = datetime.fromisoformat(texto_fecha)
+            if dt_inicio.tzinfo is None:
+                dt_inicio = dt_inicio.replace(tzinfo=timezone.utc)
+            dias_transcurridos = max(0, (datetime.now(timezone.utc) - dt_inicio).days)
+        except Exception as e:
+            logger.warning(f"⚠️ [PRICING ENGINE] No se pudo parsear fecha_inicio_rotacion='{fecha_inicio_raw}': {e}")
+            dias_transcurridos = 0
+
+    dias_max = max(1, int(dias_rotacion_max or 90))
+
+    # ── 5. CURVA DE ROTACIÓN (ease-in: lento al inicio, rápido al final) ──
+    if dias_transcurridos <= 0:
+        precio_curva = precio_lista
+    elif dias_transcurridos >= dias_max:
+        precio_curva = destino_rotacion
+    else:
+        progreso = (dias_transcurridos / dias_max) ** 2  # cuadrática, no lineal
+        precio_curva = precio_lista - (precio_lista - destino_rotacion) * progreso
+
+    # ── 6. PRECIO VIGENTE: protege en AMBAS direcciones ──
+    # Nunca cotiza por debajo del piso real (protección de siempre), pero
+    # TAMPOCO se queda atorado en un precio de lista viejo si el valor real
+    # (mercado) subió por encima de él — sube con él automáticamente, haya
+    # o no rotación corriendo.
+    precio_vigente = max(precio_curva, piso_real)
+    precio_vigente = max(precio_vigente, costo)  # 🛡️ candado final, redundante a propósito
+
+    # ── 7. PISO DE REGATEO: solo el costo frena al bot ──
+    try:
+        pct_max_desc = float(item.get('descuento_max_porcentaje') or 0.0)
+    except (TypeError, ValueError):
+        pct_max_desc = 0.0
     piso_regateo = None
-    if porcentaje_max > 0:
-        piso_regateo = max(precio_vigente * (1 - (porcentaje_max / 100.0)), costo)  # 🛡️ candado
+    if pct_max_desc > 0:
+        piso_regateo = max(precio_vigente * (1 - (pct_max_desc / 100.0)), costo)  # 🛡️ candado
+
+    # ── 8. ESTADO Y MOTIVO — diagnóstico para Visor/Dashboard. La IA NUNCA
+    # recibe esto, solo precio_vigente y piso_regateo. ──
+    if usar_mercado and valor_mercado > precio_lista > 0:
+        estado = "SUBVALUADO"
+        motivo = f"El valor de mercado (${valor_mercado:.2f}) es mayor a tu precio de lista (${precio_lista:.2f}) — considera subir el precio de lista."
+    elif precio_vigente <= costo + 0.01:
+        estado = "COSTO"
+        motivo = "El precio vigente está en el límite del costo — no hay margen de regateo adicional."
+    elif rotacion_configurada and dias_transcurridos >= dias_max:
+        estado = "ROTACION_MIN"
+        motivo = f"Llegó al mínimo de rotación tras {dias_transcurridos} día(s) sin venderse."
+        if dias_transcurridos >= dias_max + 1:
+            # Llegó a su mínimo hace tiempo y nadie lo ha revisado — esto es
+            # lo que alimenta una futura sección de "Pendientes de Revisión"
+            # en el dashboard, sin necesidad de un cron job aparte.
+            estado = "REVISION"
+            motivo = f"Lleva {dias_transcurridos} días en su precio mínimo de rotación — vale la pena revisarlo."
+    elif rotacion_configurada and dias_transcurridos > 0:
+        estado = "ROTACION"
+        motivo = f"En rampa de rotación: día {dias_transcurridos}/{dias_max}."
+    else:
+        estado = "NORMAL"
+        motivo = "Precio de lista normal, sin rotación activa."
 
     return {
+        "precio_lista": round(precio_lista, 2),
         "precio_vigente": round(precio_vigente, 2),
         "piso_regateo": round(piso_regateo, 2) if piso_regateo is not None else None,
-        "rotacion_activa": rotacion_activa,
-        "dias_publicado": dias_publicado,
+        "valor_protegido": round(valor_protegido, 2),
+        "piso_real": round(piso_real, 2),
+        "destino_rotacion": round(destino_rotacion, 2),
+        "dias_transcurridos": dias_transcurridos,
+        "dias_rotacion_max": dias_max,
+        "rotacion_activa": rotacion_configurada,
+        "estado": estado,
+        "motivo": motivo,
+        # 🛡️ Alias por compatibilidad con cualquier llamador que todavía
+        # busque el nombre del campo viejo durante la transición.
+        "rotacion_activa_legacy": rotacion_configurada,
     }
+
+
+# 🛡️ Alias de compatibilidad — por si algún punto de llamada todavía no se
+# actualizó al nombre nuevo durante el despliegue. Se puede retirar una vez
+# confirmado que ya nada lo usa.
+_calcular_precio_vigente_con_rampa = calcular_precio_producto
 
 
 def _filtrar_items_reservados(vendedor_id: str, items: list) -> list:
@@ -220,6 +301,30 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     if not palabras_clave:
         return "El cliente no especificó un producto claro."
 
+    # 🆕 MOTOR DE PRECIOS: necesitamos saber el giro (para decidir si el
+    # refresco "justo a tiempo" de mercado aplica — solo tiene sentido para
+    # videojuegos) y los días de rampa configurados para este negocio.
+    # Cacheado 60s (mismo TTLCache que ya usa el RAG) — esto casi nunca
+    # cambia, no vale la pena consultarlo en cada mensaje.
+    cache_key_config = hashlib.sha256(f"RAGCONFIG:{vendedor_id}".encode()).hexdigest()
+    config_cache = cache_respuestas_ia.get(cache_key_config)
+    if config_cache:
+        giro_vendedor, dias_rotacion_max = config_cache["giro"], config_cache["dias_rotacion_max"]
+    else:
+        giro_vendedor, dias_rotacion_max = "", 90
+        try:
+            res_conf = await asyncio.wait_for(
+                async_db_execute(supabase.table('configuracion_bot').select('giro, dias_rotacion_max').eq('vendedor_id', vendedor_id).limit(1), timeout_seg=5.0),
+                timeout=6.0
+            )
+            if res_conf.data:
+                giro_vendedor = str(res_conf.data[0].get('giro') or '').lower()
+                dias_rotacion_max = int(res_conf.data[0].get('dias_rotacion_max') or 90)
+        except Exception as e:
+            logger.warning(f"⚠️ [PRICING ENGINE] No se pudo leer configuración de {vendedor_id}, usando defaults: {e}")
+        cache_respuestas_ia[cache_key_config] = {"giro": giro_vendedor, "dias_rotacion_max": dias_rotacion_max}
+    es_giro_videojuegos = "videojueg" in giro_vendedor
+
     # ⚡ Cache Key
     cache_key = hashlib.sha256(f"RAGINV:{vendedor_id}:{palabras_clave}".encode()).hexdigest()
 
@@ -237,7 +342,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             query = (
                 supabase.table('inventario')
-                .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia')
+                .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, fecha_inicio_rotacion, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, precio_mercado_actualizado_en, permitir_bajo_valor_protegido_pct')
                 .eq('vendedor_id', vendedor_id)
                 .ilike('nombre', f"%{termino_fuerte}%")
                 .gt('stock', 0)
@@ -257,7 +362,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
                 try:
                     query_genero = (
                         supabase.table('inventario')
-                        .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia')
+                        .select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, fecha_inicio_rotacion, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, precio_mercado_actualizado_en, permitir_bajo_valor_protegido_pct')
                         .eq('vendedor_id', vendedor_id)
                         .ilike('genero', f"%{termino_fuerte}%")
                         .gt('stock', 0)
@@ -273,7 +378,7 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
 
             # 🚀 FIX AUDITORÍA: El bloque de fallback ahora cuenta con timeout estricto para evitar bloqueos asíncronos.
             if not inventario:
-                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
+                fallback_query = supabase.table('inventario').select('id, nombre, categoria, genero, precio, costo, stock, estado_general, descripcion_detallada, fecha_alta, fecha_inicio_rotacion, descuento_max_porcentaje, precio_minimo_rotacion, usar_precio_mercado_como_destino, precio_mercado_referencia, precio_mercado_actualizado_en, permitir_bajo_valor_protegido_pct').eq('vendedor_id', vendedor_id).gt('stock', 0).limit(200)
                 res_inv = await asyncio.wait_for(async_db_execute(fallback_query, timeout_seg=8.0), timeout=10.0)
                 inventario = res_inv.data or []
 
@@ -344,28 +449,45 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
     # del contexto, exactamente como si no quedara stock.
     items_disponibles = _filtrar_items_reservados(vendedor_id, items_a_mostrar)
 
+    # 🆕 REFRESCO "JUSTO A TIEMPO" DEL VALOR DE MERCADO — en vez de revisar
+    # TODO el inventario contra PriceCharting cada cierto tiempo (caro, lento,
+    # innecesario para productos que nadie pregunta), solo se refresca el
+    # producto exacto que el cliente preguntó, y solo cuando la búsqueda
+    # encontró UN solo producto claro (no una lista de "tal vez es uno de
+    # estos 8" — ahí no hay un producto específico que refrescar).
+    #
+    # Protecciones:
+    #  - Solo aplica a videojuegos (es lo único con un PriceCharting real).
+    #  - Cooldown de 24h por producto (precio_mercado_actualizado_en) — si 5
+    #    clientes preguntan por el mismo juego el mismo día, solo el primero
+    #    dispara la consulta real.
+    #  - Timeout corto (4s): si PriceCharting tarda o falla, el bot sigue con
+    #    el último valor guardado en vez de dejar al cliente esperando.
+    if es_giro_videojuegos and len(items_disponibles) == 1:
+        await _refrescar_valor_mercado_justo_a_tiempo(vendedor_id, items_disponibles[0])
+
     lineas_contexto = ["--- INVENTARIO DISPONIBLE ---"]
     if not items_disponibles:
         lineas_contexto.append("(Sin productos disponibles que coincidan con la búsqueda — todo lo encontrado está agotado o reservado temporalmente)")
     else:
         for item in items_disponibles:
-            calculo_precio = _calcular_precio_vigente_con_rampa(item)
+            calculo_precio = calcular_precio_producto(item, dias_rotacion_max)
             precio = calculo_precio["precio_vigente"]
             genero_txt = str(item.get('genero') or '').strip()
             sufijo_genero = f" | Género: {genero_txt}" if genero_txt else ""
             condicion_txt = str(item.get('descripcion_detallada') or '').strip()
             sufijo_condicion = f" | Condición: {condicion_txt}" if condicion_txt else ""
             # 🆕 FIX: ya no es "Piso de descuento autorizado AHORA" basado en 3
-            # fechas fijas — ahora es el resultado de la rampa de rotación (si
-            # está activa) + el % de regateo configurado para este producto,
-            # ya combinados en un solo número final. Nunca se le pide a la IA
-            # que haga la cuenta de fechas/porcentajes — eso ya pasó aquí, en
+            # fechas fijas — ahora es el resultado del Motor de Precios
+            # completo (costo, mínimo manual, mercado, rotación y % de
+            # regateo, todos ya combinados en un solo número final). Nunca se
+            # le pide a la IA que haga la cuenta — eso ya pasó aquí, en
             # Python, antes de que el texto llegue al prompt.
             sufijo_descuento = ""
             if calculo_precio["piso_regateo"] is not None:
                 sufijo_descuento = f" | Piso de regateo autorizado AHORA: ${calculo_precio['piso_regateo']:.2f} MXN"
             elif calculo_precio["rotacion_activa"]:
-                sufijo_descuento = " | Este precio ya refleja la rotación por antigüedad — no hay regateo adicional autorizado sobre él"
+                sufijo_descuento = " | Este precio ya refleja su valor protegido — no hay regateo adicional autorizado sobre él"
             lineas_contexto.append(
                 f"[{item.get('categoria', 'N/A')}] {item.get('nombre', 'Producto')} - "
                 f"${precio:.2f} MXN | Stock: {item.get('stock', 0)} | "
@@ -373,6 +495,95 @@ async def obtener_contexto_inventario_rag(vendedor_id: str, consulta: str) -> st
             )
 
     return "\n".join(lineas_contexto)[:1800]
+
+
+async def _refrescar_valor_mercado_justo_a_tiempo(vendedor_id: str, item: dict) -> None:
+    """
+    🆕 Refresca precio_mercado_referencia para UN producto específico, justo
+    antes de que el bot responda sobre él — en vez de un cron job revisando
+    todo el catálogo (caro e innecesario). Modifica 'item' en el lugar
+    (in-place) para que la MISMA respuesta ya use el valor fresco, además de
+    guardarlo en la base para las próximas consultas.
+
+    No bloquea la respuesta del bot por mucho tiempo: timeout corto, y
+    cualquier fallo se ignora en silencio — el bot sigue con el valor
+    guardado anterior (puede estar desactualizado, pero sigue siendo mejor
+    que dejar al cliente esperando o romper la conversación).
+    """
+    item_id = item.get('id')
+    if item_id is None:
+        return
+
+    # 🛡️ Cooldown de 24h — no tiene caso re-consultar un producto que ya se
+    # refrescó hace unas horas.
+    actualizado_raw = item.get('precio_mercado_actualizado_en')
+    if actualizado_raw:
+        try:
+            texto_fecha = str(actualizado_raw).replace('Z', '+00:00')
+            dt_actualizado = datetime.fromisoformat(texto_fecha)
+            if dt_actualizado.tzinfo is None:
+                dt_actualizado = dt_actualizado.replace(tzinfo=timezone.utc)
+            horas_desde_refresco = (datetime.now(timezone.utc) - dt_actualizado).total_seconds() / 3600.0
+            if horas_desde_refresco < 24.0:
+                return
+        except Exception:
+            pass  # fecha rara/corrupta — mejor refrescar de más que quedarse con un dato sospechoso
+
+    try:
+        from ai_auditor_scraper import consultar_precio_pricecharting
+        nombre = str(item.get('nombre', '')).strip()
+        consola = str(item.get('categoria', '')).strip()
+        if not nombre:
+            return
+
+        resultado = await asyncio.wait_for(
+            consultar_precio_pricecharting(nombre, consola, vendedor_id, 0, "comun"),
+            timeout=4.0  # 🛡️ corto a propósito — nunca debe sentirse como que el bot "se congeló"
+        )
+        if not isinstance(resultado, dict):
+            return
+        mxn = resultado.get("mxn", {})
+        if not isinstance(mxn, dict):
+            return
+
+        # Elegimos el precio que corresponde a la condición física real del
+        # producto — mismo criterio que ya usa PanelVideojuegos al guardar.
+        estado_txt = str(item.get('estado_general', '')).lower()
+        if "nuevo" in estado_txt or "sellado" in estado_txt:
+            nuevo_valor = float(mxn.get("new", 0) or 0)
+        elif "completo" in estado_txt or "cib" in estado_txt:
+            nuevo_valor = float(mxn.get("cib", 0) or 0)
+        elif "sin librito" in estado_txt or "sin caja" in estado_txt:
+            nuevo_valor = float(mxn.get("incompleto", mxn.get("incomplete", 0)) or 0)
+        else:
+            nuevo_valor = float(mxn.get("loose", 0) or 0)
+        if nuevo_valor <= 0:
+            nuevo_valor = float(mxn.get("cib", 0) or 0)  # respaldo: CIB es el más común si no hubo match de condición
+
+        if nuevo_valor <= 0:
+            return  # PriceCharting no tenía nada útil — no sobreescribimos con basura
+
+        ahora_iso = datetime.now(timezone.utc).isoformat()
+        # Actualiza la base para las próximas consultas (fire-and-forget real
+        # no aplica aquí — si esto falla, no es grave, solo se reintentará en
+        # la próxima pregunta de un cliente sobre este mismo producto).
+        await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('inventario').update({"precio_mercado_referencia": nuevo_valor, "precio_mercado_actualizado_en": ahora_iso})
+                .eq('id', item_id).eq('vendedor_id', vendedor_id),
+                allow_retry=False
+            ),
+            timeout=5.0
+        )
+        # 🆕 Y actualiza el diccionario EN MEMORIA — así esta misma respuesta
+        # del bot ya usa el valor fresco, sin esperar a la siguiente consulta.
+        item['precio_mercado_referencia'] = nuevo_valor
+        item['precio_mercado_actualizado_en'] = ahora_iso
+        logger.info(f"💰 [PRICING ENGINE] Refresco justo a tiempo: '{item.get('nombre')}' → ${nuevo_valor:.2f} MXN de mercado.")
+    except asyncio.TimeoutError:
+        logger.warning(f"⏱️ [PRICING ENGINE] Timeout refrescando valor de mercado para '{item.get('nombre', '?')}' — se sigue con el valor guardado.")
+    except Exception as e:
+        logger.warning(f"⚠️ [PRICING ENGINE] No se pudo refrescar valor de mercado para '{item.get('nombre', '?')}' (no crítico): {e}")
 
 
 
