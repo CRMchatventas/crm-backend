@@ -1496,6 +1496,9 @@ class EditarItemVisorRequest(BaseModel):
     precio_minimo_rotacion: Optional[float] = None
     usar_precio_mercado_como_destino: Optional[bool] = None
     precio_mercado_referencia: Optional[float] = None
+    # 🆕 MOTOR DE PRECIOS: % explícito para autorizar vender bajo el valor
+    # protegido (costo/mínimo/mercado) — None = no tocar lo que ya tenía.
+    permitir_bajo_valor_protegido_pct: Optional[float] = None
     descripcion_detallada: Optional[str] = None
     tipo_producto: Optional[str] = None
 
@@ -1551,18 +1554,31 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
         campos["usar_precio_mercado_como_destino"] = datos.usar_precio_mercado_como_destino
         if datos.precio_mercado_referencia is not None:
             campos["precio_mercado_referencia"] = datos.precio_mercado_referencia
+        # 🆕 MOTOR DE PRECIOS: % explícito para autorizar vender bajo el valor
+        # protegido — 100 (nunca) si no se manda nada.
+        if datos.permitir_bajo_valor_protegido_pct is not None:
+            campos["permitir_bajo_valor_protegido_pct"] = max(0.0, min(100.0, datos.permitir_bajo_valor_protegido_pct))
         if datos.id_catalogo and datos.id_catalogo.strip():
             campos["id_catalogo"] = datos.id_catalogo.strip()[:100]
 
         existente = None
         if datos.id_catalogo and datos.id_catalogo.strip():
             res_check = await asyncio.wait_for(
-                async_db_execute(supabase.table('inventario').select('id').eq('vendedor_id', str(_sesion)).eq('id_catalogo', datos.id_catalogo.strip()).limit(1)),
+                # 🆕 MOTOR DE PRECIOS: se trae también el stock actual, para
+                # poder comparar contra el stock nuevo y detectar un reabasto
+                # real (0 → más de 0) antes de actualizar.
+                async_db_execute(supabase.table('inventario').select('id, stock').eq('vendedor_id', str(_sesion)).eq('id_catalogo', datos.id_catalogo.strip()).limit(1)),
                 timeout=5.0
             )
             existente = res_check.data[0] if res_check.data else None
 
         if existente:
+            # 🆕 MOTOR DE PRECIOS: reabasto real (stock 0→>0) reinicia el
+            # ciclo de rotación. Un cambio de precio, por sí solo, NUNCA lo
+            # reinicia — ver _decidir_reinicio_rotacion para el porqué.
+            if _decidir_reinicio_rotacion(existente.get('stock'), campos.get('stock')):
+                campos["fecha_inicio_rotacion"] = datetime.now(timezone.utc).isoformat()
+                logger.info(f"🔄 [TRACE:{trace_id}] Reabasto detectado para id={existente['id']} — rotación reiniciada.")
             # FIX FASE 1: allow_retry=False por mutación (UPDATE)
             resultado = await asyncio.wait_for(
                 async_db_execute(supabase.table('inventario').update(campos).eq('id', existente['id']).eq('vendedor_id', str(_sesion)), allow_retry=False),
@@ -1581,6 +1597,9 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
         else:
             await _verificar_cupo_inventario(str(_sesion), 1, trace_id)
             campos["vendedor_id"] = str(_sesion)
+            # 🆕 MOTOR DE PRECIOS: un producto nuevo SIEMPRE arranca su propio
+            # ciclo de rotación desde hoy — no hereda nada de ningún lado.
+            campos["fecha_inicio_rotacion"] = datetime.now(timezone.utc).isoformat()
             resultado = await asyncio.wait_for(
                 async_db_execute(supabase.table('inventario').insert(campos), allow_retry=False),
                 timeout=10.0
@@ -1616,6 +1635,31 @@ async def cargar_inventario(vendedor_id: str = Depends(verificar_sesion_b2b), tr
             if isinstance(extra, dict):
                 for k, v in extra.items():
                     if k not in it or it.get(k) in (None, ""): it[k] = v
+
+        # 🆕 MOTOR DE PRECIOS: se calcula aquí, una sola vez por producto, con
+        # calcular_precio_producto() — la MISMA función que usa el bot. El
+        # Visor nunca debe reimplementar esta fórmula en GDScript; solo
+        # muestra lo que el backend ya calculó. Esto es lo que alimenta la
+        # columna de solo-lectura "Precio Vigente" + el estado/motivo.
+        try:
+            from db_rag_scraper import calcular_precio_producto
+            res_conf = await asyncio.wait_for(
+                async_db_execute(supabase.table('configuracion_bot').select('dias_rotacion_max').eq('vendedor_id', str(vendedor_id)).limit(1), timeout_seg=5.0),
+                timeout=6.0
+            )
+            dias_rotacion_max = int(res_conf.data[0].get('dias_rotacion_max') or 90) if res_conf.data else 90
+            for it in items:
+                try:
+                    calculo = calcular_precio_producto(it, dias_rotacion_max)
+                    it["precio_vigente_calculado"] = calculo["precio_vigente"]
+                    it["estado_precio"] = calculo["estado"]
+                    it["motivo_precio"] = calculo["motivo"]
+                    it["dias_en_rotacion"] = calculo["dias_transcurridos"]
+                except Exception:
+                    pass  # un producto con datos corruptos no debe tumbar la carga de todo el inventario
+        except Exception as e:
+            logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo calcular precios vigentes para el Visor (no crítico, se muestran sin esto): {e}")
+
         return {"status": "ok", "inventario": items}
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en cargar_inventario: {e}")
@@ -1651,10 +1695,32 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
             campos["usar_precio_mercado_como_destino"] = item.usar_precio_mercado_como_destino
         if item.precio_mercado_referencia is not None:
             campos["precio_mercado_referencia"] = item.precio_mercado_referencia
+        # 🆕 MOTOR DE PRECIOS
+        if item.permitir_bajo_valor_protegido_pct is not None:
+            campos["permitir_bajo_valor_protegido_pct"] = max(0.0, min(100.0, item.permitir_bajo_valor_protegido_pct))
         if item.descripcion_detallada is not None:
             campos["descripcion_detallada"] = bleach.clean(item.descripcion_detallada.strip(), tags=[], strip=True)[:2000]
         if item.tipo_producto is not None:
             campos["tipo_producto"] = bleach.clean(item.tipo_producto.strip(), tags=[], strip=True)[:100] if item.tipo_producto.strip() else None
+
+        # 🆕 MOTOR DE PRECIOS: reabasto real (stock 0→>0) reinicia el ciclo
+        # de rotación — se compara contra el stock que ya tenía guardado
+        # ANTES de aplicar este cambio. Un cambio de precio por sí solo
+        # nunca reinicia nada (ver _decidir_reinicio_rotacion).
+        try:
+            res_stock_previo = await asyncio.wait_for(
+                async_db_execute(supabase.table('inventario').select('stock').eq('id', item.id).eq('vendedor_id', str(vendedor_id)).limit(1)),
+                timeout=5.0
+            )
+            stock_previo = res_stock_previo.data[0].get('stock') if res_stock_previo.data else None
+            if _decidir_reinicio_rotacion(stock_previo, campos.get('stock')):
+                campos["fecha_inicio_rotacion"] = datetime.now(timezone.utc).isoformat()
+                logger.info(f"🔄 [TRACE:{trace_id}] Reabasto detectado para id={item.id} (stock {stock_previo}→{campos.get('stock')}) — rotación reiniciada.")
+        except Exception as e:
+            # 🛡️ No crítico: si esta verificación falla, simplemente no se
+            # reinicia la rotación esta vez — el resto de la edición continúa
+            # con normalidad, no bloquea el guardado del producto.
+            logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo verificar stock previo para detectar reabasto (no crítico): {e}")
 
         res = await asyncio.wait_for(async_db_execute(supabase.table("inventario").update(campos).eq("id", item.id).eq("vendedor_id", str(vendedor_id)), allow_retry=False), timeout=10.0)
         return {"status": "ok", "updated": len(res.data) if res.data else 0}
@@ -1662,6 +1728,39 @@ async def editar_item_visor(item: EditarItemVisorRequest, vendedor_id: str = Dep
     except Exception as e:
         logger.exception(f"❌ [TRACE:{trace_id}] Fallo en editar_item_visor: {e}")
         raise HTTPException(status_code=500, detail="Error interno al editar ítem.")
+
+
+class ReiniciarRotacionRequest(BaseModel):
+    id: Optional[int] = None
+
+# 🆕 MOTOR DE PRECIOS: la ÚNICA otra forma de reiniciar fecha_inicio_rotacion
+# además del reabasto automático (stock 0→>0) — esta es la acción EXPLÍCITA
+# y consciente que el vendedor puede pulsar a propósito (ej. decidió que un
+# producto "empieza de cero" su ciclo comercial sin que haya habido un
+# reabasto real). A propósito NO existe ningún otro disparador automático —
+# ni cambiar el precio de lista, ni editar cualquier otro campo, reinician
+# esto solos.
+@router.post("/api/reiniciar_rotacion")
+async def reiniciar_rotacion(datos: ReiniciarRotacionRequest, vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
+    logger.info(f"🔄 [TRACE:{trace_id}] Reinicio manual de rotación solicitado para id={datos.id}")
+    try:
+        if not datos.id:
+            raise HTTPException(status_code=400, detail="ID requerido.")
+        res = await asyncio.wait_for(
+            async_db_execute(
+                supabase.table('inventario').update({"fecha_inicio_rotacion": datetime.now(timezone.utc).isoformat()})
+                .eq('id', datos.id).eq('vendedor_id', str(vendedor_id)),
+                allow_retry=False
+            ),
+            timeout=10.0
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Producto no encontrado.")
+        return {"status": "ok"}
+    except HTTPException: raise
+    except Exception as e:
+        logger.exception(f"❌ [TRACE:{trace_id}] Fallo en reiniciar_rotacion: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al reiniciar la rotación.")
 
 @router.post("/api/borrar_item")
 async def borrar_item(item: BorrarItemRequest, vendedor_id: str = Depends(verificar_sesion_b2b), trace_id: str = Depends(obtener_trace_id)):
@@ -1932,16 +2031,17 @@ async def store_buscar(giro: str, q: str, request: Request, trace_id: str = Depe
         telefonos = {r['vendedor_id']: str(r.get('numero_bot_whatsapp', '') or '') for r in (res_tel.data or [])}
 
         resultados = []
-        from db_rag_scraper import _calcular_precio_vigente_con_rampa
+        from db_rag_scraper import calcular_precio_producto
         for item in (res_inv.data or []):
             vid = item.get('vendedor_id')
             v = mapa_vendedores.get(vid, {})
             precio = float(item.get('precio') or 0)
             # 🛡️ FIX: antes usaba 'precio_min_inmediato' (sistema viejo de 3
             # fechas fijas, ya retirado) como señal de "oferta especial" —
-            # ahora usa el precio REAL vigente de la rampa de rotación, que
-            # de verdad refleja si este producto está más barato hoy.
-            calculo = _calcular_precio_vigente_con_rampa(item)
+            # ahora usa el precio REAL vigente del Motor de Precios, que de
+            # verdad refleja si este producto está más barato (o más caro,
+            # si el mercado subió) hoy.
+            calculo = calcular_precio_producto(item)
             precio_especial = calculo["precio_vigente"]
             tiene_oferta = calculo["rotacion_activa"] and precio_especial < precio
             resultados.append({
@@ -2023,12 +2123,12 @@ async def catalogo_publico(vendedor_id: str, q: str = "", trace_id: str = Depend
         res_inv = await asyncio.wait_for(async_db_execute(query.order('nombre').limit(1000)), timeout=15.0)
 
         productos = []
-        from db_rag_scraper import _calcular_precio_vigente_con_rampa
+        from db_rag_scraper import calcular_precio_producto
         for item in (res_inv.data or []):
             precio = float(item.get('precio') or 0)
             # 🛡️ FIX: mismo cambio que en la búsqueda cruzada — precio real
-            # de la rampa de rotación, no el campo viejo retirado.
-            calculo = _calcular_precio_vigente_con_rampa(item)
+            # del Motor de Precios, no el campo viejo retirado.
+            calculo = calcular_precio_producto(item)
             precio_especial = calculo["precio_vigente"]
             tiene_precio_especial = calculo["rotacion_activa"] and precio_especial < precio
             productos.append({
@@ -2361,12 +2461,13 @@ COLUMNAS_CSV_VIDEOJUEGOS = [
     # "actualiza este producto" en vez de crear uno duplicado.
     "id", "codigo_barras", "nombre", "plataforma", "cantidad",
     "precio_compra", "precio_venta",
-    # 🆕 SISTEMA NUEVO DE DESCUENTOS — reemplaza los 3 precios mínimos por
-    # fecha fija (que generaban confusión: ¿se suman? ¿se reemplazan?). Ahora
-    # son 2 controles independientes: cuánto puede regatear el bot en
-    # conversación normal (%), y a dónde quieres que llegue el precio si el
-    # producto no se vende en 90 días (deja vacío para apagar esto último).
-    "descuento_max_pct", "precio_minimo_rotacion", "usar_precio_mercado",
+    # 🆕 MOTOR DE PRECIOS — 4 controles independientes: cuánto puede
+    # regatear el bot en conversación normal (%), a dónde quieres que
+    # llegue el precio si el producto no se vende en 90 días, si ese
+    # destino debe tomarse del precio de mercado en vez de un número
+    # manual, y qué tanto autorizas vender por debajo de ese valor
+    # protegido si de verdad quieres liquidar (100% = nunca, default).
+    "descuento_max_pct", "precio_minimo_rotacion", "usar_precio_mercado", "permitir_bajo_mercado_pct",
     "estado_general", "descripcion_detallada", "genero", "tipo_producto"
 ]
 COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_compra", "precio_venta", "cantidad", "descripcion"]
@@ -2375,7 +2476,7 @@ COLUMNAS_CSV_GENERICO = ["id", "nombre", "tipo_producto", "categoria", "precio_c
 # tipo "nuevo/usado" en vez de la nota libre que en realidad es ("rayado",
 # "le falta el case", etc. — lo que el bot lee para describirle el estado
 # real al cliente). Se renombra para que sea explícito.
-EJEMPLO_CSV_VIDEOJUEGOS = ["", "", "Batman Arkham Knight", "PS4", "1", "300", "550", "20", "", "NO", "Completo", "Disco con rayones leves, funciona perfecto", "Acción", "Videojuegos"]
+EJEMPLO_CSV_VIDEOJUEGOS = ["", "", "Batman Arkham Knight", "PS4", "1", "300", "550", "20", "", "NO", "100", "Completo", "Disco con rayones leves, funciona perfecto", "Acción", "Videojuegos"]
 EJEMPLO_CSV_GENERICO = ["", "Producto de ejemplo", "Mercancía General", "Categoría A", "100", "200", "1", "Descripción breve"]
 
 INSTRUCCIONES_CSV_VIDEOJUEGOS = [
@@ -2389,6 +2490,7 @@ INSTRUCCIONES_CSV_VIDEOJUEGOS = [
     "% máximo que el bot puede regatear en conversación normal — ej. 20. Déjalo vacío para no permitir regateo en este producto",
     "Precio mínimo al que quieres llegar si NO se vende en 90 días (baja poco a poco, nunca de golpe) — déjalo VACÍO para que este producto nunca baje de precio solo, sin importar cuánto tarde en venderse",
     "SI o NO — si pones SI, el destino de la baja de precio es el último precio de mercado que consultaste en el Visor, en vez del número de la columna anterior",
+    "% que autorizas vender por debajo de tu valor real protegido (costo/mínimo/mercado) si de verdad necesitas liquidar — déjalo VACÍO o en 100 para nunca vender bajo ese valor (recomendado)",
     "Estado físico: Nuevo/Sellado, Completo CIB, Solo Disco, etc.",
     "Notas o defectos visibles — texto libre, ej. 'rayón leve en el disco'",
     "Género: Acción, Aventura, RPG, Deportes, etc.",
@@ -2599,10 +2701,11 @@ _MAPA_CSV_A_CAMPO_REAL = {
     "precio_venta": "precio",
     "cantidad": "stock",
     "codigo_barras": "codigo_barras",
-    # 🆕 Sistema nuevo de descuentos — reemplaza precio_min_inmediato/24h/72h.
+    # 🆕 MOTOR DE PRECIOS — reemplaza precio_min_inmediato/24h/72h.
     "descuento_max_pct": "descuento_max_porcentaje",
     "precio_minimo_rotacion": "precio_minimo_rotacion",
     "usar_precio_mercado": "usar_precio_mercado_como_destino",
+    "permitir_bajo_mercado_pct": "permitir_bajo_valor_protegido_pct",
 }
 
 @router.get("/api/exportar_inventario")
@@ -2693,6 +2796,28 @@ async def _verificar_cupo_inventario(vendedor_id: str, cuantos_nuevos: int, trac
             detail=f"Tu plan permite hasta {limite} productos. Tienes {actuales} y esto agregaría {cuantos_nuevos} más. Elimina productos sin uso, o contacta a soporte para ampliar tu plan."
         )
 
+def _decidir_reinicio_rotacion(stock_anterior, stock_nuevo) -> bool:
+    """
+    🆕 MOTOR DE PRECIOS: decide si un cambio de stock cuenta como "nuevo
+    ciclo de venta" y debe reiniciar fecha_inicio_rotacion.
+
+    Solo reinicia con un reabasto real: el producto estaba en 0 (o sin
+    stock todavía) y ahora tiene unidades de nuevo. A propósito, esto NUNCA
+    pasa por cambiar el precio de lista — si no, bastaría con subir el
+    precio $1 cada cierto tiempo para que el producto nunca llegara de
+    verdad a su mínimo de rotación.
+    """
+    try:
+        anterior = int(stock_anterior) if stock_anterior is not None else 0
+    except (TypeError, ValueError):
+        anterior = 0
+    try:
+        nuevo = int(stock_nuevo) if stock_nuevo is not None else 0
+    except (TypeError, ValueError):
+        nuevo = 0
+    return anterior <= 0 and nuevo > 0
+
+
 def _safe_float_importacion(valor) -> float:
     try:
         if valor is None or str(valor).strip() == "": return 0.0
@@ -2738,7 +2863,9 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
         # en vez de crear un duplicado.
         vid_str = str(_sesion)
         res_existente = await asyncio.wait_for(
-            async_db_execute(supabase.table('inventario').select('id, nombre, codigo_barras, estado_general').eq('vendedor_id', vid_str)),
+            # 🆕 MOTOR DE PRECIOS: se trae también el stock actual, para poder
+            # comparar contra el stock nuevo del CSV y detectar reabasto real.
+            async_db_execute(supabase.table('inventario').select('id, nombre, codigo_barras, estado_general, stock').eq('vendedor_id', vid_str)),
             timeout=15.0
         )
         existentes_por_id = {}
@@ -2843,6 +2970,22 @@ async def importar_inventario(datos: ImportarInventarioRequest, _sesion: str = D
                 "usar_precio_mercado_como_destino": _safe_bool_si_no(item.get("usar_precio_mercado")),
                 "atributos_extra": item.get("atributos_extra", {}) or {},
             }
+            # 🆕 MOTOR DE PRECIOS: % de autorización para vender bajo el valor
+            # protegido — solo se incluye si la columna trae algo, para no
+            # pisar un valor ya configurado con un 100 por defecto sin querer.
+            pct_protegido_txt = str(item.get("permitir_bajo_mercado_pct", "")).strip()
+            if pct_protegido_txt != "":
+                campos["permitir_bajo_valor_protegido_pct"] = max(0.0, min(100.0, _safe_float_importacion(pct_protegido_txt)))
+
+            # 🆕 MOTOR DE PRECIOS: reabasto real (stock 0→>0) reinicia el
+            # ciclo de rotación — se compara contra el stock que ya tenía
+            # ANTES de este reimport. Un producto NUEVO siempre arranca su
+            # propio ciclo desde hoy.
+            if es_actualizacion and registro_existente is not None:
+                if _decidir_reinicio_rotacion(registro_existente.get('stock'), campos.get('stock')):
+                    campos["fecha_inicio_rotacion"] = datetime.now(timezone.utc).isoformat()
+            elif not es_actualizacion:
+                campos["fecha_inicio_rotacion"] = datetime.now(timezone.utc).isoformat()
 
             if es_actualizacion:
                 filas_para_actualizar.append({"id": id_objetivo, "campos": campos})
