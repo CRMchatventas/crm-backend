@@ -489,6 +489,10 @@ class NuevoArticulo(BaseSchema):
     precio_minimo_rotacion: Optional[float] = Field(default=None, ge=0)
     usar_precio_mercado_como_destino: bool = False
     precio_mercado_referencia: Optional[float] = Field(default=None, ge=0)
+    # 🆕 MOTOR DE PRECIOS: % explícito para autorizar vender bajo el valor
+    # protegido (costo/mínimo/mercado) — 100 = nunca (default), decisión
+    # consciente del vendedor si se baja de ahí.
+    permitir_bajo_valor_protegido_pct: Optional[float] = Field(default=None, ge=0, le=100)
     stock: int = Field(default=1, ge=0)
     codigo_barras: str = ""
     url_portada: str = ""
