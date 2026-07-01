@@ -1717,6 +1717,35 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
     logger.info(f"📦 [TRACE:{trace_id}] Guardando inventario '{datos.nombre}' para {_sesion}")
     try:
         costo_final = datos.costo if datos.costo > 0 else datos.precio_compra
+        # 🆕 CÓDIGO DE BARRAS AUTO-GENERADO: si el producto llega sin código
+        # (o con el prefijo "GEN-" que era el placeholder viejo del Visor),
+        # se auto-asigna uno consecutivo por vendedor en formato 4 dígitos
+        # cero-relleno (0001, 0002, …). El vendedor puede reemplazarlo
+        # después escaneando o escribiendo desde el Visor — el auto-generado
+        # es solo un "número guia" para que el producto no quede huérfano.
+        codigo_barras_final = bleach.clean(datos.codigo_barras.strip(), tags=[], strip=True)[:100] if datos.codigo_barras.strip() else ""
+        if not codigo_barras_final or codigo_barras_final.startswith("GEN-"):
+            try:
+                res_max_cod = await asyncio.wait_for(
+                    async_db_execute(
+                        supabase.table('inventario').select('codigo_barras')
+                        .eq('vendedor_id', str(_sesion))
+                        .not_.is_('codigo_barras', 'null')
+                        .limit(1000)
+                    ),
+                    timeout=8.0
+                )
+                max_num = 0
+                for row in (res_max_cod.data or []):
+                    cb = str(row.get('codigo_barras', '') or '').strip()
+                    # Solo considerar códigos puramente numéricos (los consecutivos nuestros)
+                    if cb.isdigit():
+                        max_num = max(max_num, int(cb))
+                codigo_barras_final = str(max_num + 1).zfill(4)
+            except Exception as e:
+                logger.warning(f"⚠️ [TRACE:{trace_id}] No se pudo auto-generar código de barras (usará None): {e}")
+                codigo_barras_final = None
+
         campos = {
             "nombre": bleach.clean(datos.nombre.strip(), tags=[], strip=True)[:200],
             "categoria": bleach.clean(datos.categoria.strip(), tags=[], strip=True)[:100] if datos.categoria.strip() else "General",
@@ -1727,13 +1756,7 @@ async def guardar_inventario(datos: NuevoArticulo, _sesion: str = Depends(verifi
             "costo": costo_final,
             "stock": datos.stock,
             "precio_minimo_bot": int(datos.precio_minimo_bot),
-            # 🛡️ FIX (causa probable del 422 persistente en TODAS las altas):
-            # esta columna es int8 en Supabase, pero el esquema de Pydantic
-            # la tipa como float — siempre se mandaba con decimales (0.0,
-            # etc.) sin importar lo que el usuario llenara en el formulario,
-            # lo cual explica que el error fuera 100% consistente. Mismo
-            # patrón que ya se corrigió para 'id' en editar/borrar.
-            "codigo_barras": bleach.clean(datos.codigo_barras.strip(), tags=[], strip=True)[:100] if datos.codigo_barras.strip() else None,
+            "codigo_barras": codigo_barras_final or None,
             "url_portada": datos.url_portada.strip()[:500] if datos.url_portada.strip() else None,
             "descripcion_detallada": bleach.clean(datos.descripcion_detallada.strip(), tags=[], strip=True)[:2000],
             "atributos_extra": datos.atributos_extra or {},
